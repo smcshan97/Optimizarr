@@ -1,0 +1,286 @@
+"""
+Main API routes for Optimizarr.
+"""
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from typing import List, Optional
+
+from app.api.models import (
+    ProfileCreate, ProfileResponse,
+    ScanRootCreate, ScanRootResponse,
+    QueueItemResponse, QueueUpdateRequest,
+    StatsResponse, MessageResponse
+)
+from app.api.dependencies import get_current_user, get_current_admin_user
+from app.database import db
+from app.scanner import scanner
+from app.encoder import encoder_pool
+
+router = APIRouter()
+
+
+# Profile Endpoints
+@router.get("/profiles", response_model=List[ProfileResponse])
+async def list_profiles(current_user: dict = Depends(get_current_user)):
+    """Get all encoding profiles."""
+    profiles = db.get_profiles()
+    return profiles
+
+
+@router.post("/profiles", response_model=ProfileResponse, status_code=status.HTTP_201_CREATED)
+async def create_profile(
+    profile: ProfileCreate,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Create a new encoding profile (admin only)."""
+    try:
+        profile_id = db.create_profile(**profile.model_dump())
+        created_profile = db.get_profile(profile_id)
+        return created_profile
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create profile: {str(e)}"
+        )
+
+
+@router.get("/profiles/{profile_id}", response_model=ProfileResponse)
+async def get_profile(
+    profile_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get a specific profile by ID."""
+    profile = db.get_profile(profile_id)
+    
+    if not profile:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Profile {profile_id} not found"
+        )
+    
+    return profile
+
+
+@router.delete("/profiles/{profile_id}", response_model=MessageResponse)
+async def delete_profile(
+    profile_id: int,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Delete a profile (admin only)."""
+    success = db.delete_profile(profile_id)
+    
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Profile {profile_id} not found"
+        )
+    
+    return MessageResponse(message=f"Profile {profile_id} deleted")
+
+
+# Scan Root Endpoints
+@router.get("/scan-roots", response_model=List[ScanRootResponse])
+async def list_scan_roots(current_user: dict = Depends(get_current_user)):
+    """Get all scan roots."""
+    roots = db.get_scan_roots()
+    return roots
+
+
+@router.post("/scan-roots", response_model=ScanRootResponse, status_code=status.HTTP_201_CREATED)
+async def create_scan_root(
+    scan_root: ScanRootCreate,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Create a new scan root (admin only)."""
+    try:
+        root_id = db.create_scan_root(
+            path=scan_root.path,
+            profile_id=scan_root.profile_id,
+            enabled=scan_root.enabled,
+            recursive=scan_root.recursive
+        )
+        
+        # Get created scan root
+        roots = db.get_scan_roots()
+        created_root = next((r for r in roots if r['id'] == root_id), None)
+        
+        return created_root
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to create scan root: {str(e)}"
+        )
+
+
+@router.delete("/scan-roots/{root_id}", response_model=MessageResponse)
+async def delete_scan_root(
+    root_id: int,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Delete a scan root (admin only)."""
+    success = db.delete_scan_root(root_id)
+    
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scan root {root_id} not found"
+        )
+    
+    return MessageResponse(message=f"Scan root {root_id} deleted")
+
+
+# Queue Endpoints
+@router.get("/queue", response_model=List[QueueItemResponse])
+async def list_queue(
+    status: Optional[str] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get queue items, optionally filtered by status."""
+    items = db.get_queue_items(status=status)
+    return items
+
+
+@router.post("/queue/scan", response_model=MessageResponse)
+async def trigger_scan(
+    background_tasks: BackgroundTasks,
+    root_id: Optional[int] = None,
+    current_user: dict = Depends(get_current_user)
+):
+    """Trigger a scan of all scan roots or a specific root."""
+    def run_scan():
+        if root_id:
+            added = scanner.scan_root(root_id)
+        else:
+            added = scanner.scan_all_roots()
+        print(f"Scan completed: {added} files added to queue")
+    
+    background_tasks.add_task(run_scan)
+    
+    return MessageResponse(
+        message=f"Scan started for {'root ' + str(root_id) if root_id else 'all roots'}"
+    )
+
+
+@router.patch("/queue/{item_id}", response_model=MessageResponse)
+async def update_queue_item(
+    item_id: int,
+    update: QueueUpdateRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    """Update a queue item (e.g., change priority or status)."""
+    try:
+        update_data = update.model_dump(exclude_none=True)
+        db.update_queue_item(item_id, **update_data)
+        
+        return MessageResponse(message=f"Queue item {item_id} updated")
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to update queue item: {str(e)}"
+        )
+
+
+@router.delete("/queue/{item_id}", response_model=MessageResponse)
+async def delete_queue_item(
+    item_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """Remove an item from the queue."""
+    success = db.delete_queue_item(item_id)
+    
+    if not success:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Queue item {item_id} not found"
+        )
+    
+    return MessageResponse(message=f"Queue item {item_id} deleted")
+
+
+@router.post("/queue/clear", response_model=MessageResponse)
+async def clear_queue(
+    status: Optional[str] = None,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Clear the queue (admin only). Optionally filter by status."""
+    db.clear_queue(status=status)
+    
+    message = f"Queue cleared"
+    if status:
+        message = f"Cleared queue items with status '{status}'"
+    
+    return MessageResponse(message=message)
+
+
+# Control Endpoints
+@router.post("/control/start", response_model=MessageResponse)
+async def start_encoding(
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user)
+):
+    """Start processing the encoding queue."""
+    if encoder_pool.is_running:
+        return MessageResponse(
+            message="Encoder is already running",
+            success=False
+        )
+    
+    background_tasks.add_task(encoder_pool.process_queue)
+    
+    return MessageResponse(message="Encoding started")
+
+
+@router.post("/control/stop", response_model=MessageResponse)
+async def stop_encoding(current_user: dict = Depends(get_current_user)):
+    """Stop processing the encoding queue."""
+    if not encoder_pool.is_running:
+        return MessageResponse(
+            message="Encoder is not running",
+            success=False
+        )
+    
+    encoder_pool.stop()
+    
+    return MessageResponse(message="Encoding stopped")
+
+
+# Statistics Endpoints
+@router.get("/stats", response_model=StatsResponse)
+async def get_statistics(current_user: dict = Depends(get_current_user)):
+    """Get system statistics."""
+    queue_items = db.get_queue_items()
+    
+    # Count by status
+    pending = len([i for i in queue_items if i['status'] == 'pending'])
+    processing = len([i for i in queue_items if i['status'] == 'processing'])
+    completed = len([i for i in queue_items if i['status'] == 'completed'])
+    failed = len([i for i in queue_items if i['status'] == 'failed'])
+    
+    # Get history stats
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_files,
+                COALESCE(SUM(savings_bytes), 0) as total_saved
+            FROM history
+        """)
+        row = cursor.fetchone()
+        total_files = row[0] if row else 0
+        total_saved = row[1] if row else 0
+    
+    return StatsResponse(
+        total_files_processed=total_files,
+        total_space_saved_bytes=total_saved,
+        total_space_saved_gb=round(total_saved / (1024**3), 2),
+        queue_pending=pending,
+        queue_processing=processing,
+        queue_completed=completed,
+        queue_failed=failed
+    )
+
+
+# Health check
+@router.get("/health")
+async def health_check():
+    """Simple health check endpoint (no auth required)."""
+    return {"status": "ok", "service": "optimizarr"}

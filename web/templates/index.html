@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Optimizarr - Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+</head>
+<body class="bg-gray-900 text-gray-100">
+    <!-- Navigation -->
+    <nav class="bg-gray-800 border-b border-gray-700 px-6 py-4">
+        <div class="flex justify-between items-center">
+            <div>
+                <h1 class="text-2xl font-bold text-blue-400">Optimizarr</h1>
+                <p class="text-sm text-gray-400">Automated Media Optimization</p>
+            </div>
+            <div class="flex items-center gap-4">
+                <span id="username" class="text-gray-300"></span>
+                <button onclick="logout()" class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded text-sm">
+                    Logout
+                </button>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <div class="container mx-auto px-6 py-8">
+        <!-- Stats Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+            <div class="bg-gray-800 p-6 rounded-lg">
+                <h3 class="text-gray-400 text-sm mb-2">Space Saved</h3>
+                <p id="spaceSaved" class="text-3xl font-bold text-green-400">0 GB</p>
+            </div>
+            <div class="bg-gray-800 p-6 rounded-lg">
+                <h3 class="text-gray-400 text-sm mb-2">Files Processed</h3>
+                <p id="filesProcessed" class="text-3xl font-bold text-blue-400">0</p>
+            </div>
+            <div class="bg-gray-800 p-6 rounded-lg">
+                <h3 class="text-gray-400 text-sm mb-2">Queue Pending</h3>
+                <p id="queuePending" class="text-3xl font-bold text-yellow-400">0</p>
+            </div>
+            <div class="bg-gray-800 p-6 rounded-lg">
+                <h3 class="text-gray-400 text-sm mb-2">Active Jobs</h3>
+                <p id="activeJobs" class="text-3xl font-bold text-purple-400">0</p>
+            </div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="mb-6">
+            <div class="border-b border-gray-700">
+                <nav class="flex gap-8">
+                    <button onclick="switchTab('queue')" id="tab-queue" class="tab-button active">Queue</button>
+                    <button onclick="switchTab('profiles')" id="tab-profiles" class="tab-button">Profiles</button>
+                    <button onclick="switchTab('scanroots')" id="tab-scanroots" class="tab-button">Scan Roots</button>
+                </nav>
+            </div>
+        </div>
+
+        <!-- Tab Content -->
+        <div id="content-queue" class="tab-content">
+            <div class="bg-gray-800 rounded-lg p-6">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-xl font-bold">Encoding Queue</h2>
+                    <div class="flex gap-3">
+                        <button onclick="scanRoots()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">
+                            Scan for Files
+                        </button>
+                        <button onclick="startEncoding()" class="bg-green-600 hover:bg-green-700 px-4 py-2 rounded">
+                            Start Encoding
+                        </button>
+                        <button onclick="stopEncoding()" class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded">
+                            Stop
+                        </button>
+                    </div>
+                </div>
+                
+                <div id="queueTable" class="overflow-x-auto">
+                    <p class="text-gray-400">Loading queue...</p>
+                </div>
+            </div>
+        </div>
+
+        <div id="content-profiles" class="tab-content hidden">
+            <div class="bg-gray-800 rounded-lg p-6">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-xl font-bold">Encoding Profiles</h2>
+                    <button onclick="showCreateProfileForm()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">
+                        New Profile
+                    </button>
+                </div>
+                
+                <div id="profilesList">
+                    <p class="text-gray-400">Loading profiles...</p>
+                </div>
+            </div>
+        </div>
+
+        <div id="content-scanroots" class="tab-content hidden">
+            <div class="bg-gray-800 rounded-lg p-6">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-xl font-bold">Scan Roots</h2>
+                    <button onclick="showCreateScanRootForm()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">
+                        Add Scan Root
+                    </button>
+                </div>
+                
+                <div id="scanRootsList">
+                    <p class="text-gray-400">Loading scan roots...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/js/app.js"></script>
+</body>
+</html>
+
+<style>
+    .tab-button {
+        padding: 1rem 0;
+        border-bottom: 2px solid transparent;
+        transition: all 0.2s;
+        color: #9ca3af;
+    }
+    
+    .tab-button:hover {
+        color: #fff;
+    }
+    
+    .tab-button.active {
+        color: #60a5fa;
+        border-bottom-color: #60a5fa;
+    }
+</style>
