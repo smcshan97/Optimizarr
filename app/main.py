@@ -12,6 +12,7 @@ from app.config import settings, ensure_data_directories
 from app.database import db
 from app.auth import auth
 from app.api import routes, auth_routes
+from app.scheduler import initialize_scheduler, shutdown_scheduler
 
 # Create FastAPI app
 app = FastAPI(
@@ -124,6 +125,9 @@ async def startup_event():
         )
         print("✓ Created default profile: 1080p H.265 Balanced")
     
+    # Initialize scheduler
+    initialize_scheduler()
+    
     print("=" * 60)
     print(f"Server starting on http://{settings.host}:{settings.port}")
     print("=" * 60)
@@ -133,6 +137,7 @@ async def startup_event():
 async def shutdown_event():
     """Cleanup on shutdown."""
     print("\nShutting down Optimizarr...")
+    shutdown_scheduler()
 
 
 def main():

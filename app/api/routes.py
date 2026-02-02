@@ -356,3 +356,59 @@ async def update_resource_settings(
 async def health_check():
     """Simple health check endpoint (no auth required)."""
     return {"status": "ok", "service": "optimizarr"}
+
+
+# Schedule Endpoints
+@router.get("/schedule")
+async def get_schedule(current_user: dict = Depends(get_current_user)):
+    """Get current schedule configuration."""
+    from app.scheduler import schedule_manager
+    return schedule_manager.get_status()
+
+
+@router.post("/schedule")
+async def update_schedule(
+    config: dict,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Update schedule configuration (admin only)."""
+    from app.scheduler import schedule_manager
+    
+    success = schedule_manager.save_schedule(config)
+    
+    if success:
+        return MessageResponse(message="Schedule updated successfully")
+    else:
+        raise HTTPException(status_code=500, detail="Failed to update schedule")
+
+
+@router.post("/schedule/enable")
+async def enable_schedule(current_user: dict = Depends(get_current_admin_user)):
+    """Enable scheduled encoding (admin only)."""
+    from app.scheduler import schedule_manager
+    
+    config = schedule_manager.schedule_config or {}
+    config['enabled'] = True
+    
+    success = schedule_manager.save_schedule(config)
+    
+    if success:
+        return MessageResponse(message="Schedule enabled")
+    else:
+        raise HTTPException(status_code=500, detail="Failed to enable schedule")
+
+
+@router.post("/schedule/disable")
+async def disable_schedule(current_user: dict = Depends(get_current_admin_user)):
+    """Disable scheduled encoding (admin only)."""
+    from app.scheduler import schedule_manager
+    
+    config = schedule_manager.schedule_config or {}
+    config['enabled'] = False
+    
+    success = schedule_manager.save_schedule(config)
+    
+    if success:
+        return MessageResponse(message="Schedule disabled")
+    else:
+        raise HTTPException(status_code=500, detail="Failed to disable schedule")
