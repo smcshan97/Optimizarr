@@ -1,10 +1,10 @@
 # Optimizarr - Project Status
 
-## 📊 Current Status: Phase 1 Complete ✅
+## 📊 Current Status: Phase 2 Complete ✅
 
-**Version:** 1.0.0  
-**Last Updated:** February 1, 2026  
-**Repository:** Ready for GitHub push  
+**Version:** 1.5.0  
+**Last Updated:** February 2, 2026  
+**Repository:** https://github.com/smcshan97/Optimizarr  
 **License:** MIT  
 
 ---
@@ -138,16 +138,18 @@ optimizarr/                         # 2,892 lines of code
 
 ## 🚀 Next Steps (Roadmap)
 
-### Phase 2: Resource Management (Next Priority)
-- [ ] Implement `resources.py` module
-- [ ] CPU usage monitoring with psutil
-- [ ] GPU monitoring with pynvml (NVIDIA)
-- [ ] Configurable CPU/GPU thresholds
-- [ ] Auto-pause on high system load
-- [ ] Process nice level and CPU affinity
-- [ ] Real-time resource graphs in web UI
+### ✅ Phase 2: Resource Management (COMPLETE)
+- [x] Implement `resources.py` module
+- [x] CPU usage monitoring with psutil
+- [x] GPU monitoring with pynvml (NVIDIA)
+- [x] Configurable CPU/GPU thresholds
+- [x] Auto-pause on high system load
+- [x] Process nice level and CPU affinity
+- [x] Real-time resource cards in web UI
+- [x] Settings tab for configuration
+- [x] Quick presets (Conservative/Balanced/Aggressive)
 
-### Phase 3: Scheduling System
+### Phase 3: Scheduling System (NEXT)
 - [ ] Implement `scheduler.py` module
 - [ ] APScheduler integration
 - [ ] Day-of-week selection
