@@ -87,6 +87,7 @@
                     <button onclick="switchTab('profiles')" id="tab-profiles" class="tab-button">Profiles</button>
                     <button onclick="switchTab('scanroots')" id="tab-scanroots" class="tab-button">Scan Roots</button>
                     <button onclick="switchTab('settings')" id="tab-settings" class="tab-button">Settings</button>
+                    <button onclick="switchTab('schedule')" id="tab-schedule" class="tab-button">Schedule</button>
                 </nav>
             </div>
         </div>
@@ -263,6 +264,97 @@
                 <div id="settingsMessage" class="mt-4 hidden"></div>
             </div>
         </div>
+
+        <div id="content-schedule" class="tab-content hidden">
+            <div class="bg-gray-800 rounded-lg p-6">
+                <h2 class="text-xl font-bold mb-6">Encoding Schedule</h2>
+                
+                <div class="space-y-6">
+                    <!-- Enable/Disable Schedule -->
+                    <div class="flex items-center justify-between p-4 bg-gray-700 rounded-lg">
+                        <div>
+                            <h3 class="text-lg font-semibold">Enable Scheduled Encoding</h3>
+                            <p class="text-sm text-gray-400">Automatically start/stop encoding based on schedule</p>
+                        </div>
+                        <label class="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" id="scheduleEnabled" class="sr-only peer">
+                            <div class="w-11 h-6 bg-gray-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                        </label>
+                    </div>
+                    
+                    <!-- Days of Week -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-3">Days of Week</label>
+                        <div class="grid grid-cols-7 gap-2">
+                            <button type="button" onclick="toggleDay(0)" id="day-0" class="day-button">Mon</button>
+                            <button type="button" onclick="toggleDay(1)" id="day-1" class="day-button">Tue</button>
+                            <button type="button" onclick="toggleDay(2)" id="day-2" class="day-button">Wed</button>
+                            <button type="button" onclick="toggleDay(3)" id="day-3" class="day-button">Thu</button>
+                            <button type="button" onclick="toggleDay(4)" id="day-4" class="day-button">Fri</button>
+                            <button type="button" onclick="toggleDay(5)" id="day-5" class="day-button">Sat</button>
+                            <button type="button" onclick="toggleDay(6)" id="day-6" class="day-button">Sun</button>
+                        </div>
+                    </div>
+                    
+                    <!-- Time Window -->
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-300 mb-2">Start Time</label>
+                            <input 
+                                type="time" 
+                                id="startTime" 
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
+                                value="22:00"
+                            >
+                            <p class="text-sm text-gray-400 mt-1">When to start encoding</p>
+                        </div>
+                        
+                        <div>
+                            <label class="block text-sm font-medium text-gray-300 mb-2">End Time</label>
+                            <input 
+                                type="time" 
+                                id="endTime" 
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
+                                value="06:00"
+                            >
+                            <p class="text-sm text-gray-400 mt-1">When to stop encoding</p>
+                        </div>
+                    </div>
+                    
+                    <!-- Current Status -->
+                    <div class="p-4 bg-gray-700 rounded-lg">
+                        <h3 class="font-semibold mb-2">Current Status</h3>
+                        <div class="grid grid-cols-2 gap-4 text-sm">
+                            <div>
+                                <span class="text-gray-400">Schedule Active:</span>
+                                <span id="scheduleStatus" class="ml-2 font-medium">-</span>
+                            </div>
+                            <div>
+                                <span class="text-gray-400">Within Window:</span>
+                                <span id="withinWindow" class="ml-2 font-medium">-</span>
+                            </div>
+                            <div>
+                                <span class="text-gray-400">Manual Override:</span>
+                                <span id="manualOverride" class="ml-2 font-medium">-</span>
+                            </div>
+                            <div>
+                                <span class="text-gray-400">Next Check:</span>
+                                <span id="nextCheck" class="ml-2 font-medium">Every minute</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Save Button -->
+                    <div class="flex justify-end gap-3">
+                        <button onclick="saveSchedule()" class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded font-medium">
+                            Save Schedule
+                        </button>
+                    </div>
+                    
+                    <div id="scheduleMessage" class="hidden mt-4"></div>
+                </div>
+            </div>
+        </div>
     </div>
 
     <script src="/static/js/app.js"></script>
@@ -284,5 +376,26 @@
     .tab-button.active {
         color: #60a5fa;
         border-bottom-color: #60a5fa;
+    }
+    
+    .day-button {
+        padding: 0.75rem;
+        border-radius: 0.5rem;
+        background-color: #374151;
+        color: #9ca3af;
+        border: 2px solid transparent;
+        transition: all 0.2s;
+        cursor: pointer;
+        font-weight: 500;
+    }
+    
+    .day-button:hover {
+        background-color: #4b5563;
+    }
+    
+    .day-button-active {
+        background-color: #3b82f6;
+        color: white;
+        border-color: #60a5fa;
     }
 </style>

@@ -68,6 +68,7 @@ function switchTab(tabName) {
     if (tabName === 'profiles') loadProfiles();
     if (tabName === 'scanroots') loadScanRoots();
     if (tabName === 'settings') loadSettings();
+    if (tabName === 'schedule') loadSchedule();
 }
 
 // Load statistics
@@ -445,5 +446,83 @@ function applyPreset(preset) {
         document.getElementById('memoryThreshold').value = config.memory;
         document.getElementById('gpuThreshold').value = config.gpu;
         document.getElementById('niceLevel').value = config.nice;
+    }
+}
+
+// Schedule management
+let selectedDays = new Set([0, 1, 2, 3, 4, 5, 6]); // All days selected by default
+
+async function loadSchedule() {
+    const schedule = await apiRequest('/schedule');
+    if (schedule && schedule.config) {
+        const config = schedule.config;
+        
+        // Set enabled state
+        document.getElementById('scheduleEnabled').checked = config.enabled;
+        
+        // Set days
+        selectedDays = new Set(config.days_of_week.split(',').map(d => parseInt(d)));
+        updateDayButtons();
+        
+        // Set times
+        document.getElementById('startTime').value = config.start_time;
+        document.getElementById('endTime').value = config.end_time;
+        
+        // Update status
+        document.getElementById('scheduleStatus').textContent = config.enabled ? '✓ Enabled' : '✗ Disabled';
+        document.getElementById('scheduleStatus').className = config.enabled ? 'ml-2 font-medium text-green-400' : 'ml-2 font-medium text-gray-400';
+        
+        document.getElementById('withinWindow').textContent = schedule.within_schedule ? '✓ Yes' : '✗ No';
+        document.getElementById('withinWindow').className = schedule.within_schedule ? 'ml-2 font-medium text-green-400' : 'ml-2 font-medium text-gray-400';
+        
+        document.getElementById('manualOverride').textContent = schedule.manual_override ? '✓ Active' : '✗ Inactive';
+        document.getElementById('manualOverride').className = schedule.manual_override ? 'ml-2 font-medium text-yellow-400' : 'ml-2 font-medium text-gray-400';
+    }
+}
+
+function toggleDay(day) {
+    if (selectedDays.has(day)) {
+        selectedDays.delete(day);
+    } else {
+        selectedDays.add(day);
+    }
+    updateDayButtons();
+}
+
+function updateDayButtons() {
+    for (let i = 0; i < 7; i++) {
+        const btn = document.getElementById(`day-${i}`);
+        if (selectedDays.has(i)) {
+            btn.className = 'day-button day-button-active';
+        } else {
+            btn.className = 'day-button';
+        }
+    }
+}
+
+async function saveSchedule() {
+    const config = {
+        enabled: document.getElementById('scheduleEnabled').checked,
+        days_of_week: Array.from(selectedDays).sort().join(','),
+        start_time: document.getElementById('startTime').value,
+        end_time: document.getElementById('endTime').value,
+        timezone: 'UTC'
+    };
+    
+    const result = await apiRequest('/schedule', {
+        method: 'POST',
+        body: JSON.stringify(config)
+    });
+    
+    if (result) {
+        const msgEl = document.getElementById('scheduleMessage');
+        msgEl.textContent = '✓ Schedule saved successfully';
+        msgEl.className = 'mt-4 p-3 bg-green-900/50 border border-green-700 rounded text-green-300';
+        msgEl.classList.remove('hidden');
+        
+        setTimeout(() => msgEl.classList.add('hidden'), 3000);
+        
+        // Reload schedule to update status
+        loadSchedule();
     }
 }
