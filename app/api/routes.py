@@ -329,7 +329,7 @@ async def get_resource_settings(current_user: dict = Depends(get_current_user)):
 
 @router.post("/settings/resources")
 async def update_resource_settings(
-    settings: Dict[str, str],
+    settings: dict,
     current_user: dict = Depends(get_current_admin_user)
 ):
     """Update resource management settings (admin only)."""
