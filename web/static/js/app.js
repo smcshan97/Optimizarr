@@ -67,6 +67,7 @@ function switchTab(tabName) {
     if (tabName === 'queue') loadQueue();
     if (tabName === 'profiles') loadProfiles();
     if (tabName === 'scanroots') loadScanRoots();
+    if (tabName === 'settings') loadSettings();
 }
 
 // Load statistics
@@ -77,6 +78,80 @@ async function loadStats() {
         document.getElementById('filesProcessed').textContent = stats.total_files_processed;
         document.getElementById('queuePending').textContent = stats.queue_pending;
         document.getElementById('activeJobs').textContent = stats.queue_processing;
+    }
+}
+
+// Load resource monitoring data
+async function loadResources() {
+    const resources = await apiRequest('/resources/current');
+    if (resources) {
+        // CPU
+        const cpuPercent = resources.cpu.percent.toFixed(1);
+        document.getElementById('cpuUsage').textContent = `${cpuPercent}%`;
+        document.getElementById('cpuBar').style.width = `${cpuPercent}%`;
+        
+        // Color based on usage
+        const cpuBar = document.getElementById('cpuBar');
+        const cpuUsageEl = document.getElementById('cpuUsage');
+        if (cpuPercent > 90) {
+            cpuBar.className = cpuBar.className.replace(/bg-\w+-\d+/, 'bg-red-500');
+            cpuUsageEl.className = cpuUsageEl.className.replace(/text-\w+-\d+/, 'text-red-400');
+            document.getElementById('cpuStatus').textContent = '⚠️ High';
+        } else if (cpuPercent > 75) {
+            cpuBar.className = cpuBar.className.replace(/bg-\w+-\d+/, 'bg-yellow-500');
+            cpuUsageEl.className = cpuUsageEl.className.replace(/text-\w+-\d+/, 'text-yellow-400');
+            document.getElementById('cpuStatus').textContent = '⚠️ Elevated';
+        } else {
+            cpuBar.className = cpuBar.className.replace(/bg-\w+-\d+/, 'bg-cyan-400');
+            cpuUsageEl.className = cpuUsageEl.className.replace(/text-\w+-\d+/, 'text-cyan-400');
+            document.getElementById('cpuStatus').textContent = '✓ Normal';
+        }
+        
+        // Memory
+        const memoryPercent = resources.memory.percent.toFixed(1);
+        const memoryUsedGB = (resources.memory.used_mb / 1024).toFixed(1);
+        const memoryTotalGB = (resources.memory.total_mb / 1024).toFixed(1);
+        document.getElementById('memoryUsage').textContent = `${memoryPercent}%`;
+        document.getElementById('memoryBar').style.width = `${memoryPercent}%`;
+        document.getElementById('memoryStatus').textContent = `${memoryUsedGB}/${memoryTotalGB} GB`;
+        
+        const memoryBar = document.getElementById('memoryBar');
+        const memoryUsageEl = document.getElementById('memoryUsage');
+        if (memoryPercent > 85) {
+            memoryBar.className = memoryBar.className.replace(/bg-\w+-\d+/, 'bg-red-500');
+            memoryUsageEl.className = memoryUsageEl.className.replace(/text-\w+-\d+/, 'text-red-400');
+        } else if (memoryPercent > 70) {
+            memoryBar.className = memoryBar.className.replace(/bg-\w+-\d+/, 'bg-yellow-500');
+            memoryUsageEl.className = memoryUsageEl.className.replace(/text-\w+-\d+/, 'text-yellow-400');
+        } else {
+            memoryBar.className = memoryBar.className.replace(/bg-\w+-\d+/, 'bg-purple-400');
+            memoryUsageEl.className = memoryUsageEl.className.replace(/text-\w+-\d+/, 'text-purple-400');
+        }
+        
+        // GPU
+        if (resources.gpu && resources.gpu.length > 0) {
+            const gpu = resources.gpu[0]; // First GPU
+            const gpuPercent = gpu.utilization_percent.toFixed(1);
+            document.getElementById('gpuUsage').textContent = `${gpuPercent}%`;
+            document.getElementById('gpuBar').style.width = `${gpuPercent}%`;
+            document.getElementById('gpuStatus').textContent = gpu.name.substring(0, 20);
+            
+            const gpuBar = document.getElementById('gpuBar');
+            const gpuUsageEl = document.getElementById('gpuUsage');
+            if (gpuPercent > 90) {
+                gpuBar.className = gpuBar.className.replace(/bg-\w+-\d+/, 'bg-red-500');
+                gpuUsageEl.className = gpuUsageEl.className.replace(/text-\w+-\d+/, 'text-red-400');
+            } else if (gpuPercent > 75) {
+                gpuBar.className = gpuBar.className.replace(/bg-\w+-\d+/, 'bg-yellow-500');
+                gpuUsageEl.className = gpuUsageEl.className.replace(/text-\w+-\d+/, 'text-yellow-400');
+            } else {
+                gpuBar.className = gpuBar.className.replace(/bg-\w+-\d+/, 'bg-orange-400');
+                gpuUsageEl.className = gpuUsageEl.className.replace(/text-\w+-\d+/, 'text-orange-400');
+            }
+        } else {
+            document.getElementById('gpuUsage').textContent = 'N/A';
+            document.getElementById('gpuStatus').textContent = 'No GPU detected';
+        }
     }
 }
 
@@ -293,13 +368,82 @@ document.addEventListener('DOMContentLoaded', () => {
     
     // Load initial data
     loadStats();
+    loadResources();
     loadQueue();
     
     // Auto-refresh every 5 seconds
     setInterval(() => {
         loadStats();
+        loadResources();
         if (!document.getElementById('content-queue').classList.contains('hidden')) {
             loadQueue();
         }
     }, 5000);
 });
+
+// Settings functions
+async function loadSettings() {
+    const settings = await apiRequest('/settings/resources');
+    if (settings) {
+        document.getElementById('cpuThreshold').value = parseFloat(settings.resource_cpu_threshold || '90');
+        document.getElementById('memoryThreshold').value = parseFloat(settings.resource_memory_threshold || '85');
+        document.getElementById('gpuThreshold').value = parseFloat(settings.resource_gpu_threshold || '90');
+        document.getElementById('niceLevel').value = parseInt(settings.resource_nice_level || '10');
+        document.getElementById('enableThrottling').checked = (settings.resource_enable_throttling || 'true') === 'true';
+    }
+}
+
+async function saveResourceSettings() {
+    const settings = {
+        'resource_cpu_threshold': document.getElementById('cpuThreshold').value,
+        'resource_memory_threshold': document.getElementById('memoryThreshold').value,
+        'resource_gpu_threshold': document.getElementById('gpuThreshold').value,
+        'resource_nice_level': document.getElementById('niceLevel').value,
+        'resource_enable_throttling': document.getElementById('enableThrottling').checked ? 'true' : 'false'
+    };
+    
+    const result = await apiRequest('/settings/resources', {
+        method: 'POST',
+        body: JSON.stringify(settings)
+    });
+    
+    if (result) {
+        const msgEl = document.getElementById('settingsMessage');
+        msgEl.textContent = '✓ Settings saved successfully';
+        msgEl.className = 'mt-4 p-3 bg-green-900/50 border border-green-700 rounded text-green-300';
+        msgEl.classList.remove('hidden');
+        
+        setTimeout(() => msgEl.classList.add('hidden'), 3000);
+    }
+}
+
+function applyPreset(preset) {
+    const presets = {
+        'conservative': {
+            cpu: 70,
+            memory: 70,
+            gpu: 75,
+            nice: 15
+        },
+        'balanced': {
+            cpu: 85,
+            memory: 80,
+            gpu: 85,
+            nice: 10
+        },
+        'aggressive': {
+            cpu: 95,
+            memory: 90,
+            gpu: 95,
+            nice: 5
+        }
+    };
+    
+    const config = presets[preset];
+    if (config) {
+        document.getElementById('cpuThreshold').value = config.cpu;
+        document.getElementById('memoryThreshold').value = config.memory;
+        document.getElementById('gpuThreshold').value = config.gpu;
+        document.getElementById('niceLevel').value = config.nice;
+    }
+}

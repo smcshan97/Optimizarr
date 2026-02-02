@@ -5,24 +5,38 @@ Handles video transcoding using HandBrakeCLI with progress tracking.
 import subprocess
 import re
 import time
+import threading
 from pathlib import Path
 from typing import Optional, Dict, Callable
 import os
 import shutil
+import signal
 
 from app.database import db
+from app.resources import resource_monitor, resource_throttler
 
 
 class EncodingJob:
     """Represents a single video encoding job."""
     
-    def __init__(self, queue_item_id: int, profile: Dict):
+    def __init__(self, queue_item_id: int, profile: Dict, resource_limits: Optional[Dict] = None):
         self.queue_item_id = queue_item_id
         self.profile = profile
         self.process: Optional[subprocess.Popen] = None
         self.progress = 0.0
         self.is_paused = False
         self.paused_reason = None
+        self.monitoring_thread = None
+        self.stop_monitoring = False
+        
+        # Resource limits
+        self.resource_limits = resource_limits or {
+            'cpu_threshold': 90.0,
+            'memory_threshold': 85.0,
+            'gpu_threshold': 90.0,
+            'nice_level': 10,
+            'enable_throttling': True
+        }
         
         # Get queue item details
         queue_items = db.get_queue_items()
@@ -97,6 +111,40 @@ class EncodingJob:
         
         return cmd
     
+    def _monitor_resources(self):
+        """Background thread to monitor resources and pause/resume if needed."""
+        print("  Starting resource monitoring thread...")
+        
+        while not self.stop_monitoring and self.process and self.process.poll() is None:
+            time.sleep(5)  # Check every 5 seconds
+            
+            if not self.resource_limits.get('enable_throttling'):
+                continue
+            
+            # Check if we should pause
+            should_pause, reason = resource_throttler.should_pause_encoding(
+                cpu_threshold=self.resource_limits['cpu_threshold'],
+                memory_threshold=self.resource_limits['memory_threshold'],
+                gpu_threshold=self.resource_limits['gpu_threshold']
+            )
+            
+            if should_pause and not self.is_paused:
+                print(f"\n⏸ Pausing encoding: {reason}")
+                self.pause(reason)
+            elif not should_pause and self.is_paused:
+                print(f"\n▶ Resuming encoding (resources available)")
+                self.resume()
+            
+            # Update resource usage in database
+            if self.process:
+                process_resources = resource_monitor.get_process_resources(self.process.pid)
+                if process_resources:
+                    db.update_queue_item(
+                        self.queue_item_id,
+                        current_cpu_percent=process_resources['cpu_percent'],
+                        current_memory_mb=process_resources['memory_mb']
+                    )
+    
     def start(self, progress_callback: Optional[Callable[[float], None]] = None):
         """
         Start the encoding job.
@@ -126,6 +174,21 @@ class EncodingJob:
                 text=True,
                 bufsize=1
             )
+            
+            # Set process priority (nice level)
+            if self.resource_limits.get('nice_level'):
+                resource_throttler.set_process_priority(
+                    self.process.pid,
+                    self.resource_limits['nice_level']
+                )
+            
+            # Start resource monitoring thread
+            if self.resource_limits.get('enable_throttling'):
+                self.monitoring_thread = threading.Thread(
+                    target=self._monitor_resources,
+                    daemon=True
+                )
+                self.monitoring_thread.start()
             
             # Monitor progress
             progress_pattern = re.compile(r'Encoding: task \d+ of \d+, ([\d.]+) %')
@@ -268,6 +331,11 @@ class EncodingJob:
     
     def stop(self):
         """Stop the encoding job."""
+        # Stop monitoring thread
+        self.stop_monitoring = True
+        if self.monitoring_thread and self.monitoring_thread.is_alive():
+            self.monitoring_thread.join(timeout=2)
+        
         if self.process:
             try:
                 self.process.terminate()
@@ -311,8 +379,11 @@ class EncoderPool:
                     profile = db.get_profile(item['profile_id'])
                     
                     if profile:
+                        # Load resource settings
+                        resource_limits = self._load_resource_settings()
+                        
                         # Create and start job
-                        job = EncodingJob(item['id'], profile)
+                        job = EncodingJob(item['id'], profile, resource_limits)
                         self.active_jobs.append(job)
                         
                         # Start encoding (blocking for now - will be async later)
@@ -328,6 +399,36 @@ class EncoderPool:
             time.sleep(1)
         
         print("Encoder pool stopped")
+    
+    def _load_resource_settings(self) -> Dict:
+        """Load resource management settings from database."""
+        try:
+            with db.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT key, value FROM settings 
+                    WHERE key LIKE 'resource_%'
+                """)
+                settings = {row[0]: row[1] for row in cursor.fetchall()}
+            
+            # Parse settings with defaults
+            return {
+                'cpu_threshold': float(settings.get('resource_cpu_threshold', '90.0')),
+                'memory_threshold': float(settings.get('resource_memory_threshold', '85.0')),
+                'gpu_threshold': float(settings.get('resource_gpu_threshold', '90.0')),
+                'nice_level': int(settings.get('resource_nice_level', '10')),
+                'enable_throttling': settings.get('resource_enable_throttling', 'true').lower() == 'true'
+            }
+        except Exception as e:
+            print(f"⚠️ Error loading resource settings: {e}")
+            # Return defaults
+            return {
+                'cpu_threshold': 90.0,
+                'memory_threshold': 85.0,
+                'gpu_threshold': 90.0,
+                'nice_level': 10,
+                'enable_throttling': True
+            }
     
     def stop(self):
         """Stop the encoder pool."""

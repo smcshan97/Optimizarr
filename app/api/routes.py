@@ -14,6 +14,7 @@ from app.api.dependencies import get_current_user, get_current_admin_user
 from app.database import db
 from app.scanner import scanner
 from app.encoder import encoder_pool
+from app.resources import resource_monitor
 
 router = APIRouter()
 
@@ -277,6 +278,77 @@ async def get_statistics(current_user: dict = Depends(get_current_user)):
         queue_completed=completed,
         queue_failed=failed
     )
+
+
+# Resource Monitoring Endpoints
+@router.get("/resources/current")
+async def get_current_resources(current_user: dict = Depends(get_current_user)):
+    """Get current system resource usage."""
+    return resource_monitor.get_all_resources()
+
+
+@router.get("/resources/thresholds")
+async def check_resource_thresholds(
+    cpu_threshold: float = 90.0,
+    memory_threshold: float = 85.0,
+    gpu_threshold: float = 90.0,
+    current_user: dict = Depends(get_current_user)
+):
+    """Check if current resource usage exceeds thresholds."""
+    return resource_monitor.check_thresholds(
+        cpu_threshold=cpu_threshold,
+        memory_threshold=memory_threshold,
+        gpu_threshold=gpu_threshold
+    )
+
+
+# Settings Endpoints
+@router.get("/settings/resources")
+async def get_resource_settings(current_user: dict = Depends(get_current_user)):
+    """Get resource management settings."""
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT key, value FROM settings 
+            WHERE key LIKE 'resource_%'
+        """)
+        settings = {row[0]: row[1] for row in cursor.fetchall()}
+    
+    # Default settings if none exist
+    if not settings:
+        settings = {
+            'resource_cpu_threshold': '90.0',
+            'resource_memory_threshold': '85.0',
+            'resource_gpu_threshold': '90.0',
+            'resource_nice_level': '10',
+            'resource_enable_throttling': 'true'
+        }
+    
+    return settings
+
+
+@router.post("/settings/resources")
+async def update_resource_settings(
+    settings: Dict[str, str],
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Update resource management settings (admin only)."""
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        
+        for key, value in settings.items():
+            if not key.startswith('resource_'):
+                continue
+                
+            cursor.execute("""
+                INSERT INTO settings (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE SET 
+                    value = excluded.value,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (key, value))
+    
+    return MessageResponse(message="Resource settings updated")
 
 
 # Health check
