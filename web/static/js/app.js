@@ -526,3 +526,283 @@ async function saveSchedule() {
         loadSchedule();
     }
 }
+
+// ============================================================
+// PROFILES MANAGEMENT
+// ============================================================
+
+let currentProfileId = null;
+
+async function loadProfiles() {
+    const profiles = await apiRequest('/profiles');
+    const container = document.getElementById('profilesList');
+    
+    if (!profiles || profiles.length === 0) {
+        container.innerHTML = '<p class="text-gray-400">No profiles yet. Create one to get started!</p>';
+        return;
+    }
+    
+    container.innerHTML = profiles.map(p => `
+        <div class="bg-gray-700 rounded-lg p-4 mb-3">
+            <div class="flex justify-between items-start">
+                <div class="flex-1">
+                    <h3 class="font-semibold text-lg">${p.name}</h3>
+                    <div class="grid grid-cols-2 gap-2 mt-2 text-sm text-gray-300">
+                        <div><span class="text-gray-400">Codec:</span> ${p.codec.toUpperCase()}</div>
+                        <div><span class="text-gray-400">Encoder:</span> ${p.encoder}</div>
+                        <div><span class="text-gray-400">Quality:</span> CRF ${p.quality}</div>
+                        <div><span class="text-gray-400">Audio:</span> ${p.audio_codec.toUpperCase()}</div>
+                        ${p.resolution ? `<div><span class="text-gray-400">Resolution:</span> ${p.resolution}</div>` : ''}
+                        ${p.preset ? `<div><span class="text-gray-400">Preset:</span> ${p.preset}</div>` : ''}
+                    </div>
+                </div>
+                <div class="flex gap-2">
+                    <button onclick="editProfile(${p.id})" 
+                        class="bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-sm">
+                        Edit
+                    </button>
+                    <button onclick="deleteProfile(${p.id}, '${p.name}')" 
+                        class="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-sm">
+                        Delete
+                    </button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+function showCreateProfileForm() {
+    currentProfileId = null;
+    document.getElementById('profileModalTitle').textContent = 'Create Profile';
+    document.getElementById('profileForm').reset();
+    document.getElementById('profileId').value = '';
+    document.getElementById('profileModal').classList.remove('hidden');
+}
+
+async function editProfile(id) {
+    currentProfileId = id;
+    const profile = await apiRequest(`/profiles/${id}`);
+    
+    if (!profile) return;
+    
+    document.getElementById('profileModalTitle').textContent = 'Edit Profile';
+    document.getElementById('profileId').value = profile.id;
+    document.getElementById('profileName').value = profile.name;
+    document.getElementById('profileCodec').value = profile.codec;
+    document.getElementById('profileEncoder').value = profile.encoder;
+    document.getElementById('profileResolution').value = profile.resolution || '';
+    document.getElementById('profileFramerate').value = profile.framerate || '';
+    document.getElementById('profileQuality').value = profile.quality;
+    document.getElementById('profilePreset').value = profile.preset || '';
+    document.getElementById('profileAudioCodec').value = profile.audio_codec;
+    document.getElementById('profileTwoPass').checked = profile.two_pass;
+    document.getElementById('profileCustomArgs').value = profile.custom_args || '';
+    
+    document.getElementById('profileModal').classList.remove('hidden');
+}
+
+function closeProfileModal() {
+    document.getElementById('profileModal').classList.add('hidden');
+    currentProfileId = null;
+}
+
+document.getElementById('profileForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const data = {
+        name: document.getElementById('profileName').value,
+        codec: document.getElementById('profileCodec').value,
+        encoder: document.getElementById('profileEncoder').value,
+        resolution: document.getElementById('profileResolution').value || null,
+        framerate: parseInt(document.getElementById('profileFramerate').value) || null,
+        quality: parseInt(document.getElementById('profileQuality').value),
+        preset: document.getElementById('profilePreset').value || null,
+        audio_codec: document.getElementById('profileAudioCodec').value,
+        two_pass: document.getElementById('profileTwoPass').checked,
+        custom_args: document.getElementById('profileCustomArgs').value || null,
+        is_default: false
+    };
+    
+    const method = currentProfileId ? 'PUT' : 'POST';
+    const url = currentProfileId ? `/profiles/${currentProfileId}` : '/profiles';
+    
+    const result = await apiRequest(url, {
+        method: method,
+        body: JSON.stringify(data)
+    });
+    
+    if (result) {
+        closeProfileModal();
+        loadProfiles();
+        showMessage('Profile saved successfully!', 'success');
+    }
+});
+
+async function deleteProfile(id, name) {
+    if (!confirm(`Delete profile "${name}"?`)) return;
+    
+    const result = await apiRequest(`/profiles/${id}`, { method: 'DELETE' });
+    
+    if (result) {
+        loadProfiles();
+        showMessage('Profile deleted successfully!', 'success');
+    }
+}
+
+// ============================================================
+// SCAN ROOTS MANAGEMENT
+// ============================================================
+
+let currentScanRootId = null;
+
+async function loadScanRoots() {
+    const roots = await apiRequest('/scan-roots');
+    const container = document.getElementById('scanRootsList');
+    
+    if (!roots || roots.length === 0) {
+        container.innerHTML = '<p class="text-gray-400">No scan roots configured. Add one to start scanning!</p>';
+        return;
+    }
+    
+    container.innerHTML = roots.map(r => `
+        <div class="bg-gray-700 rounded-lg p-4 mb-3">
+            <div class="flex justify-between items-start">
+                <div class="flex-1">
+                    <h3 class="font-semibold text-lg">${r.path}</h3>
+                    <div class="flex gap-4 mt-2 text-sm text-gray-300">
+                        <div><span class="text-gray-400">Profile:</span> ${r.profile_name || 'Unknown'}</div>
+                        <div><span class="text-gray-400">Recursive:</span> ${r.recursive ? 'Yes' : 'No'}</div>
+                        <div>
+                            <span class="px-2 py-1 rounded text-xs ${r.enabled ? 'bg-green-900 text-green-300' : 'bg-gray-600 text-gray-300'}">
+                                ${r.enabled ? 'Enabled' : 'Disabled'}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+                <div class="flex gap-2">
+                    <button onclick="scanSingleRoot(${r.id})" 
+                        class="bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm">
+                        Scan Now
+                    </button>
+                    <button onclick="editScanRoot(${r.id})" 
+                        class="bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-sm">
+                        Edit
+                    </button>
+                    <button onclick="deleteScanRoot(${r.id}, '${r.path}')" 
+                        class="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-sm">
+                        Delete
+                    </button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+async function showCreateScanRootForm() {
+    currentScanRootId = null;
+    document.getElementById('scanRootModalTitle').textContent = 'Add Scan Root';
+    document.getElementById('scanRootForm').reset();
+    document.getElementById('scanRootId').value = '';
+    document.getElementById('scanRootRecursive').checked = true;
+    document.getElementById('scanRootEnabled').checked = true;
+    
+    // Load profiles for dropdown
+    const profiles = await apiRequest('/profiles');
+    const select = document.getElementById('scanRootProfile');
+    select.innerHTML = profiles.map(p => 
+        `<option value="${p.id}">${p.name}</option>`
+    ).join('');
+    
+    document.getElementById('scanRootModal').classList.remove('hidden');
+}
+
+async function editScanRoot(id) {
+    currentScanRootId = id;
+    const root = await apiRequest(`/scan-roots/${id}`);
+    
+    if (!root) return;
+    
+    // Load profiles for dropdown
+    const profiles = await apiRequest('/profiles');
+    const select = document.getElementById('scanRootProfile');
+    select.innerHTML = profiles.map(p => 
+        `<option value="${p.id}" ${p.id === root.profile_id ? 'selected' : ''}>${p.name}</option>`
+    ).join('');
+    
+    document.getElementById('scanRootModalTitle').textContent = 'Edit Scan Root';
+    document.getElementById('scanRootId').value = root.id;
+    document.getElementById('scanRootPath').value = root.path;
+    document.getElementById('scanRootProfile').value = root.profile_id;
+    document.getElementById('scanRootRecursive').checked = root.recursive;
+    document.getElementById('scanRootEnabled').checked = root.enabled;
+    
+    document.getElementById('scanRootModal').classList.remove('hidden');
+}
+
+function closeScanRootModal() {
+    document.getElementById('scanRootModal').classList.add('hidden');
+    currentScanRootId = null;
+}
+
+document.getElementById('scanRootForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    
+    const data = {
+        path: document.getElementById('scanRootPath').value,
+        profile_id: parseInt(document.getElementById('scanRootProfile').value),
+        recursive: document.getElementById('scanRootRecursive').checked,
+        enabled: document.getElementById('scanRootEnabled').checked
+    };
+    
+    const method = currentScanRootId ? 'PUT' : 'POST';
+    const url = currentScanRootId ? `/scan-roots/${currentScanRootId}` : '/scan-roots';
+    
+    const result = await apiRequest(url, {
+        method: method,
+        body: JSON.stringify(data)
+    });
+    
+    if (result) {
+        closeScanRootModal();
+        loadScanRoots();
+        showMessage('Scan root saved successfully!', 'success');
+    }
+});
+
+async function deleteScanRoot(id, path) {
+    if (!confirm(`Delete scan root "${path}"?`)) return;
+    
+    const result = await apiRequest(`/scan-roots/${id}`, { method: 'DELETE' });
+    
+    if (result) {
+        loadScanRoots();
+        showMessage('Scan root deleted successfully!', 'success');
+    }
+}
+
+async function scanSingleRoot(id) {
+    showMessage('Scanning...', 'info');
+    const result = await apiRequest(`/scan-roots/${id}/scan`, { method: 'POST' });
+    if (result) {
+        showMessage('Scan completed! Check the Queue tab.', 'success');
+        loadQueue(); // Refresh queue
+    }
+}
+
+// ============================================================
+// HELPER FUNCTIONS
+// ============================================================
+
+function showMessage(text, type = 'info') {
+    // Create a toast notification
+    const toast = document.createElement('div');
+    toast.className = `fixed top-4 right-4 px-6 py-3 rounded shadow-lg z-50 ${
+        type === 'success' ? 'bg-green-900 border border-green-700 text-green-300' :
+        type === 'error' ? 'bg-red-900 border border-red-700 text-red-300' :
+        'bg-blue-900 border border-blue-700 text-blue-300'
+    }`;
+    toast.textContent = text;
+    document.body.appendChild(toast);
+    
+    setTimeout(() => toast.remove(), 3000);
+}
