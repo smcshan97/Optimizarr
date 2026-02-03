@@ -285,23 +285,29 @@
                     
                     <div class="grid grid-cols-2 gap-4">
                         <div>
-                            <label class="block text-sm font-medium mb-2">Codec *</label>
+                            <div class="flex items-center gap-2 mb-2">
+                                <label class="block text-sm font-medium">Codec *</label>
+                                <button type="button" onclick="showCodecGuide()" 
+                                    class="text-blue-400 hover:text-blue-300 text-xs" title="Codec Guide">
+                                    ℹ️ Guide
+                                </button>
+                            </div>
                             <select id="profileCodec" required 
                                 class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
                                 <option value="h264">H.264</option>
                                 <option value="h265">H.265 (HEVC)</option>
-                                <option value="av1">AV1</option>
+                                <option value="av1" selected>AV1 ⭐</option>
                                 <option value="vp9">VP9</option>
                             </select>
                         </div>
                         
                         <div>
                             <label class="block text-sm font-medium mb-2">Encoder *</label>
-                            <select id="profileEncoder" required 
+                            <select id="profileEncoder" required onchange="updatePresetOptions()"
                                 class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
                                 <option value="x264">x264 (CPU)</option>
                                 <option value="x265">x265 (CPU)</option>
-                                <option value="svt_av1">SVT-AV1 (CPU)</option>
+                                <option value="svt_av1" selected>SVT-AV1 (CPU) ⭐</option>
                                 <option value="nvenc_h264">NVENC H.264 (GPU)</option>
                                 <option value="nvenc_h265">NVENC H.265 (GPU)</option>
                                 <option value="nvenc_av1">NVENC AV1 (GPU)</option>
@@ -327,13 +333,17 @@
                         
                         <div>
                             <label class="block text-sm font-medium mb-2">Framerate (FPS)</label>
-                            <select id="profileFramerate" 
+                            <select id="profileFramerate" onchange="handleFramerateChange()"
                                 class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
                                 <option value="">Variable (VFR) - Preserve Source</option>
                                 <option value="24">24 fps (Movies)</option>
                                 <option value="30">30 fps (Standard TV)</option>
                                 <option value="60">60 fps (Action/Sports)</option>
+                                <option value="custom">Custom...</option>
                             </select>
+                            <input type="number" id="profileFramerateCustom" 
+                                class="hidden w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 mt-2"
+                                placeholder="Enter FPS (e.g., 25, 48, 120)" min="1" max="240">
                             <p class="text-xs text-gray-400 mt-1">24=Movies, 30=TV, 60=Sports/Action</p>
                         </div>
                     </div>
@@ -348,9 +358,12 @@
                         
                         <div>
                             <label class="block text-sm font-medium mb-2">Preset</label>
-                            <input type="text" id="profilePreset" 
-                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2"
-                                placeholder="e.g., medium, 6, p4">
+                            <select id="profilePreset" 
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                                <option value="">Auto (recommended)</option>
+                                <!-- Options populated dynamically based on encoder -->
+                            </select>
+                            <p class="text-xs text-gray-400 mt-1" id="presetHelp">Speed vs quality trade-off</p>
                         </div>
                     </div>
                     
