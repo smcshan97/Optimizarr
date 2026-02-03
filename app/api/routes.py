@@ -61,6 +61,46 @@ async def get_profile(
     return profile
 
 
+@router.put("/profiles/{profile_id}", response_model=MessageResponse)
+async def update_profile(
+    profile_id: int,
+    profile: ProfileCreate,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Update an existing profile (admin only)."""
+    # Check if profile exists
+    existing = db.get_profile(profile_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Profile {profile_id} not found"
+        )
+    
+    # Update profile
+    success = db.update_profile(
+        profile_id=profile_id,
+        name=profile.name,
+        resolution=profile.resolution,
+        framerate=profile.framerate,
+        codec=profile.codec,
+        encoder=profile.encoder,
+        quality=profile.quality,
+        audio_codec=profile.audio_codec,
+        preset=profile.preset,
+        two_pass=profile.two_pass,
+        custom_args=profile.custom_args,
+        is_default=profile.is_default
+    )
+    
+    if success:
+        return MessageResponse(message="Profile updated successfully")
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update profile"
+        )
+
+
 @router.delete("/profiles/{profile_id}", response_model=MessageResponse)
 async def delete_profile(
     profile_id: int,
@@ -127,6 +167,56 @@ async def delete_scan_root(
         )
     
     return MessageResponse(message=f"Scan root {root_id} deleted")
+
+
+@router.get("/scan-roots/{root_id}")
+async def get_scan_root(
+    root_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get a specific scan root by ID."""
+    root = db.get_scan_root(root_id)
+    
+    if not root:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scan root {root_id} not found"
+        )
+    
+    return root
+
+
+@router.put("/scan-roots/{root_id}", response_model=MessageResponse)
+async def update_scan_root(
+    root_id: int,
+    root_data: ScanRootCreate,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Update an existing scan root (admin only)."""
+    # Check if exists
+    existing = db.get_scan_root(root_id)
+    if not existing:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scan root {root_id} not found"
+        )
+    
+    # Update
+    success = db.update_scan_root(
+        root_id=root_id,
+        path=root_data.path,
+        profile_id=root_data.profile_id,
+        recursive=root_data.recursive,
+        enabled=root_data.enabled
+    )
+    
+    if success:
+        return MessageResponse(message="Scan root updated successfully")
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update scan root"
+        )
 
 
 # Queue Endpoints
