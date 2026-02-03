@@ -546,7 +546,10 @@ async function loadProfiles() {
         <div class="bg-gray-700 rounded-lg p-4 mb-3">
             <div class="flex justify-between items-start">
                 <div class="flex-1">
-                    <h3 class="font-semibold text-lg">${p.name}</h3>
+                    <div class="flex items-center gap-2">
+                        <h3 class="font-semibold text-lg">${p.name}</h3>
+                        ${p.is_default ? '<span class="px-2 py-1 bg-blue-900 text-blue-300 text-xs rounded">DEFAULT</span>' : ''}
+                    </div>
                     <div class="grid grid-cols-2 gap-2 mt-2 text-sm text-gray-300">
                         <div><span class="text-gray-400">Codec:</span> ${p.codec.toUpperCase()}</div>
                         <div><span class="text-gray-400">Encoder:</span> ${p.encoder}</div>
@@ -596,6 +599,7 @@ async function editProfile(id) {
     document.getElementById('profilePreset').value = profile.preset || '';
     document.getElementById('profileAudioCodec').value = profile.audio_codec;
     document.getElementById('profileTwoPass').checked = profile.two_pass;
+    document.getElementById('profileIsDefault').checked = profile.is_default;
     document.getElementById('profileCustomArgs').value = profile.custom_args || '';
     
     document.getElementById('profileModal').classList.remove('hidden');
@@ -620,7 +624,7 @@ document.getElementById('profileForm').addEventListener('submit', async (e) => {
         audio_codec: document.getElementById('profileAudioCodec').value,
         two_pass: document.getElementById('profileTwoPass').checked,
         custom_args: document.getElementById('profileCustomArgs').value || null,
-        is_default: false
+        is_default: document.getElementById('profileIsDefault').checked
     };
     
     const method = currentProfileId ? 'PUT' : 'POST';
