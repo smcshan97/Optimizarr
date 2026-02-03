@@ -102,15 +102,43 @@
                 <div class="flex justify-between items-center mb-6">
                     <h2 class="text-xl font-bold">Encoding Queue</h2>
                     <div class="flex gap-3">
-                        <button onclick="scanRoots()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">
-                            Scan for Files
+                        <button onclick="scanAllRoots()" id="scanAllBtn" 
+                            class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded flex items-center gap-2">
+                            <span id="scanAllIcon">🔍</span>
+                            <span id="scanAllText">Scan All</span>
                         </button>
                         <button onclick="startEncoding()" class="bg-green-600 hover:bg-green-700 px-4 py-2 rounded">
-                            Start Encoding
+                            ▶️ Start
                         </button>
                         <button onclick="stopEncoding()" class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded">
-                            Stop
+                            ⏹️ Stop
                         </button>
+                    </div>
+                </div>
+                
+                <!-- Filters -->
+                <div class="mb-4 flex gap-4">
+                    <div class="flex-1">
+                        <input type="text" id="queueSearch" placeholder="🔍 Search by filename..." 
+                            onkeyup="filterQueue()"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                    </div>
+                    <div>
+                        <select id="queueStatusFilter" onchange="filterQueue()"
+                            class="bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                            <option value="">All Statuses</option>
+                            <option value="pending">⏳ Pending</option>
+                            <option value="processing">⚙️ Processing</option>
+                            <option value="completed">✅ Completed</option>
+                            <option value="failed">❌ Failed</option>
+                            <option value="paused">⏸️ Paused</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="flex items-center gap-2 text-sm">
+                            <input type="checkbox" id="autoRefreshQueue" checked onchange="toggleAutoRefresh()">
+                            <span>Auto-refresh (5s)</span>
+                        </label>
                     </div>
                 </div>
                 

@@ -816,11 +816,26 @@ async function deleteScanRoot(id, path) {
 }
 
 async function scanSingleRoot(id) {
-    showMessage('Scanning...', 'info');
-    const result = await apiRequest(`/scan-roots/${id}/scan`, { method: 'POST' });
-    if (result) {
-        showMessage('Scan completed! Check the Queue tab.', 'success');
-        loadQueue(); // Refresh queue
+    // Find the scan button and disable it
+    const scanBtn = event.target;
+    const originalText = scanBtn.textContent;
+    scanBtn.disabled = true;
+    scanBtn.classList.add('opacity-50', 'cursor-not-allowed');
+    scanBtn.textContent = '⏳ Scanning...';
+    
+    try {
+        const result = await apiRequest(`/scan-roots/${id}/scan`, { method: 'POST' });
+        if (result) {
+            showMessage(result.message, 'success');
+            loadQueue(); // Refresh queue
+        }
+    } catch (error) {
+        showMessage('Scan failed: ' + (error.message || 'Unknown error'), 'error');
+    } finally {
+        // Re-enable button
+        scanBtn.disabled = false;
+        scanBtn.classList.remove('opacity-50', 'cursor-not-allowed');
+        scanBtn.textContent = originalText;
     }
 }
 
@@ -1166,5 +1181,200 @@ function loadAccountInfo() {
     
     document.getElementById('accountUsername').value = username;
     document.getElementById('accountRole').value = isAdmin ? 'Administrator' : 'User';
+}
+
+
+// ============================================================
+// QUEUE IMPROVEMENTS
+// ============================================================
+
+let queueRefreshInterval = null;
+let allQueueItems = []; // Store all items for filtering
+
+// Scan all enabled scan roots
+async function scanAllRoots() {
+    const btn = document.getElementById('scanAllBtn');
+    const icon = document.getElementById('scanAllIcon');
+    const text = document.getElementById('scanAllText');
+    
+    // Disable button and show loading
+    btn.disabled = true;
+    btn.classList.add('opacity-50', 'cursor-not-allowed');
+    icon.textContent = '⏳';
+    text.textContent = 'Scanning...';
+    
+    try {
+        // Get all scan roots
+        const roots = await apiRequest('/scan-roots');
+        if (!roots || roots.length === 0) {
+            showMessage('No scan roots configured', 'error');
+            return;
+        }
+        
+        // Scan each enabled root
+        let totalFiles = 0;
+        let scannedCount = 0;
+        
+        for (const root of roots) {
+            if (root.enabled) {
+                try {
+                    const result = await apiRequest(`/scan-roots/${root.id}/scan`, {
+                        method: 'POST'
+                    });
+                    // Extract number from message like "Found 5 video file(s)"
+                    const match = result.message.match(/(\d+)/);
+                    if (match) {
+                        totalFiles += parseInt(match[1]);
+                    }
+                    scannedCount++;
+                } catch (error) {
+                    console.error(`Failed to scan ${root.path}:`, error);
+                }
+            }
+        }
+        
+        showMessage(`Scanned ${scannedCount} root(s), found ${totalFiles} video file(s)!`, 'success');
+        
+        // Refresh queue to show new items
+        loadQueue();
+        
+    } catch (error) {
+        showMessage('Scan failed: ' + (error.message || 'Unknown error'), 'error');
+    } finally {
+        // Re-enable button
+        btn.disabled = false;
+        btn.classList.remove('opacity-50', 'cursor-not-allowed');
+        icon.textContent = '🔍';
+        text.textContent = 'Scan All';
+    }
+}
+
+// Filter queue by search and status
+function filterQueue() {
+    const searchTerm = document.getElementById('queueSearch').value.toLowerCase();
+    const statusFilter = document.getElementById('queueStatusFilter').value;
+    
+    let filtered = allQueueItems;
+    
+    // Apply search filter
+    if (searchTerm) {
+        filtered = filtered.filter(item => 
+            item.file_path.toLowerCase().includes(searchTerm)
+        );
+    }
+    
+    // Apply status filter
+    if (statusFilter) {
+        filtered = filtered.filter(item => 
+            item.status === statusFilter
+        );
+    }
+    
+    // Display filtered results
+    displayQueueItems(filtered);
+}
+
+// Display queue items (separated from loading)
+function displayQueueItems(items) {
+    const container = document.getElementById('queueTable');
+    
+    if (items.length === 0) {
+        container.innerHTML = '<p class="text-gray-400">No items in queue</p>';
+        return;
+    }
+    
+    let html = `
+        <table class="w-full text-sm">
+            <thead class="border-b border-gray-700">
+                <tr class="text-left">
+                    <th class="py-2">File</th>
+                    <th class="py-2">Status</th>
+                    <th class="py-2">Profile</th>
+                    <th class="py-2">Priority</th>
+                    <th class="py-2">Progress</th>
+                    <th class="py-2">Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+    `;
+    
+    items.forEach(item => {
+        const fileName = item.file_path.split(/[/\\]/).pop();
+        const statusEmoji = {
+            'pending': '⏳',
+            'processing': '⚙️',
+            'completed': '✅',
+            'failed': '❌',
+            'paused': '⏸️'
+        }[item.status] || '❓';
+        
+        html += `
+            <tr class="border-b border-gray-700 hover:bg-gray-700">
+                <td class="py-2 max-w-xs truncate" title="${item.file_path}">${fileName}</td>
+                <td class="py-2">${statusEmoji} ${item.status}</td>
+                <td class="py-2">${item.profile_id || 'N/A'}</td>
+                <td class="py-2">${item.priority}</td>
+                <td class="py-2">${item.progress.toFixed(1)}%</td>
+                <td class="py-2">
+                    <button onclick="deleteQueueItem(${item.id})" 
+                        class="text-red-400 hover:text-red-300 text-xs">
+                        Delete
+                    </button>
+                </td>
+            </tr>
+        `;
+    });
+    
+    html += '</tbody></table>';
+    container.innerHTML = html;
+}
+
+// Toggle auto-refresh
+function toggleAutoRefresh() {
+    const enabled = document.getElementById('autoRefreshQueue').checked;
+    
+    if (enabled) {
+        // Start auto-refresh every 5 seconds
+        queueRefreshInterval = setInterval(() => {
+            loadQueue();
+        }, 5000);
+        showMessage('Auto-refresh enabled (5s)', 'info');
+    } else {
+        // Stop auto-refresh
+        if (queueRefreshInterval) {
+            clearInterval(queueRefreshInterval);
+            queueRefreshInterval = null;
+        }
+        showMessage('Auto-refresh disabled', 'info');
+    }
+}
+
+// Update loadQueue to store items for filtering
+const originalLoadQueue = loadQueue;
+async function loadQueue() {
+    const items = await apiRequest('/queue');
+    if (items) {
+        allQueueItems = items; // Store for filtering
+        filterQueue(); // Apply current filters
+    }
+}
+
+// Delete queue item
+async function deleteQueueItem(id) {
+    if (!confirm('Delete this item from the queue?')) return;
+    
+    const result = await apiRequest(`/queue/${id}`, {
+        method: 'DELETE'
+    });
+    
+    if (result) {
+        showMessage('Item deleted from queue', 'success');
+        loadQueue();
+    }
+}
+
+// Initialize auto-refresh on page load
+if (document.getElementById('autoRefreshQueue').checked) {
+    toggleAutoRefresh();
 }
 
