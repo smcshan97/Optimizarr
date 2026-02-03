@@ -1,175 +1,77 @@
-# Optimizarr
+# Optimizarr - Automated Media Optimization
 
-**Automated Media Optimization System**
+**Part of the \*arr Stack Family** 🎬
 
-Optimizarr is an intelligent, automated media optimization tool designed for self-hosted media servers. It systematically converts video files to user-specified formats, codecs, and quality settings while intelligently managing system resources and respecting user-defined schedules.
+Optimizarr is an intelligent, automated media optimization tool for self-hosted media servers. Systematically convert video files to modern codecs (AV1, H.265) with intelligent resource management and scheduling.
 
-## Quick Start
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
-### Prerequisites
+## 🚀 Quick Start
 
-- Python 3.11+
-- HandBrakeCLI (for video encoding)
+### Windows
 
-### Installation
+```powershell
+# Extract archive, then:
+.\setup-windows.ps1
+python -m app.main
+```
 
-1. **Clone the repository**
-   ```bash
-   cd /home/claude/optimizarr
-   ```
-
-2. **Install Python dependencies**
-   ```bash
-   pip install -r requirements.txt --break-system-packages
-   ```
-
-3. **Configure environment**
-   ```bash
-   cp .env.example .env
-   # Edit .env and change the secret key and admin credentials
-   ```
-
-4. **Run the application**
-   ```bash
-   python -m app.main
-   ```
-
-5. **Access the web interface**
-   Open your browser to http://localhost:5000
-
-   Default credentials:
-   - Username: `admin`
-   - Password: `admin` (change this immediately!)
-
-## Features
-
-### Core Features
-- ✅ **Automated Media Discovery** - Recursively scan directories for video files
-- ✅ **Smart Queue Management** - Priority-based processing with status tracking
-- ✅ **Multiple Encoding Profiles** - Configure target codecs, resolutions, and quality
-- ✅ **HandBrakeCLI Integration** - Industry-standard video transcoding
-- ✅ **Progress Monitoring** - Real-time encoding progress tracking
-- ✅ **Web Interface** - Clean, responsive UI for complete control
-- ✅ **REST API** - Full programmatic access with JWT authentication
-
-### Planned Features
-- ⏳ **Resource-Aware Processing** - CPU/GPU throttling and auto-pause
-- ⏳ **Flexible Scheduling** - Time windows and day-of-week encoding
-- ⏳ **Hardware Acceleration** - NVENC, QuickSync, VCE support
-- ⏳ **Advanced Profiles** - Two-pass encoding, custom HandBrake arguments
-
-## API Documentation
-
-Once running, visit http://localhost:5000/docs for interactive API documentation.
-
-### Key Endpoints
-
-- `POST /api/auth/login` - Authenticate and receive JWT token
-- `GET /api/profiles` - List encoding profiles
-- `GET /api/scan-roots` - List configured scan directories
-- `GET /api/queue` - View encoding queue
-- `POST /api/queue/scan` - Trigger media scan
-- `POST /api/control/start` - Start encoding
-- `GET /api/stats` - System statistics
-
-## Configuration
-
-### Creating an Encoding Profile
+### Linux / macOS
 
 ```bash
-curl -X POST http://localhost:5000/api/profiles \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "name": "1080p H.265",
-    "resolution": "1920x1080",
-    "codec": "h265",
-    "encoder": "x265",
-    "quality": 28,
-    "audio_codec": "aac",
-    "preset": "medium"
-  }'
+# Extract archive, then:
+./setup.sh
+python3 -m app.main
 ```
 
-### Adding a Scan Root
+**Open:** http://localhost:5000  
+**Login:** admin / admin
 
-```bash
-curl -X POST http://localhost:5000/api/scan-roots \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "path": "/path/to/media",
-    "profile_id": 1,
-    "enabled": true,
-    "recursive": true
-  }'
+⚠️ **Change admin password immediately!**
+
+---
+
+## ✨ Features
+
+- ✅ **Video Scanning** - Find all media files recursively
+- ✅ **HandBrakeCLI** - Industry-standard transcoding
+- ✅ **Profiles** - AV1, H.265, H.264 presets
+- ✅ **Queue** - Priority-based with filters & search
+- ✅ **Scheduling** - Time windows & days
+- ✅ **Web UI** - Dark theme, responsive design
+
+---
+
+## 🐛 Troubleshooting
+
+### "500 Error" on Scan/Edit/Delete
+
+**You're running an OLD version!**
+
+1. Stop server (Ctrl+C)
+2. Extract **v1.0-FIXED.zip**
+3. Run `setup-windows.ps1` or `./setup.sh`
+4. Start: `python -m app.main`
+
+### Database Errors
+
+```powershell
+# Delete old database
+rm data/optimizarr.db
+python -m app.main
 ```
 
-## Development Status
+---
 
-This is **Phase 1** of development - the core backend is functional with:
-- Database and models
-- Authentication system
-- Media scanner
-- Basic encoder
-- REST API
-- Web interface
+## 📚 Full Documentation
 
-## Project Structure
+- **API:** http://localhost:5000/docs
+- **Design:** See `ARR_STACK_DESIGN.md`
+- **Technical:** See `Optimizarr_Technical_Documentation.docx`
 
-```
-optimizarr/
-├── app/
-│   ├── main.py          # FastAPI application
-│   ├── config.py        # Configuration management
-│   ├── database.py      # SQLite database layer
-│   ├── auth.py          # Authentication & JWT
-│   ├── scanner.py       # Media file discovery
-│   ├── encoder.py       # Video encoding
-│   └── api/
-│       ├── routes.py    # API endpoints
-│       ├── auth_routes.py
-│       ├── models.py    # Pydantic models
-│       └── dependencies.py
-├── web/
-│   ├── static/
-│   │   └── js/
-│   │       └── app.js
-│   └── templates/
-│       ├── index.html
-│       └── login.html
-├── data/                # SQLite database (created on first run)
-├── requirements.txt
-└── .env                # Configuration
-```
+---
 
-## Next Steps
+## 📄 License
 
-1. **Test the basic functionality**
-   - Create a profile
-   - Add a scan root
-   - Scan for files
-   - Start encoding
-
-2. **Phase 2: Resource Management**
-   - Implement CPU/GPU monitoring
-   - Add resource throttling
-   - Auto-pause on high system load
-
-3. **Phase 3: Scheduling**
-   - Time window configuration
-   - Day-of-week selection
-   - Automatic start/stop
-
-4. **Phase 4: Docker**
-   - Create Dockerfile
-   - docker-compose configuration
-   - GPU passthrough setup
-
-## License
-
-MIT License - see LICENSE file
-
-## Author
-
-Built with Claude Code
+MIT © 2026 Shyriq' McShan
