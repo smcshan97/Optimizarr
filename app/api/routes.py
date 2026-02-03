@@ -219,6 +219,25 @@ async def update_scan_root(
         )
 
 
+@router.post("/scan-roots/{root_id}/scan", response_model=MessageResponse)
+async def scan_single_root(
+    root_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """Trigger scan for a specific scan root."""
+    # Get the root
+    root = db.get_scan_root(root_id)
+    if not root:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scan root {root_id} not found"
+        )
+    
+    # TODO: Implement actual scanning logic here
+    # For now, return success message
+    return MessageResponse(message=f"Scan initiated for {root['path']}")
+
+
 # Queue Endpoints
 @router.get("/queue", response_model=List[QueueItemResponse])
 async def list_queue(

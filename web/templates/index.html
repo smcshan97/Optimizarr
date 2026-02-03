@@ -91,7 +91,6 @@
                     <button onclick="switchTab('queue')" id="tab-queue" class="tab-button active">Queue</button>
                     <button onclick="switchTab('profiles')" id="tab-profiles" class="tab-button">Profiles</button>
                     <button onclick="switchTab('scanroots')" id="tab-scanroots" class="tab-button">Scan Roots</button>
-                    <button onclick="switchTab('settings')" id="tab-settings" class="tab-button">Settings</button>
                     <button onclick="switchTab('schedule')" id="tab-schedule" class="tab-button">Schedule</button>
                 </nav>
             </div>
@@ -152,6 +151,61 @@
         </div>
 
         <div id="content-settings" class="tab-content hidden">
+            <!-- Account Management Section -->
+            <div class="bg-gray-800 rounded-lg p-6 mb-6">
+                <h2 class="text-xl font-bold mb-6">Account Management</h2>
+                
+                <div class="space-y-6">
+                    <!-- Change Password -->
+                    <div class="border-b border-gray-700 pb-6">
+                        <h3 class="text-lg font-semibold mb-4">Change Password</h3>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">Current Password</label>
+                                <input type="password" id="currentPassword" 
+                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
+                                    placeholder="Enter current password">
+                            </div>
+                            <div></div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">New Password</label>
+                                <input type="password" id="newPassword" 
+                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
+                                    placeholder="Enter new password">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">Confirm New Password</label>
+                                <input type="password" id="confirmPassword" 
+                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
+                                    placeholder="Confirm new password">
+                            </div>
+                        </div>
+                        <button onclick="changePassword()" 
+                            class="mt-4 bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded">
+                            Update Password
+                        </button>
+                    </div>
+                    
+                    <!-- Account Information -->
+                    <div>
+                        <h3 class="text-lg font-semibold mb-4">Account Information</h3>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">Username</label>
+                                <input type="text" id="accountUsername" readonly
+                                    class="w-full bg-gray-900 border border-gray-600 rounded px-4 py-2 text-gray-400 cursor-not-allowed">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">Role</label>
+                                <input type="text" id="accountRole" readonly
+                                    class="w-full bg-gray-900 border border-gray-600 rounded px-4 py-2 text-gray-400 cursor-not-allowed">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Resource Management Section -->
             <div class="bg-gray-800 rounded-lg p-6">
                 <h2 class="text-xl font-bold mb-6">Resource Management Settings</h2>
                 
@@ -431,9 +485,17 @@
                     
                     <div>
                         <label class="block text-sm font-medium mb-2">Directory Path *</label>
-                        <input type="text" id="scanRootPath" required 
-                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2"
-                            placeholder="C:\Media\Movies or /mnt/media/movies">
+                        <div class="flex gap-2">
+                            <input type="text" id="scanRootPath" required 
+                                class="flex-1 bg-gray-700 border border-gray-600 rounded px-4 py-2"
+                                placeholder="C:\Media\Movies or /mnt/media/movies">
+                            <button type="button" onclick="browseFolderPath()" 
+                                class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded whitespace-nowrap">
+                                📁 Browse
+                            </button>
+                        </div>
+                        <input type="file" id="folderBrowser" webkitdirectory directory multiple 
+                            class="hidden" onchange="handleFolderSelect(event)">
                         <p class="text-xs text-gray-400 mt-1">Absolute path to scan for video files</p>
                     </div>
                     

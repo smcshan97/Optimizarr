@@ -384,6 +384,10 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // Settings functions
 async function loadSettings() {
+    // Load account info
+    loadAccountInfo();
+    
+    // Load resource settings
     const settings = await apiRequest('/settings/resources');
     if (settings) {
         document.getElementById('cpuThreshold').value = parseFloat(settings.resource_cpu_threshold || '90');
@@ -1039,4 +1043,78 @@ document.addEventListener('DOMContentLoaded', function() {
         updatePresetOptions();
     }
 });
+
+
+// ============================================================
+// FOLDER BROWSER
+// ============================================================
+
+function browseFolderPath() {
+    document.getElementById('folderBrowser').click();
+}
+
+function handleFolderSelect(event) {
+    const files = event.target.files;
+    if (files.length > 0) {
+        // Get the path from the first file
+        const fullPath = files[0].webkitRelativePath || files[0].path;
+        // Extract just the directory path (remove filename)
+        const pathParts = fullPath.split('/');
+        pathParts.pop(); // Remove filename
+        const dirPath = pathParts.join('/');
+        
+        // Set the input value
+        document.getElementById('scanRootPath').value = dirPath || fullPath;
+    }
+}
+
+
+// ============================================================
+// ACCOUNT MANAGEMENT
+// ============================================================
+
+async function changePassword() {
+    const current = document.getElementById('currentPassword').value;
+    const newPass = document.getElementById('newPassword').value;
+    const confirm = document.getElementById('confirmPassword').value;
+    
+    if (!current || !newPass || !confirm) {
+        showMessage('Please fill in all password fields', 'error');
+        return;
+    }
+    
+    if (newPass !== confirm) {
+        showMessage('New passwords do not match', 'error');
+        return;
+    }
+    
+    if (newPass.length < 6) {
+        showMessage('Password must be at least 6 characters', 'error');
+        return;
+    }
+    
+    const result = await apiRequest('/auth/change-password', {
+        method: 'POST',
+        body: JSON.stringify({
+            current_password: current,
+            new_password: newPass
+        })
+    });
+    
+    if (result) {
+        showMessage('Password updated successfully!', 'success');
+        document.getElementById('currentPassword').value = '';
+        document.getElementById('newPassword').value = '';
+        document.getElementById('confirmPassword').value = '';
+    }
+}
+
+// Load account info when settings tab opens
+function loadAccountInfo() {
+    const username = localStorage.getItem('username') || 'admin';
+    const isAdmin = localStorage.getItem('is_admin') === 'true';
+    
+    document.getElementById('accountUsername').value = username;
+    document.getElementById('accountRole').value = isAdmin ? 'Administrator' : 'User';
+}
 
