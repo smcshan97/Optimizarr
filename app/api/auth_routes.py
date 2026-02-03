@@ -4,7 +4,7 @@ Authentication API routes for Optimizarr.
 from fastapi import APIRouter, Depends, HTTPException, status
 from typing import Dict
 
-from app.api.models import LoginRequest, LoginResponse, UserResponse, MessageResponse
+from app.api.models import LoginRequest, LoginResponse, UserResponse, MessageResponse, ChangePasswordRequest
 from app.api.dependencies import get_current_user, get_current_admin_user
 from app.auth import auth
 from app.database import db
@@ -100,16 +100,14 @@ async def logout(current_user: Dict = Depends(get_current_user)):
 
 @router.post("/change-password", response_model=MessageResponse)
 async def change_password(
-    current_password: str,
-    new_password: str,
+    request: ChangePasswordRequest,
     current_user: Dict = Depends(get_current_user)
 ):
     """
     Change current user's password.
     
     Args:
-        current_password: User's current password
-        new_password: New password to set
+        request: Current and new passwords
         current_user: Injected current user from token
         
     Returns:
@@ -118,15 +116,23 @@ async def change_password(
     Raises:
         HTTPException: If current password is incorrect
     """
+    # Get user with password hash from database
+    user = db.get_user(current_user['id'])
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
     # Verify current password
-    if not auth.verify_password(current_password, current_user['password_hash']):
+    if not auth.verify_password(request.current_password, user['password_hash']):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Current password is incorrect"
         )
     
     # Hash new password
-    new_password_hash = auth.hash_password(new_password)
+    new_password_hash = auth.hash_password(request.new_password)
     
     # Update password in database
     with db.get_connection() as conn:

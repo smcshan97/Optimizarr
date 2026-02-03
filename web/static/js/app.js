@@ -1056,16 +1056,66 @@ function browseFolderPath() {
 function handleFolderSelect(event) {
     const files = event.target.files;
     if (files.length > 0) {
-        // Get the path from the first file
-        const fullPath = files[0].webkitRelativePath || files[0].path;
-        // Extract just the directory path (remove filename)
-        const pathParts = fullPath.split('/');
-        pathParts.pop(); // Remove filename
-        const dirPath = pathParts.join('/');
+        // Try multiple methods to get the full path
+        const firstFile = files[0];
+        let dirPath = '';
         
-        // Set the input value
-        document.getElementById('scanRootPath').value = dirPath || fullPath;
+        // Method 1: webkitRelativePath (most reliable for directory)
+        if (firstFile.webkitRelativePath) {
+            const pathParts = firstFile.webkitRelativePath.split('/');
+            if (pathParts.length > 1) {
+                pathParts.pop(); // Remove filename
+                dirPath = pathParts.join('/');
+            }
+        }
+        
+        // Method 2: Try to construct from multiple files
+        if (!dirPath && files.length > 1) {
+            const commonPath = findCommonPath(Array.from(files).map(f => f.webkitRelativePath || f.name));
+            if (commonPath) dirPath = commonPath;
+        }
+        
+        // Method 3: Just use the folder name (last resort)
+        if (!dirPath && firstFile.webkitRelativePath) {
+            dirPath = firstFile.webkitRelativePath.split('/')[0];
+        }
+        
+        // If we got something, use it
+        if (dirPath) {
+            const pathInput = document.getElementById('scanRootPath');
+            const currentValue = pathInput.value;
+            
+            // If input is empty or just a placeholder, replace it
+            if (!currentValue || currentValue.includes('\\Media\\') || currentValue.includes('/mnt/media/')) {
+                pathInput.value = dirPath;
+            } else {
+                // Append to existing path if it looks like a base path
+                pathInput.value = currentValue.replace(/\/$/, '') + '/' + dirPath;
+            }
+            
+            showMessage('Folder selected! You may need to adjust the full path manually.', 'info');
+        } else {
+            showMessage('Could not extract path. Please enter the full path manually.', 'error');
+        }
     }
+}
+
+function findCommonPath(paths) {
+    if (paths.length === 0) return '';
+    
+    const splitPaths = paths.map(p => p.split('/'));
+    const commonParts = [];
+    
+    for (let i = 0; i < splitPaths[0].length - 1; i++) {
+        const part = splitPaths[0][i];
+        if (splitPaths.every(p => p[i] === part)) {
+            commonParts.push(part);
+        } else {
+            break;
+        }
+    }
+    
+    return commonParts.join('/');
 }
 
 

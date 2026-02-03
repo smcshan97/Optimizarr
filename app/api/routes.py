@@ -225,6 +225,8 @@ async def scan_single_root(
     current_user: dict = Depends(get_current_user)
 ):
     """Trigger scan for a specific scan root."""
+    from app.scanner import MediaScanner
+    
     # Get the root
     root = db.get_scan_root(root_id)
     if not root:
@@ -233,9 +235,18 @@ async def scan_single_root(
             detail=f"Scan root {root_id} not found"
         )
     
-    # TODO: Implement actual scanning logic here
-    # For now, return success message
-    return MessageResponse(message=f"Scan initiated for {root['path']}")
+    # Initialize scanner and scan
+    scanner = MediaScanner()
+    try:
+        files_added = scanner.scan_root(root_id)
+        return MessageResponse(
+            message=f"Scan complete! Found {files_added} video file(s) and added to queue."
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Scan failed: {str(e)}"
+        )
 
 
 # Queue Endpoints

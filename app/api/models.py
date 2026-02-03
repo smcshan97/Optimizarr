@@ -103,6 +103,11 @@ class UserResponse(BaseModel):
     last_login: Optional[str]
 
 
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=6)
+
+
 # Statistics Models
 class StatsResponse(BaseModel):
     total_files_processed: int
