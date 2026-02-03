@@ -111,19 +111,19 @@ async def startup_event():
     if not profiles:
         print("Creating default encoding profile...")
         db.create_profile(
-            name="1080p H.265 Balanced",
+            name="1080p AV1 Balanced (Movies)",
             resolution="1920x1080",
-            framerate=None,
-            codec="h265",
-            encoder="x265",
+            framerate=24,
+            codec="av1",
+            encoder="svt_av1",
             quality=28,
-            audio_codec="aac",
-            preset="medium",
+            audio_codec="opus",
+            preset="6",
             two_pass=False,
             custom_args=None,
             is_default=True
         )
-        print("✓ Created default profile: 1080p H.265 Balanced")
+        print("✓ Created default profile: 1080p AV1 Balanced (Movies)")
     
     # Initialize scheduler
     initialize_scheduler()

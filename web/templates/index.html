@@ -314,16 +314,27 @@
                     <div class="grid grid-cols-2 gap-4">
                         <div>
                             <label class="block text-sm font-medium mb-2">Resolution</label>
-                            <input type="text" id="profileResolution" 
-                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2"
-                                placeholder="1920x1080 or leave empty to preserve">
+                            <select id="profileResolution" 
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                                <option value="">Preserve Source (recommended)</option>
+                                <option value="1920x1080">1920x1080 (1080p/HD)</option>
+                                <option value="2560x1440">2560x1440 (1440p/2K)</option>
+                                <option value="3840x2160">3840x2160 (2160p/4K)</option>
+                                <option value="7680x4320">7680x4320 (4320p/8K)</option>
+                            </select>
+                            <p class="text-xs text-gray-400 mt-1">Leave empty to keep original quality</p>
                         </div>
                         
                         <div>
                             <label class="block text-sm font-medium mb-2">Framerate (FPS)</label>
-                            <input type="number" id="profileFramerate" 
-                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2"
-                                placeholder="Leave empty for VFR">
+                            <select id="profileFramerate" 
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                                <option value="">Variable (VFR) - Preserve Source</option>
+                                <option value="24">24 fps (Movies)</option>
+                                <option value="30">30 fps (Standard TV)</option>
+                                <option value="60">60 fps (Action/Sports)</option>
+                            </select>
+                            <p class="text-xs text-gray-400 mt-1">24=Movies, 30=TV, 60=Sports/Action</p>
                         </div>
                     </div>
                     
