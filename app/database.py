@@ -250,6 +250,45 @@ class Database:
             cursor.execute(query)
             return [dict(row) for row in cursor.fetchall()]
     
+    def get_scan_root(self, root_id: int) -> Optional[Dict]:
+        """Get a specific scan root by ID."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM scan_roots WHERE id = ?", (root_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    
+    def update_scan_root(self, root_id: int, path: str = None, profile_id: int = None, 
+                        enabled: bool = None, recursive: bool = None) -> bool:
+        """Update a scan root."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Build update query dynamically
+            updates = []
+            values = []
+            
+            if path is not None:
+                updates.append("path = ?")
+                values.append(path)
+            if profile_id is not None:
+                updates.append("profile_id = ?")
+                values.append(profile_id)
+            if enabled is not None:
+                updates.append("enabled = ?")
+                values.append(enabled)
+            if recursive is not None:
+                updates.append("recursive = ?")
+                values.append(recursive)
+            
+            if not updates:
+                return False
+            
+            values.append(root_id)
+            query = f"UPDATE scan_roots SET {', '.join(updates)} WHERE id = ?"
+            cursor.execute(query, values)
+            return cursor.rowcount > 0
+    
     def delete_scan_root(self, root_id: int) -> bool:
         """Delete a scan root by ID."""
         with self.get_connection() as conn:
@@ -361,6 +400,10 @@ class Database:
             cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
             row = cursor.fetchone()
             return dict(row) if row else None
+    
+    def get_user(self, user_id: int) -> Optional[Dict]:
+        """Get a user by ID (alias for get_user_by_id)."""
+        return self.get_user_by_id(user_id)
     
     def update_user_login(self, user_id: int):
         """Update user's last login timestamp."""
