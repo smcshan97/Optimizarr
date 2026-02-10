@@ -45,12 +45,19 @@ settings = Settings()
 
 def ensure_data_directories():
     """Ensure required data directories exist."""
-    db_path = Path(settings.db_path)
+    # Fix path to be relative if it's absolute
+    db_path_str = settings.db_path
+    if db_path_str.startswith('/home/') or db_path_str.startswith('/app/'):
+        # Linux path in .env, convert to relative
+        db_path_str = 'data/optimizarr.db'
+        settings.db_path = db_path_str
+    
+    db_path = Path(db_path_str)
     db_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # Create config directory
-    config_dir = Path("/app/config")
+    # Create config directory if we're in docker
+    config_dir = Path("config")
     config_dir.mkdir(parents=True, exist_ok=True)
     
-    print(f"✓ Data directory: {db_path.parent}")
-    print(f"✓ Config directory: {config_dir}")
+    print(f"✓ Data directory: {db_path.parent.absolute()}")
+    print(f"✓ Config directory: {config_dir.absolute()}")

@@ -17,6 +17,11 @@ class Database:
     
     def __init__(self, db_path: str = None):
         self.db_path = db_path or settings.db_path
+        
+        # CRITICAL: Ensure directory exists before trying to connect
+        db_file = Path(self.db_path)
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+        
         self.initialize_database()
     
     @contextmanager
