@@ -8,7 +8,7 @@ from app.api.models import (
     ProfileCreate, ProfileResponse,
     ScanRootCreate, ScanRootResponse,
     QueueItemResponse, QueueUpdateRequest,
-    StatsResponse, MessageResponse
+    StatsResponse, MessageResponse, Dict
 )
 from app.api.dependencies import get_current_user, get_current_admin_user
 from app.database import db

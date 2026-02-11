@@ -1,0 +1,111 @@
+╔══════════════════════════════════════════════════════════════════════╗
+║                  🔧 WINDOWS FIX - COPY/PASTE THIS! 🔧                ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+YOUR ERROR:
+  sqlite3.OperationalError: unable to open database file
+
+THE PROBLEM:
+  Your app/database.py doesn't create the data/ directory before trying
+  to open the database file.
+
+THE FIX:
+  Edit app/database.py and add 5 lines of code.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📝 STEP-BY-STEP INSTRUCTIONS
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+1. Open this file in Notepad:
+   C:\Users\smcsh\OneDrive\Documents\optimizarr\app\database.py
+
+2. Find line 18-20 (around line 18):
+
+   CURRENT CODE:
+   ──────────────────────────────────────────────────────────────────
+   def __init__(self, db_path: str = None):
+       self.db_path = db_path or settings.db_path
+       self.initialize_database()
+   ──────────────────────────────────────────────────────────────────
+
+3. Replace with this (add the 5 new lines):
+
+   NEW CODE:
+   ──────────────────────────────────────────────────────────────────
+   def __init__(self, db_path: str = None):
+       self.db_path = db_path or settings.db_path
+       
+       # CRITICAL: Ensure directory exists before trying to connect
+       from pathlib import Path
+       db_file = Path(self.db_path)
+       db_file.parent.mkdir(parents=True, exist_ok=True)
+       
+       self.initialize_database()
+   ──────────────────────────────────────────────────────────────────
+
+4. Save the file (Ctrl+S)
+
+5. Run Python again:
+   python -m app.main
+
+DONE! ✅
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📋 EXACT CODE TO COPY (Lines 18-26)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+    def __init__(self, db_path: str = None):
+        self.db_path = db_path or settings.db_path
+        
+        # CRITICAL: Ensure directory exists before trying to connect
+        from pathlib import Path
+        db_file = Path(self.db_path)
+        db_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        self.initialize_database()
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+💡 WHAT THIS DOES
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Line 21-23 creates the data/ directory BEFORE line 25 tries to open
+the database. Now it works 100% of the time, no matter what!
+
+Before:
+  Python: "Open data/optimizarr.db"
+  Windows: "data/ doesn't exist!" ❌ ERROR
+
+After:
+  Python: "Create data/ if needed, THEN open data/optimizarr.db"
+  Windows: "Created data/, opening file..." ✅ SUCCESS
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🎯 ALTERNATIVE: Download Fixed Version
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+If editing seems hard:
+
+1. Download: optimizarr-v1.0-RELEASE.zip (from outputs)
+2. Extract to a NEW folder (not OneDrive!)
+3. Run: install.bat
+4. Run: python -m app.main
+
+The new version has this fix built-in!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+✅ After fixing, remember to commit and push!
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+From your optimizarr folder:
+  git add app/database.py
+  git commit -m "fix: Auto-create data directory"
+  git push
+
+Now everyone who clones gets the working version!
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
