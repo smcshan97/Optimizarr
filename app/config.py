@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     
     # Database
-    db_path: str = "/app/data/optimizarr.db"
+    db_path: str = "data/optimizarr.db"
     
     # JWT
     jwt_expiration_hours: int = 24
