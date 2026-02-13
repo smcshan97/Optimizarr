@@ -1061,76 +1061,83 @@ document.addEventListener('DOMContentLoaded', function() {
 
 
 // ============================================================
-// FOLDER BROWSER
+// FOLDER BROWSER (Server-Side Directory Browser)
 // ============================================================
 
-function browseFolderPath() {
-    document.getElementById('folderBrowser').click();
+async function browseFolderPath() {
+    // Open the folder browser modal
+    document.getElementById('folderBrowserModal').classList.remove('hidden');
+    await loadDirectoryListing('');
 }
 
-function handleFolderSelect(event) {
-    const files = event.target.files;
-    if (files.length > 0) {
-        // Try multiple methods to get the full path
-        const firstFile = files[0];
-        let dirPath = '';
-        
-        // Method 1: webkitRelativePath (most reliable for directory)
-        if (firstFile.webkitRelativePath) {
-            const pathParts = firstFile.webkitRelativePath.split('/');
-            if (pathParts.length > 1) {
-                pathParts.pop(); // Remove filename
-                dirPath = pathParts.join('/');
-            }
+function closeFolderBrowser() {
+    document.getElementById('folderBrowserModal').classList.add('hidden');
+}
+
+async function loadDirectoryListing(path) {
+    const container = document.getElementById('folderBrowserList');
+    container.innerHTML = '<p class="text-gray-400 p-4">Loading...</p>';
+
+    // Update current path display
+    document.getElementById('folderBrowserPath').textContent = path || 'Root';
+    document.getElementById('folderBrowserPath').dataset.currentPath = path;
+
+    try {
+        const data = await apiRequest(`/browse?path=${encodeURIComponent(path)}`);
+        if (!data) {
+            container.innerHTML = '<p class="text-red-400 p-4">Failed to load directories</p>';
+            return;
         }
-        
-        // Method 2: Try to construct from multiple files
-        if (!dirPath && files.length > 1) {
-            const commonPath = findCommonPath(Array.from(files).map(f => f.webkitRelativePath || f.name));
-            if (commonPath) dirPath = commonPath;
+
+        let html = '';
+
+        // Parent directory link
+        if (data.parent !== null && data.parent !== undefined) {
+            html += `
+                <div class="flex items-center gap-3 px-4 py-2 hover:bg-gray-600 cursor-pointer rounded"
+                     onclick="loadDirectoryListing('${data.parent.replace(/\\/g, '\\\\')}')">
+                    <span class="text-yellow-400">📁</span>
+                    <span class="text-blue-400">..</span>
+                </div>
+            `;
         }
-        
-        // Method 3: Just use the folder name (last resort)
-        if (!dirPath && firstFile.webkitRelativePath) {
-            dirPath = firstFile.webkitRelativePath.split('/')[0];
+
+        if (data.dirs.length === 0 && data.parent === null) {
+            html += '<p class="text-gray-400 p-4">No directories found</p>';
         }
-        
-        // If we got something, use it
-        if (dirPath) {
-            const pathInput = document.getElementById('scanRootPath');
-            const currentValue = pathInput.value;
-            
-            // If input is empty or just a placeholder, replace it
-            if (!currentValue || currentValue.includes('\\Media\\') || currentValue.includes('/mnt/media/')) {
-                pathInput.value = dirPath;
-            } else {
-                // Append to existing path if it looks like a base path
-                pathInput.value = currentValue.replace(/\/$/, '') + '/' + dirPath;
-            }
-            
-            showMessage('Folder selected! You may need to adjust the full path manually.', 'info');
-        } else {
-            showMessage('Could not extract path. Please enter the full path manually.', 'error');
-        }
+
+        data.dirs.forEach(dir => {
+            const escapedPath = dir.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+            html += `
+                <div class="flex items-center gap-3 px-4 py-2 hover:bg-gray-600 cursor-pointer rounded group"
+                     ondblclick="loadDirectoryListing('${escapedPath}')">
+                    <span class="text-yellow-400">📁</span>
+                    <span class="flex-1" onclick="loadDirectoryListing('${escapedPath}')">${dir.name}</span>
+                    <button onclick="event.stopPropagation(); selectBrowsedFolder('${escapedPath}')"
+                        class="hidden group-hover:block bg-blue-600 hover:bg-blue-700 px-2 py-1 rounded text-xs">
+                        Select
+                    </button>
+                </div>
+            `;
+        });
+
+        container.innerHTML = html;
+    } catch (err) {
+        container.innerHTML = `<p class="text-red-400 p-4">Error: ${err.message}</p>`;
     }
 }
 
-function findCommonPath(paths) {
-    if (paths.length === 0) return '';
-    
-    const splitPaths = paths.map(p => p.split('/'));
-    const commonParts = [];
-    
-    for (let i = 0; i < splitPaths[0].length - 1; i++) {
-        const part = splitPaths[0][i];
-        if (splitPaths.every(p => p[i] === part)) {
-            commonParts.push(part);
-        } else {
-            break;
-        }
+function selectCurrentFolder() {
+    const currentPath = document.getElementById('folderBrowserPath').dataset.currentPath;
+    if (currentPath) {
+        selectBrowsedFolder(currentPath);
     }
-    
-    return commonParts.join('/');
+}
+
+function selectBrowsedFolder(path) {
+    document.getElementById('scanRootPath').value = path;
+    closeFolderBrowser();
+    showMessage('Folder selected: ' + path, 'success');
 }
 
 
@@ -1277,46 +1284,80 @@ function filterQueue() {
 // Display queue items (separated from loading)
 function displayQueueItems(items) {
     const container = document.getElementById('queueTable');
-    
+
     if (items.length === 0) {
         container.innerHTML = '<p class="text-gray-400">No items in queue</p>';
         return;
     }
-    
+
+    // Count statuses for summary
+    const counts = { pending: 0, processing: 0, completed: 0, failed: 0, paused: 0 };
+    items.forEach(item => { counts[item.status] = (counts[item.status] || 0) + 1; });
+
     let html = `
+        <div class="flex gap-4 mb-4 text-xs text-gray-400">
+            <span>Total: ${items.length}</span>
+            ${counts.processing ? `<span class="text-blue-400">Processing: ${counts.processing}</span>` : ''}
+            ${counts.pending ? `<span class="text-yellow-400">Pending: ${counts.pending}</span>` : ''}
+            ${counts.completed ? `<span class="text-green-400">Completed: ${counts.completed}</span>` : ''}
+            ${counts.failed ? `<span class="text-red-400">Failed: ${counts.failed}</span>` : ''}
+            ${counts.paused ? `<span class="text-orange-400">Paused: ${counts.paused}</span>` : ''}
+        </div>
         <table class="w-full text-sm">
             <thead class="border-b border-gray-700">
                 <tr class="text-left">
                     <th class="py-2">File</th>
                     <th class="py-2">Status</th>
-                    <th class="py-2">Profile</th>
-                    <th class="py-2">Priority</th>
                     <th class="py-2">Progress</th>
+                    <th class="py-2">Priority</th>
                     <th class="py-2">Actions</th>
                 </tr>
             </thead>
             <tbody>
     `;
-    
+
     items.forEach(item => {
         const fileName = item.file_path.split(/[/\\]/).pop();
-        const statusEmoji = {
-            'pending': '⏳',
-            'processing': '⚙️',
-            'completed': '✅',
-            'failed': '❌',
-            'paused': '⏸️'
-        }[item.status] || '❓';
-        
+        const statusConfig = {
+            'pending':    { emoji: '⏳', color: 'text-yellow-400', barColor: 'bg-yellow-500' },
+            'processing': { emoji: '⚙️', color: 'text-blue-400',   barColor: 'bg-blue-500' },
+            'completed':  { emoji: '✅', color: 'text-green-400',  barColor: 'bg-green-500' },
+            'failed':     { emoji: '❌', color: 'text-red-400',    barColor: 'bg-red-500' },
+            'paused':     { emoji: '⏸️', color: 'text-orange-400', barColor: 'bg-orange-500' }
+        };
+        const sc = statusConfig[item.status] || { emoji: '❓', color: 'text-gray-400', barColor: 'bg-gray-500' };
+        const progress = item.progress || 0;
+
+        // Build progress cell - prominent bar for processing, simple text for others
+        let progressCell;
+        if (item.status === 'processing' || (item.status === 'paused' && progress > 0)) {
+            progressCell = `
+                <td class="py-2 min-w-[180px]">
+                    <div class="flex items-center gap-2">
+                        <div class="flex-1 bg-gray-600 rounded-full h-3 overflow-hidden">
+                            <div class="${sc.barColor} h-3 rounded-full transition-all duration-700"
+                                 style="width: ${progress}%"></div>
+                        </div>
+                        <span class="${sc.color} font-mono text-xs font-bold w-12 text-right">${progress.toFixed(1)}%</span>
+                    </div>
+                </td>
+            `;
+        } else if (item.status === 'completed') {
+            progressCell = `<td class="py-2"><span class="text-green-400 text-xs font-bold">100%</span></td>`;
+        } else if (item.status === 'failed') {
+            progressCell = `<td class="py-2"><span class="text-red-400 text-xs" title="${item.error_message || ''}">${item.error_message ? 'Error' : '-'}</span></td>`;
+        } else {
+            progressCell = `<td class="py-2"><span class="text-gray-500 text-xs">-</span></td>`;
+        }
+
         html += `
             <tr class="border-b border-gray-700 hover:bg-gray-700">
                 <td class="py-2 max-w-xs truncate" title="${item.file_path}">${fileName}</td>
-                <td class="py-2">${statusEmoji} ${item.status}</td>
-                <td class="py-2">${item.profile_id || 'N/A'}</td>
+                <td class="py-2"><span class="${sc.color}">${sc.emoji} ${item.status}</span></td>
+                ${progressCell}
                 <td class="py-2">${item.priority}</td>
-                <td class="py-2">${item.progress.toFixed(1)}%</td>
                 <td class="py-2">
-                    <button onclick="deleteQueueItem(${item.id})" 
+                    <button onclick="deleteQueueItem(${item.id})"
                         class="text-red-400 hover:text-red-300 text-xs">
                         Delete
                     </button>
@@ -1324,7 +1365,7 @@ function displayQueueItems(items) {
             </tr>
         `;
     });
-    
+
     html += '</tbody></table>';
     container.innerHTML = html;
 }

@@ -1,8 +1,11 @@
 """
 Main API routes for Optimizarr.
 """
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
 from typing import List, Optional
+from pathlib import Path
+import os
+import string
 
 from app.api.models import (
     ProfileCreate, ProfileResponse,
@@ -469,6 +472,71 @@ async def update_resource_settings(
             """, (key, value))
     
     return MessageResponse(message="Resource settings updated")
+
+
+# Directory Browser Endpoint
+@router.get("/browse")
+async def browse_directories(
+    path: str = Query("", description="Directory path to browse. Empty returns root drives/mount points."),
+    current_user: dict = Depends(get_current_user)
+):
+    """Browse server directories for scan root selection."""
+    dirs = []
+
+    if not path:
+        # Return root directories / drives
+        if os.name == 'nt':
+            # Windows: list available drive letters
+            for letter in string.ascii_uppercase:
+                drive = f"{letter}:\\"
+                if os.path.isdir(drive):
+                    dirs.append({
+                        'name': f"{letter}:",
+                        'path': drive,
+                    })
+        else:
+            # Linux/Mac: start at /
+            try:
+                for entry in sorted(os.scandir('/'), key=lambda e: e.name):
+                    if entry.is_dir():
+                        dirs.append({
+                            'name': entry.name,
+                            'path': entry.path,
+                        })
+            except PermissionError:
+                pass
+        return {'path': '', 'parent': None, 'dirs': dirs}
+
+    # Normalize and resolve the path
+    target = Path(path).resolve()
+
+    if not target.is_dir():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Not a valid directory: {path}"
+        )
+
+    # Compute parent path
+    parent = str(target.parent) if target.parent != target else None
+
+    try:
+        for entry in sorted(os.scandir(str(target)), key=lambda e: e.name.lower()):
+            if entry.is_dir() and not entry.name.startswith('.'):
+                dirs.append({
+                    'name': entry.name,
+                    'path': entry.path,
+                })
+    except PermissionError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Permission denied: {path}"
+        )
+
+    return {
+        'path': str(target),
+        'parent': parent,
+        'dirs': dirs,
+    }
 
 
 # Health check

@@ -514,16 +514,14 @@
                     <div>
                         <label class="block text-sm font-medium mb-2">Directory Path *</label>
                         <div class="flex gap-2">
-                            <input type="text" id="scanRootPath" required 
+                            <input type="text" id="scanRootPath" required
                                 class="flex-1 bg-gray-700 border border-gray-600 rounded px-4 py-2"
                                 placeholder="C:\Media\Movies or /mnt/media/movies">
-                            <button type="button" onclick="browseFolderPath()" 
+                            <button type="button" onclick="browseFolderPath()"
                                 class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded whitespace-nowrap">
                                 📁 Browse
                             </button>
                         </div>
-                        <input type="file" id="folderBrowser" webkitdirectory directory multiple 
-                            class="hidden" onchange="handleFolderSelect(event)">
                         <p class="text-xs text-gray-400 mt-1">Absolute path to scan for video files</p>
                     </div>
                     
@@ -560,6 +558,29 @@
                         </button>
                     </div>
                 </form>
+            </div>
+        </div>
+
+        <!-- Folder Browser Modal -->
+        <div id="folderBrowserModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
+            <div class="bg-gray-800 rounded-lg p-6 max-w-lg w-full max-h-[80vh] flex flex-col">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-xl font-bold">Browse Server Directories</h3>
+                    <button onclick="closeFolderBrowser()" class="text-gray-400 hover:text-white">✕</button>
+                </div>
+                <div class="flex items-center gap-2 mb-4 p-2 bg-gray-900 rounded text-sm">
+                    <span class="text-gray-400">Path:</span>
+                    <span id="folderBrowserPath" class="text-blue-400 truncate" data-current-path="">Root</span>
+                </div>
+                <div id="folderBrowserList" class="flex-1 overflow-y-auto bg-gray-700 rounded p-2 mb-4 min-h-[300px] max-h-[400px]">
+                    <p class="text-gray-400 p-4">Loading...</p>
+                </div>
+                <div class="flex justify-end gap-3">
+                    <button onclick="closeFolderBrowser()"
+                        class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded">Cancel</button>
+                    <button onclick="selectCurrentFolder()"
+                        class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">Select This Folder</button>
+                </div>
             </div>
         </div>
 
