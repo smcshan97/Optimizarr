@@ -3,6 +3,8 @@ Resource monitoring module for Optimizarr.
 Monitors CPU, memory, GPU, and disk I/O to enable intelligent throttling.
 """
 import psutil
+import subprocess
+import json
 import time
 from typing import Dict, Optional, List
 from datetime import datetime
@@ -10,23 +12,50 @@ from datetime import datetime
 
 class ResourceMonitor:
     """Monitors system resources (CPU, memory, GPU, disk I/O)."""
-    
+
     def __init__(self):
+        self._gpu_method = None  # 'pynvml' or 'nvidia-smi' or None
         self.gpu_available = self._init_gpu_monitoring()
         self.monitoring_interval = 2.0  # seconds
         self._last_sample = None
-        
+
     def _init_gpu_monitoring(self) -> bool:
         """Initialize GPU monitoring if NVIDIA GPU is available."""
+        # Try pynvml first
         try:
             import pynvml
             pynvml.nvmlInit()
             device_count = pynvml.nvmlDeviceGetCount()
-            print(f"✓ GPU monitoring enabled: {device_count} NVIDIA GPU(s) detected")
-            return True
+            if device_count > 0:
+                name = pynvml.nvmlDeviceGetName(pynvml.nvmlDeviceGetHandleByIndex(0))
+                if isinstance(name, bytes):
+                    name = name.decode('utf-8')
+                print(f"GPU monitoring enabled (pynvml): {device_count} NVIDIA GPU(s) detected - {name}")
+                self._gpu_method = 'pynvml'
+                return True
+        except ImportError:
+            print("pynvml not installed, trying nvidia-smi fallback...")
         except Exception as e:
-            print(f"⚠ GPU monitoring not available: {e}")
-            return False
+            print(f"pynvml init failed ({e}), trying nvidia-smi fallback...")
+
+        # Fallback: try nvidia-smi
+        try:
+            result = subprocess.run(
+                ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader,nounits'],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                gpu_names = result.stdout.strip().split('\n')
+                print(f"GPU monitoring enabled (nvidia-smi): {len(gpu_names)} NVIDIA GPU(s) detected - {gpu_names[0].strip()}")
+                self._gpu_method = 'nvidia-smi'
+                return True
+        except FileNotFoundError:
+            print("nvidia-smi not found in PATH")
+        except Exception as e:
+            print(f"nvidia-smi fallback failed: {e}")
+
+        print("GPU monitoring not available: no NVIDIA GPU detected or drivers not installed")
+        return False
     
     def get_cpu_usage(self, interval: float = 1.0) -> float:
         """
@@ -84,46 +113,54 @@ class ResourceMonitor:
     def get_gpu_usage(self) -> Optional[List[Dict]]:
         """
         Get GPU usage for all NVIDIA GPUs.
-        
+
         Returns:
             List of dicts with GPU stats, or None if GPU monitoring unavailable
         """
         if not self.gpu_available:
             return None
-        
+
+        if self._gpu_method == 'pynvml':
+            return self._get_gpu_usage_pynvml()
+        elif self._gpu_method == 'nvidia-smi':
+            return self._get_gpu_usage_smi()
+        return None
+
+    def _get_gpu_usage_pynvml(self) -> Optional[List[Dict]]:
+        """Get GPU stats via pynvml."""
         try:
             import pynvml
             device_count = pynvml.nvmlDeviceGetCount()
             gpu_stats = []
-            
+
             for i in range(device_count):
                 handle = pynvml.nvmlDeviceGetHandleByIndex(i)
-                
+
                 # GPU name
                 name = pynvml.nvmlDeviceGetName(handle)
                 if isinstance(name, bytes):
                     name = name.decode('utf-8')
-                
+
                 # GPU utilization
                 utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                
+
                 # Memory info
                 mem_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                
+
                 # Temperature
                 try:
                     temperature = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-                except:
+                except Exception:
                     temperature = None
-                
+
                 # Power usage
                 try:
                     power_usage = pynvml.nvmlDeviceGetPowerUsage(handle) / 1000.0  # Convert to watts
                     power_limit = pynvml.nvmlDeviceGetPowerManagementLimit(handle) / 1000.0
-                except:
+                except Exception:
                     power_usage = None
                     power_limit = None
-                
+
                 gpu_stats.append({
                     'index': i,
                     'name': name,
@@ -135,11 +172,60 @@ class ResourceMonitor:
                     'power_usage_w': power_usage,
                     'power_limit_w': power_limit
                 })
-            
+
             return gpu_stats
-            
+
         except Exception as e:
-            print(f"Error getting GPU stats: {e}")
+            print(f"Error getting GPU stats via pynvml: {e}")
+            # Fall back to nvidia-smi if pynvml fails at runtime
+            self._gpu_method = 'nvidia-smi'
+            return self._get_gpu_usage_smi()
+
+    def _get_gpu_usage_smi(self) -> Optional[List[Dict]]:
+        """Get GPU stats via nvidia-smi command (fallback)."""
+        try:
+            result = subprocess.run(
+                [
+                    'nvidia-smi',
+                    '--query-gpu=index,name,utilization.gpu,utilization.memory,'
+                    'memory.used,memory.total,temperature.gpu,power.draw,power.limit',
+                    '--format=csv,noheader,nounits'
+                ],
+                capture_output=True, text=True, timeout=5
+            )
+            if result.returncode != 0:
+                return None
+
+            gpu_stats = []
+            for line in result.stdout.strip().split('\n'):
+                if not line.strip():
+                    continue
+                parts = [p.strip() for p in line.split(',')]
+                if len(parts) < 9:
+                    continue
+
+                def safe_float(val):
+                    try:
+                        return float(val)
+                    except (ValueError, TypeError):
+                        return None
+
+                gpu_stats.append({
+                    'index': int(parts[0]),
+                    'name': parts[1],
+                    'utilization_percent': safe_float(parts[2]) or 0,
+                    'memory_percent': safe_float(parts[3]) or 0,
+                    'memory_used_mb': safe_float(parts[4]) or 0,
+                    'memory_total_mb': safe_float(parts[5]) or 0,
+                    'temperature_c': safe_float(parts[6]),
+                    'power_usage_w': safe_float(parts[7]),
+                    'power_limit_w': safe_float(parts[8])
+                })
+
+            return gpu_stats if gpu_stats else None
+
+        except Exception as e:
+            print(f"Error getting GPU stats via nvidia-smi: {e}")
             return None
     
     def get_process_resources(self, pid: int) -> Optional[Dict]:
