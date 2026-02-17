@@ -18,7 +18,7 @@ from app.scheduler import initialize_scheduler, shutdown_scheduler
 app = FastAPI(
     title="Optimizarr",
     description="Automated Media Optimization System",
-    version="2.0.0"
+    version="2.1.0"
 )
 
 # CORS middleware
@@ -131,8 +131,17 @@ async def startup_event():
     # Initialize scheduler
     initialize_scheduler()
     
+    # Start folder watcher
+    from app.watcher import folder_watcher
+    watches = db.get_folder_watches(enabled_only=True)
+    if watches:
+        folder_watcher.start()
+        print(f"✓ Folder watcher started ({len(watches)} active watches)")
+    else:
+        print("  Folder watcher: no active watches configured")
+    
     # Log startup
-    optimizarr_logger.log_startup("2.0.0", settings.host, settings.port)
+    optimizarr_logger.log_startup("2.1.0", settings.host, settings.port)
     
     print("=" * 60)
     print(f"Server starting on http://{settings.host}:{settings.port}")
@@ -143,7 +152,9 @@ async def startup_event():
 async def shutdown_event():
     """Cleanup on shutdown."""
     from app.logger import optimizarr_logger
+    from app.watcher import folder_watcher
     optimizarr_logger.log_shutdown()
+    folder_watcher.stop()
     print("\nShutting down Optimizarr...")
     shutdown_scheduler()
 

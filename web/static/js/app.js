@@ -70,6 +70,8 @@ function switchTab(tabName) {
     if (tabName === 'settings') loadSettings();
     if (tabName === 'schedule') loadSchedule();
     if (tabName === 'logs') loadLogs();
+    if (tabName === 'watches') loadWatches();
+    if (tabName === 'statistics') loadStatistics();
 }
 
 // Load statistics
@@ -1678,3 +1680,410 @@ async function checkHwAccel() {
     }
 }
 
+
+// ============================================================
+// FOLDER WATCHES
+// ============================================================
+
+async function loadWatches() {
+    const list = document.getElementById('watchesList');
+    const statusEl = document.getElementById('watcherStatus');
+    
+    // Load watcher status
+    try {
+        const status = await apiRequest('/watches/status');
+        if (status) {
+            statusEl.innerHTML = `
+                <span class="${status.running ? 'text-green-400' : 'text-yellow-400'}">
+                    ${status.running ? '● Running' : '○ Stopped'}
+                </span>
+                <span class="mx-3 text-gray-500">|</span>
+                Poll interval: ${status.poll_interval}s
+                <span class="mx-3 text-gray-500">|</span>
+                Active watches: ${status.active_watches}/${status.total_watches}
+            `;
+        }
+    } catch (e) {
+        statusEl.innerHTML = '<span class="text-gray-500">Status unavailable</span>';
+    }
+    
+    // Load watches
+    const watches = await apiRequest('/watches');
+    if (!watches || watches.length === 0) {
+        list.innerHTML = '<p class="text-gray-400">No folder watches configured. Click "Add Watch" to start monitoring a folder.</p>';
+        return;
+    }
+    
+    list.innerHTML = watches.map(w => `
+        <div class="bg-gray-700 rounded-lg p-4 mb-3">
+            <div class="flex justify-between items-start">
+                <div class="flex-1">
+                    <div class="flex items-center gap-2">
+                        <span class="text-lg">${w.enabled ? '👁️' : '⏸️'}</span>
+                        <h3 class="font-semibold">${w.path}</h3>
+                        ${w.enabled ? '<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">Active</span>' : '<span class="px-2 py-0.5 bg-gray-600 text-gray-400 text-xs rounded">Disabled</span>'}
+                    </div>
+                    <div class="flex gap-4 mt-2 text-sm text-gray-300">
+                        <div><span class="text-gray-400">Profile:</span> ${w.profile_name || 'Unknown'}</div>
+                        <div><span class="text-gray-400">Recursive:</span> ${w.recursive ? 'Yes' : 'No'}</div>
+                        <div><span class="text-gray-400">Auto Queue:</span> ${w.auto_queue ? 'Yes' : 'No'}</div>
+                        ${w.last_check ? `<div><span class="text-gray-400">Last Check:</span> ${new Date(w.last_check).toLocaleString()}</div>` : ''}
+                    </div>
+                    <div class="mt-1 text-xs text-gray-500">Extensions: ${w.extensions}</div>
+                </div>
+                <div class="flex gap-2">
+                    <button onclick='editWatch(${JSON.stringify(w)})' class="bg-gray-600 hover:bg-gray-500 px-3 py-1 rounded text-sm">Edit</button>
+                    <button onclick="deleteWatch(${w.id})" class="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-sm">Delete</button>
+                </div>
+            </div>
+        </div>
+    `).join('');
+}
+
+async function showCreateWatchForm() {
+    document.getElementById('watchModalTitle').textContent = 'Add Folder Watch';
+    document.getElementById('watchForm').reset();
+    document.getElementById('watchId').value = '';
+    document.getElementById('watchEnabled').checked = true;
+    document.getElementById('watchRecursive').checked = true;
+    document.getElementById('watchAutoQueue').checked = true;
+    document.getElementById('watchExtensions').value = '.mkv,.mp4,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.mpg,.mpeg';
+    
+    // Populate profile dropdown
+    const profiles = await apiRequest('/profiles');
+    const select = document.getElementById('watchProfile');
+    select.innerHTML = profiles.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
+    
+    document.getElementById('watchModal').classList.remove('hidden');
+}
+
+function editWatch(watch) {
+    document.getElementById('watchModalTitle').textContent = 'Edit Folder Watch';
+    document.getElementById('watchId').value = watch.id;
+    document.getElementById('watchPath').value = watch.path;
+    document.getElementById('watchEnabled').checked = watch.enabled;
+    document.getElementById('watchRecursive').checked = watch.recursive;
+    document.getElementById('watchAutoQueue').checked = watch.auto_queue;
+    document.getElementById('watchExtensions').value = watch.extensions || '';
+    
+    // Populate and select profile
+    showCreateWatchForm().then(() => {
+        document.getElementById('watchProfile').value = watch.profile_id;
+        document.getElementById('watchModalTitle').textContent = 'Edit Folder Watch';
+        document.getElementById('watchId').value = watch.id;
+        document.getElementById('watchPath').value = watch.path;
+        document.getElementById('watchEnabled').checked = watch.enabled;
+        document.getElementById('watchRecursive').checked = watch.recursive;
+        document.getElementById('watchAutoQueue').checked = watch.auto_queue;
+        document.getElementById('watchExtensions').value = watch.extensions || '';
+    });
+}
+
+async function saveWatch(event) {
+    event.preventDefault();
+    
+    const data = {
+        path: document.getElementById('watchPath').value,
+        profile_id: parseInt(document.getElementById('watchProfile').value),
+        enabled: document.getElementById('watchEnabled').checked,
+        recursive: document.getElementById('watchRecursive').checked,
+        auto_queue: document.getElementById('watchAutoQueue').checked,
+        extensions: document.getElementById('watchExtensions').value
+    };
+    
+    const watchId = document.getElementById('watchId').value;
+    
+    if (watchId) {
+        await apiRequest(`/watches/${watchId}`, { method: 'PUT', body: JSON.stringify(data) });
+        showMessage('Watch updated', 'success');
+    } else {
+        await apiRequest('/watches', { method: 'POST', body: JSON.stringify(data) });
+        showMessage('Watch created', 'success');
+    }
+    
+    closeWatchModal();
+    loadWatches();
+}
+
+async function deleteWatch(id) {
+    if (!confirm('Delete this folder watch?')) return;
+    await apiRequest(`/watches/${id}`, { method: 'DELETE' });
+    showMessage('Watch deleted', 'success');
+    loadWatches();
+}
+
+function closeWatchModal() {
+    document.getElementById('watchModal').classList.add('hidden');
+}
+
+async function forceWatchCheck() {
+    const result = await apiRequest('/watches/check', { method: 'POST' });
+    if (result) {
+        showMessage(`Checked ${result.checked} watch(es), found ${result.new_files} new file(s)`, 'success');
+        loadWatches();
+    }
+}
+
+
+// ============================================================
+// STATISTICS DASHBOARD
+// ============================================================
+
+async function loadStatistics() {
+    const days = document.getElementById('statsDays').value;
+    
+    try {
+        const data = await apiRequest(`/stats/dashboard?days=${days}`);
+        if (!data) return;
+        
+        // Summary cards
+        const t = data.totals;
+        document.getElementById('statTotalFiles').textContent = t.total.toLocaleString();
+        document.getElementById('statOriginalSize').textContent = formatBytes(t.total_original);
+        document.getElementById('statNewSize').textContent = formatBytes(t.total_new);
+        document.getElementById('statSaved').textContent = formatBytes(t.total_saved);
+        document.getElementById('statAvgPct').textContent = t.avg_savings_pct.toFixed(1) + '%';
+        
+        // Daily chart
+        renderDailyChart(data.daily);
+        
+        // Codec breakdown
+        renderCodecBreakdown(data.codecs, t.total);
+        
+        // Recent history
+        renderRecentHistory(data.recent);
+        
+    } catch (err) {
+        console.error('Failed to load statistics:', err);
+    }
+    
+    // Also load health and upscalers
+    loadHealth();
+    loadUpscalers();
+}
+
+function formatBytes(bytes) {
+    if (!bytes || bytes === 0) return '0 B';
+    const gb = bytes / (1024 * 1024 * 1024);
+    if (gb >= 1) return gb.toFixed(1) + ' GB';
+    const mb = bytes / (1024 * 1024);
+    if (mb >= 1) return mb.toFixed(1) + ' MB';
+    return (bytes / 1024).toFixed(0) + ' KB';
+}
+
+function renderDailyChart(daily) {
+    const container = document.getElementById('dailyChart');
+    
+    if (!daily || daily.length === 0) {
+        container.innerHTML = '<p class="text-gray-500 text-sm">No encoding history yet. Process some files to see activity.</p>';
+        return;
+    }
+    
+    const maxFiles = Math.max(...daily.map(d => d.files), 1);
+    
+    container.innerHTML = daily.map(d => {
+        const height = Math.max((d.files / maxFiles) * 100, 4);
+        const date = new Date(d.date);
+        const label = `${date.getMonth()+1}/${date.getDate()}`;
+        const savedMB = (d.saved / (1024*1024)).toFixed(0);
+        
+        return `
+            <div class="flex flex-col items-center flex-shrink-0" style="min-width: 30px" title="${d.date}: ${d.files} files, ${savedMB}MB saved">
+                <div class="text-xs text-gray-400 mb-1">${d.files}</div>
+                <div class="w-6 bg-blue-500 rounded-t transition-all" style="height: ${height}%"></div>
+                <div class="text-xs text-gray-500 mt-1 whitespace-nowrap">${label}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+function renderCodecBreakdown(codecs, total) {
+    const container = document.getElementById('codecBreakdown');
+    
+    if (!codecs || codecs.length === 0) {
+        container.innerHTML = '<p class="text-gray-500 text-sm">No data yet</p>';
+        return;
+    }
+    
+    const colors = ['bg-blue-500', 'bg-green-500', 'bg-purple-500', 'bg-yellow-500', 'bg-red-500', 'bg-cyan-500'];
+    
+    container.innerHTML = codecs.map((c, i) => {
+        const pct = total > 0 ? ((c.count / total) * 100).toFixed(1) : 0;
+        const savedMB = (c.saved / (1024*1024)).toFixed(0);
+        return `
+            <div>
+                <div class="flex justify-between text-sm mb-1">
+                    <span>${(c.codec || 'unknown').toUpperCase()}</span>
+                    <span class="text-gray-400">${c.count} files (${pct}%) — ${savedMB}MB saved</span>
+                </div>
+                <div class="w-full bg-gray-600 rounded h-2">
+                    <div class="${colors[i % colors.length]} rounded h-2" style="width: ${pct}%"></div>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+function renderRecentHistory(recent) {
+    const container = document.getElementById('recentHistory');
+    
+    if (!recent || recent.length === 0) {
+        container.innerHTML = '<p class="text-gray-500 text-sm">No encoding history yet</p>';
+        return;
+    }
+    
+    container.innerHTML = recent.map(h => {
+        const filename = h.file_path.split(/[/\\]/).pop();
+        const savedPct = h.original_size_bytes > 0 
+            ? ((h.savings_bytes / h.original_size_bytes) * 100).toFixed(1) 
+            : 0;
+        const timeStr = h.encoding_time_seconds > 60 
+            ? `${Math.floor(h.encoding_time_seconds/60)}m ${h.encoding_time_seconds%60}s`
+            : `${h.encoding_time_seconds}s`;
+        
+        return `
+            <div class="flex justify-between items-center p-2 bg-gray-700 rounded text-sm">
+                <div class="flex-1 truncate mr-3" title="${h.file_path}">
+                    ${filename}
+                </div>
+                <div class="flex gap-3 text-xs text-gray-400 flex-shrink-0">
+                    <span class="text-green-400">-${savedPct}%</span>
+                    <span>${formatBytes(h.original_size_bytes)} → ${formatBytes(h.new_size_bytes)}</span>
+                    <span>${timeStr}</span>
+                </div>
+            </div>
+        `;
+    }).join('');
+}
+
+async function loadHealth() {
+    try {
+        const health = await apiRequest('/health');
+        if (!health) return;
+        
+        const container = document.getElementById('healthStatus');
+        container.innerHTML = `
+            <div class="p-3 bg-gray-700 rounded">
+                <div class="text-xs text-gray-400 mb-1">Service</div>
+                <div class="font-bold ${health.status === 'ok' ? 'text-green-400' : 'text-yellow-400'}">
+                    ${health.status === 'ok' ? '● Healthy' : '⚠ ' + health.status}
+                </div>
+                <div class="text-xs text-gray-500 mt-1">v${health.version}</div>
+            </div>
+            <div class="p-3 bg-gray-700 rounded">
+                <div class="text-xs text-gray-400 mb-1">HandBrakeCLI</div>
+                <div class="font-bold ${health.handbrake?.installed ? 'text-green-400' : 'text-red-400'}">
+                    ${health.handbrake?.installed ? '● Installed' : '✗ Not Found'}
+                </div>
+                <div class="text-xs text-gray-500 mt-1 truncate">${health.handbrake?.path || 'not in PATH'}</div>
+            </div>
+            <div class="p-3 bg-gray-700 rounded">
+                <div class="text-xs text-gray-400 mb-1">Database</div>
+                <div class="font-bold ${health.database?.status === 'ok' ? 'text-green-400' : 'text-red-400'}">
+                    ${health.database?.status === 'ok' ? '● OK' : '✗ Error'}
+                </div>
+                <div class="text-xs text-gray-500 mt-1">${health.database?.profiles || 0} profiles, ${health.database?.history_records || 0} history</div>
+            </div>
+            ${health.disk ? `
+            <div class="p-3 bg-gray-700 rounded">
+                <div class="text-xs text-gray-400 mb-1">Disk Space</div>
+                <div class="font-bold ${health.disk.percent_used > 90 ? 'text-red-400' : 'text-green-400'}">
+                    ${health.disk.free_gb} GB free
+                </div>
+                <div class="text-xs text-gray-500 mt-1">${health.disk.percent_used}% used of ${health.disk.total_gb} GB</div>
+            </div>` : ''}
+        `;
+    } catch (err) {
+        document.getElementById('healthStatus').innerHTML = '<p class="text-red-400">Failed to load health status</p>';
+    }
+}
+
+async function loadUpscalers() {
+    try {
+        const info = await apiRequest('/upscalers');
+        if (!info) return;
+        
+        const container = document.getElementById('upscalerStatus');
+        const defs = info.definitions;
+        const det = info.detection?.details || {};
+        
+        container.innerHTML = Object.entries(defs).map(([key, up]) => {
+            const d = det[key] || {};
+            const installed = d.installed;
+            
+            return `
+                <div class="p-3 bg-gray-700 rounded">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <span class="text-lg">${up.icon}</span>
+                            <span class="font-bold ml-1">${up.name}</span>
+                            ${installed ? '<span class="ml-2 px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">Installed</span>' : '<span class="ml-2 px-2 py-0.5 bg-gray-600 text-gray-400 text-xs rounded">Not Found</span>'}
+                        </div>
+                    </div>
+                    <p class="text-xs text-gray-400 mt-1">${up.description}</p>
+                    <p class="text-xs text-gray-500 mt-1">Best for: ${up.best_for}</p>
+                    ${!installed ? `<a href="${up.download_url}" target="_blank" class="text-xs text-blue-400 hover:text-blue-300 mt-1 inline-block">Download →</a>` : ''}
+                    ${installed && d.path ? `<p class="text-xs text-gray-500 mt-1 truncate">Path: ${d.path}</p>` : ''}
+                </div>
+            `;
+        }).join('');
+    } catch (err) {
+        document.getElementById('upscalerStatus').innerHTML = '<p class="text-gray-500">Failed to detect upscalers</p>';
+    }
+}
+
+
+// ============================================================
+// PRESET IMPORT / EXPORT
+// ============================================================
+
+async function exportProfiles() {
+    try {
+        const data = await apiRequest('/profiles/export');
+        if (!data) return;
+        
+        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `optimizarr-profiles-${new Date().toISOString().split('T')[0]}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        
+        showMessage(`Exported ${data.count} profile(s)`, 'success');
+    } catch (err) {
+        showMessage('Export failed: ' + err.message, 'error');
+    }
+}
+
+async function importProfiles(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    
+    try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+        
+        if (!data.profiles || !Array.isArray(data.profiles)) {
+            showMessage('Invalid file format — expected Optimizarr profile export', 'error');
+            return;
+        }
+        
+        const result = await apiRequest('/profiles/import', {
+            method: 'POST',
+            body: JSON.stringify(data)
+        });
+        
+        if (result) {
+            showMessage(result.message, 'success');
+            loadProfiles();
+        }
+    } catch (err) {
+        showMessage('Import failed: ' + err.message, 'error');
+    }
+    
+    // Reset file input
+    event.target.value = '';
+}

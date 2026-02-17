@@ -91,6 +91,8 @@
                     <button onclick="switchTab('queue')" id="tab-queue" class="tab-button active">Queue</button>
                     <button onclick="switchTab('profiles')" id="tab-profiles" class="tab-button">Profiles</button>
                     <button onclick="switchTab('scanroots')" id="tab-scanroots" class="tab-button">Scan Roots</button>
+                    <button onclick="switchTab('watches')" id="tab-watches" class="tab-button">Watches</button>
+                    <button onclick="switchTab('statistics')" id="tab-statistics" class="tab-button">Statistics</button>
                     <button onclick="switchTab('schedule')" id="tab-schedule" class="tab-button">Schedule</button>
                     <button onclick="switchTab('logs')" id="tab-logs" class="tab-button">Logs</button>
                 </nav>
@@ -153,9 +155,18 @@
             <div class="bg-gray-800 rounded-lg p-6">
                 <div class="flex justify-between items-center mb-6">
                     <h2 class="text-xl font-bold">Encoding Profiles</h2>
-                    <button onclick="showCreateProfileForm()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">
-                        New Profile
-                    </button>
+                    <div class="flex gap-2">
+                        <button onclick="exportProfiles()" class="bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded text-sm" title="Export all profiles as JSON">
+                            📤 Export
+                        </button>
+                        <label class="bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded text-sm cursor-pointer" title="Import profiles from JSON">
+                            📥 Import
+                            <input type="file" accept=".json" onchange="importProfiles(event)" class="hidden">
+                        </label>
+                        <button onclick="showCreateProfileForm()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">
+                            New Profile
+                        </button>
+                    </div>
                 </div>
                 
                 <div id="profilesList">
@@ -671,6 +682,178 @@
                         class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded">Cancel</button>
                     <button onclick="selectCurrentFolder()"
                         class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">Select This Folder</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- FOLDER WATCHES TAB -->
+        <!-- ============================================================ -->
+        <div id="content-watches" class="tab-content hidden">
+            <div class="bg-gray-800 rounded-lg p-6">
+                <div class="flex justify-between items-center mb-6">
+                    <div>
+                        <h2 class="text-xl font-bold">Folder Watches</h2>
+                        <p class="text-sm text-gray-400 mt-1">Auto-queue new media files when they appear in watched folders</p>
+                    </div>
+                    <div class="flex gap-2">
+                        <button onclick="forceWatchCheck()" class="bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded text-sm">
+                            🔍 Check Now
+                        </button>
+                        <button onclick="showCreateWatchForm()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">
+                            Add Watch
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Watcher Status -->
+                <div id="watcherStatus" class="mb-4 p-3 bg-gray-700 rounded text-sm text-gray-300"></div>
+                
+                <div id="watchesList">
+                    <p class="text-gray-400">Loading watches...</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Watch Modal -->
+        <div id="watchModal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
+            <div class="bg-gray-800 rounded-lg p-6 w-full max-w-lg">
+                <h3 id="watchModalTitle" class="text-xl font-bold mb-4">Add Folder Watch</h3>
+                <form id="watchForm" onsubmit="saveWatch(event)">
+                    <input type="hidden" id="watchId">
+                    
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Folder Path *</label>
+                            <div class="flex gap-2">
+                                <input type="text" id="watchPath" required 
+                                    class="flex-1 bg-gray-700 border border-gray-600 rounded px-4 py-2"
+                                    placeholder="/path/to/media/folder">
+                                <button type="button" onclick="openFolderBrowser('watchPath')" 
+                                    class="bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded">📁</button>
+                            </div>
+                        </div>
+                        
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Encoding Profile *</label>
+                            <select id="watchProfile" required 
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                            </select>
+                        </div>
+                        
+                        <div>
+                            <label class="block text-sm font-medium mb-2">File Extensions</label>
+                            <input type="text" id="watchExtensions" 
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2"
+                                value=".mkv,.mp4,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.mpg,.mpeg">
+                        </div>
+                        
+                        <div class="grid grid-cols-3 gap-4">
+                            <label class="flex items-center">
+                                <input type="checkbox" id="watchEnabled" checked class="mr-2">
+                                <span class="text-sm">Enabled</span>
+                            </label>
+                            <label class="flex items-center">
+                                <input type="checkbox" id="watchRecursive" checked class="mr-2">
+                                <span class="text-sm">Recursive</span>
+                            </label>
+                            <label class="flex items-center">
+                                <input type="checkbox" id="watchAutoQueue" checked class="mr-2">
+                                <span class="text-sm">Auto Queue</span>
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <div class="flex justify-end gap-3 pt-4">
+                        <button type="button" onclick="closeWatchModal()" 
+                            class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded">Cancel</button>
+                        <button type="submit" 
+                            class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded">Save Watch</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- STATISTICS TAB -->
+        <!-- ============================================================ -->
+        <div id="content-statistics" class="tab-content hidden">
+            <div class="space-y-6">
+                <!-- Summary Cards -->
+                <div class="grid grid-cols-1 md:grid-cols-5 gap-4">
+                    <div class="bg-gray-800 p-5 rounded-lg text-center">
+                        <p class="text-gray-400 text-xs mb-1">Total Files</p>
+                        <p id="statTotalFiles" class="text-2xl font-bold text-blue-400">0</p>
+                    </div>
+                    <div class="bg-gray-800 p-5 rounded-lg text-center">
+                        <p class="text-gray-400 text-xs mb-1">Original Size</p>
+                        <p id="statOriginalSize" class="text-2xl font-bold text-gray-300">0 GB</p>
+                    </div>
+                    <div class="bg-gray-800 p-5 rounded-lg text-center">
+                        <p class="text-gray-400 text-xs mb-1">New Size</p>
+                        <p id="statNewSize" class="text-2xl font-bold text-blue-300">0 GB</p>
+                    </div>
+                    <div class="bg-gray-800 p-5 rounded-lg text-center">
+                        <p class="text-gray-400 text-xs mb-1">Space Saved</p>
+                        <p id="statSaved" class="text-2xl font-bold text-green-400">0 GB</p>
+                    </div>
+                    <div class="bg-gray-800 p-5 rounded-lg text-center">
+                        <p class="text-gray-400 text-xs mb-1">Avg Savings</p>
+                        <p id="statAvgPct" class="text-2xl font-bold text-yellow-400">0%</p>
+                    </div>
+                </div>
+                
+                <!-- Daily Activity Chart -->
+                <div class="bg-gray-800 rounded-lg p-6">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="text-lg font-bold">Daily Activity</h3>
+                        <select id="statsDays" onchange="loadStatistics()" 
+                            class="bg-gray-700 border border-gray-600 rounded px-3 py-1 text-sm">
+                            <option value="7">Last 7 Days</option>
+                            <option value="30" selected>Last 30 Days</option>
+                            <option value="90">Last 90 Days</option>
+                            <option value="365">Last Year</option>
+                        </select>
+                    </div>
+                    <div id="dailyChart" class="h-48 flex items-end gap-1 overflow-x-auto">
+                        <p class="text-gray-500 text-sm">Loading chart...</p>
+                    </div>
+                </div>
+                
+                <!-- Two Column: Codecs + Recent History -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <!-- Codec Breakdown -->
+                    <div class="bg-gray-800 rounded-lg p-6">
+                        <h3 class="text-lg font-bold mb-4">Codec Breakdown</h3>
+                        <div id="codecBreakdown" class="space-y-3">
+                            <p class="text-gray-500 text-sm">Loading...</p>
+                        </div>
+                    </div>
+                    
+                    <!-- Recent History -->
+                    <div class="bg-gray-800 rounded-lg p-6">
+                        <h3 class="text-lg font-bold mb-4">Recent Encodes</h3>
+                        <div id="recentHistory" class="space-y-2 max-h-80 overflow-y-auto">
+                            <p class="text-gray-500 text-sm">Loading...</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- System Health -->
+                <div class="bg-gray-800 rounded-lg p-6">
+                    <h3 class="text-lg font-bold mb-4">System Health</h3>
+                    <div id="healthStatus" class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                        <p class="text-gray-500 text-sm">Loading...</p>
+                    </div>
+                </div>
+                
+                <!-- AI Upscaler Status -->
+                <div class="bg-gray-800 rounded-lg p-6">
+                    <h3 class="text-lg font-bold mb-4">🤖 AI Upscalers</h3>
+                    <p class="text-sm text-gray-400 mb-4">Detected AI upscaler binaries for pre-encode upscaling (e.g., 480p→1080p)</p>
+                    <div id="upscalerStatus" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <p class="text-gray-500 text-sm">Loading...</p>
+                    </div>
                 </div>
             </div>
         </div>

@@ -621,11 +621,223 @@ async def clear_logs(
     return MessageResponse(message=f"Failed to clear {log_type} logs", success=False)
 
 
-# Health check
+# ============================================================
+# ENHANCED HEALTH CHECK
+# ============================================================
+
 @router.get("/health")
 async def health_check():
-    """Simple health check endpoint (no auth required)."""
-    return {"status": "ok", "service": "optimizarr"}
+    """Comprehensive health check — no auth required."""
+    import shutil
+    import time
+    from pathlib import Path
+    
+    health = {
+        "status": "ok",
+        "service": "optimizarr",
+        "version": "2.1.0",
+        "uptime_info": "running",
+    }
+    
+    # HandBrakeCLI check
+    hb_path = shutil.which("HandBrakeCLI")
+    health["handbrake"] = {
+        "installed": hb_path is not None,
+        "path": hb_path or "not found"
+    }
+    
+    # Database check
+    try:
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM profiles")
+            profiles = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM queue")
+            queue_items = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(*) FROM history")
+            history = cursor.fetchone()[0]
+        health["database"] = {
+            "status": "ok",
+            "profiles": profiles,
+            "queue_items": queue_items,
+            "history_records": history
+        }
+    except Exception as e:
+        health["database"] = {"status": "error", "error": str(e)}
+        health["status"] = "degraded"
+    
+    # Disk space for data directory
+    try:
+        data_path = Path("data")
+        if data_path.exists():
+            usage = shutil.disk_usage(str(data_path))
+            health["disk"] = {
+                "total_gb": round(usage.total / (1024**3), 1),
+                "used_gb": round(usage.used / (1024**3), 1),
+                "free_gb": round(usage.free / (1024**3), 1),
+                "percent_used": round((usage.used / usage.total) * 100, 1)
+            }
+            if health["disk"]["percent_used"] > 95:
+                health["status"] = "warning"
+                health["disk"]["warning"] = "Low disk space!"
+    except Exception:
+        pass
+    
+    # Folder watcher status
+    try:
+        from app.watcher import folder_watcher
+        health["folder_watcher"] = {
+            "running": folder_watcher.running,
+            "active_watches": len(db.get_folder_watches(enabled_only=True))
+        }
+    except Exception:
+        health["folder_watcher"] = {"running": False}
+    
+    return health
+
+
+# ============================================================
+# STATISTICS DASHBOARD
+# ============================================================
+
+@router.get("/stats/dashboard")
+async def get_stats_dashboard(
+    days: int = Query(default=30, ge=1, le=365),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get comprehensive statistics for the dashboard."""
+    return db.get_stats_dashboard(days=days)
+
+
+# ============================================================
+# FOLDER WATCH ENDPOINTS
+# ============================================================
+
+@router.get("/watches")
+async def list_folder_watches(current_user: dict = Depends(get_current_user)):
+    """Get all folder watches."""
+    return db.get_folder_watches()
+
+
+@router.post("/watches")
+async def create_folder_watch(
+    watch: dict,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Create a new folder watch (admin only)."""
+    required = ['path', 'profile_id']
+    for field in required:
+        if field not in watch:
+            raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
+    
+    # Verify path exists
+    if not Path(watch['path']).exists():
+        raise HTTPException(status_code=400, detail=f"Path does not exist: {watch['path']}")
+    
+    try:
+        watch_id = db.create_folder_watch(
+            path=watch['path'],
+            profile_id=watch['profile_id'],
+            enabled=watch.get('enabled', True),
+            recursive=watch.get('recursive', True),
+            auto_queue=watch.get('auto_queue', True),
+            extensions=watch.get('extensions', '.mkv,.mp4,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.mpg,.mpeg')
+        )
+        return db.get_folder_watch(watch_id)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Failed to create watch: {str(e)}")
+
+
+@router.put("/watches/{watch_id}")
+async def update_folder_watch(
+    watch_id: int, watch: dict,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Update a folder watch (admin only)."""
+    success = db.update_folder_watch(watch_id, **watch)
+    if not success:
+        raise HTTPException(status_code=404, detail="Watch not found")
+    return db.get_folder_watch(watch_id)
+
+
+@router.delete("/watches/{watch_id}")
+async def delete_folder_watch(
+    watch_id: int,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Delete a folder watch (admin only)."""
+    success = db.delete_folder_watch(watch_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Watch not found")
+    return MessageResponse(message="Folder watch deleted")
+
+
+@router.get("/watches/status")
+async def get_watcher_status(current_user: dict = Depends(get_current_user)):
+    """Get folder watcher status."""
+    from app.watcher import folder_watcher
+    return folder_watcher.get_status()
+
+
+@router.post("/watches/check")
+async def force_watcher_check(
+    watch_id: Optional[int] = None,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Force an immediate check for new files (admin only)."""
+    from app.watcher import folder_watcher
+    result = folder_watcher.force_check(watch_id)
+    return result
+
+
+# ============================================================
+# PRESET IMPORT / EXPORT
+# ============================================================
+
+@router.get("/profiles/export")
+async def export_profiles(current_user: dict = Depends(get_current_user)):
+    """Export all profiles as JSON for backup/sharing."""
+    profiles = db.export_profiles()
+    return {
+        "version": "2.1.0",
+        "export_type": "optimizarr_profiles",
+        "count": len(profiles),
+        "profiles": profiles
+    }
+
+
+@router.post("/profiles/import")
+async def import_profiles(
+    data: dict,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Import profiles from JSON (admin only)."""
+    if 'profiles' not in data or not isinstance(data['profiles'], list):
+        raise HTTPException(status_code=400, detail="Invalid format: expected {profiles: [...]}")
+    
+    result = db.import_profiles(data['profiles'])
+    return {
+        "message": f"Imported {result['imported']} profile(s), skipped {result['skipped']}",
+        **result
+    }
+
+
+# ============================================================
+# AI UPSCALER ENDPOINTS
+# ============================================================
+
+@router.get("/upscalers")
+async def get_upscalers(current_user: dict = Depends(get_current_user)):
+    """Get AI upscaler info and detection results."""
+    from app.upscaler import get_upscaler_info
+    return get_upscaler_info()
+
+
+@router.get("/upscalers/detect")
+async def detect_upscalers_endpoint(current_user: dict = Depends(get_current_user)):
+    """Re-detect available AI upscalers."""
+    from app.upscaler import detect_upscalers
+    return detect_upscalers()
 
 
 # Schedule Endpoints

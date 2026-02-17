@@ -180,7 +180,25 @@ class Database:
                     new_size_bytes INTEGER,
                     savings_bytes INTEGER,
                     encoding_time_seconds INTEGER,
+                    codec TEXT,
+                    container TEXT,
                     completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
+            # Folder watches table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS folder_watches (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    path TEXT UNIQUE NOT NULL,
+                    profile_id INTEGER NOT NULL,
+                    enabled BOOLEAN DEFAULT 1,
+                    recursive BOOLEAN DEFAULT 1,
+                    auto_queue BOOLEAN DEFAULT 1,
+                    extensions TEXT DEFAULT '.mkv,.mp4,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.mpg,.mpeg',
+                    last_check TIMESTAMP,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (profile_id) REFERENCES profiles(id)
                 )
             """)
             
@@ -223,6 +241,16 @@ class Database:
             if 'library_type' not in root_columns:
                 cursor.execute("ALTER TABLE scan_roots ADD COLUMN library_type TEXT DEFAULT 'custom'")
                 print("  ↳ Migrated: added 'library_type' column to scan_roots")
+            
+            # History table migrations
+            cursor.execute("PRAGMA table_info(history)")
+            history_columns = [col[1] for col in cursor.fetchall()]
+            if 'codec' not in history_columns:
+                cursor.execute("ALTER TABLE history ADD COLUMN codec TEXT")
+                print("  ↳ Migrated: added 'codec' column to history")
+            if 'container' not in history_columns:
+                cursor.execute("ALTER TABLE history ADD COLUMN container TEXT")
+                print("  ↳ Migrated: added 'container' column to history")
             
             print("✓ Database schema initialized")
     
@@ -495,6 +523,167 @@ class Database:
             cursor.execute("""
                 UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?
             """, (user_id,))
+    
+    # Folder Watch CRUD
+    def create_folder_watch(self, path: str, profile_id: int, **kwargs) -> int:
+        """Create a new folder watch."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO folder_watches (path, profile_id, enabled, recursive, auto_queue, extensions)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                path, profile_id,
+                kwargs.get('enabled', True),
+                kwargs.get('recursive', True),
+                kwargs.get('auto_queue', True),
+                kwargs.get('extensions', '.mkv,.mp4,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.mpg,.mpeg')
+            ))
+            return cursor.lastrowid
+    
+    def get_folder_watches(self, enabled_only: bool = False) -> List[Dict]:
+        """Get all folder watches."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            if enabled_only:
+                cursor.execute("SELECT fw.*, p.name as profile_name FROM folder_watches fw LEFT JOIN profiles p ON fw.profile_id = p.id WHERE fw.enabled = 1")
+            else:
+                cursor.execute("SELECT fw.*, p.name as profile_name FROM folder_watches fw LEFT JOIN profiles p ON fw.profile_id = p.id")
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def get_folder_watch(self, watch_id: int) -> Optional[Dict]:
+        """Get a folder watch by ID."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT fw.*, p.name as profile_name FROM folder_watches fw LEFT JOIN profiles p ON fw.profile_id = p.id WHERE fw.id = ?", (watch_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+    
+    def update_folder_watch(self, watch_id: int, **kwargs) -> bool:
+        """Update a folder watch."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            updates = []
+            values = []
+            for field in ['path', 'profile_id', 'enabled', 'recursive', 'auto_queue', 'extensions', 'last_check']:
+                if field in kwargs:
+                    updates.append(f"{field} = ?")
+                    values.append(kwargs[field])
+            if not updates:
+                return False
+            values.append(watch_id)
+            cursor.execute(f"UPDATE folder_watches SET {', '.join(updates)} WHERE id = ?", values)
+            return cursor.rowcount > 0
+    
+    def delete_folder_watch(self, watch_id: int) -> bool:
+        """Delete a folder watch."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM folder_watches WHERE id = ?", (watch_id,))
+            return cursor.rowcount > 0
+    
+    # History and Statistics
+    def add_history(self, **kwargs) -> int:
+        """Add a history record."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO history (file_path, profile_name, original_size_bytes, new_size_bytes, 
+                                     savings_bytes, encoding_time_seconds, codec, container)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                kwargs.get('file_path'),
+                kwargs.get('profile_name'),
+                kwargs.get('original_size_bytes', 0),
+                kwargs.get('new_size_bytes', 0),
+                kwargs.get('savings_bytes', 0),
+                kwargs.get('encoding_time_seconds', 0),
+                kwargs.get('codec'),
+                kwargs.get('container')
+            ))
+            return cursor.lastrowid
+    
+    def get_stats_dashboard(self, days: int = 30) -> Dict:
+        """Get comprehensive statistics for the dashboard."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Overall totals
+            cursor.execute("""
+                SELECT COUNT(*) as total, 
+                       COALESCE(SUM(original_size_bytes), 0) as total_original,
+                       COALESCE(SUM(new_size_bytes), 0) as total_new,
+                       COALESCE(SUM(savings_bytes), 0) as total_saved,
+                       COALESCE(SUM(encoding_time_seconds), 0) as total_time,
+                       COALESCE(AVG(CASE WHEN original_size_bytes > 0 
+                           THEN (savings_bytes * 100.0 / original_size_bytes) ELSE 0 END), 0) as avg_savings_pct
+                FROM history
+            """)
+            totals = dict(cursor.fetchone())
+            
+            # Daily breakdown (last N days)
+            cursor.execute("""
+                SELECT DATE(completed_at) as date,
+                       COUNT(*) as files,
+                       COALESCE(SUM(savings_bytes), 0) as saved,
+                       COALESCE(SUM(encoding_time_seconds), 0) as time_seconds
+                FROM history 
+                WHERE completed_at >= datetime('now', ?)
+                GROUP BY DATE(completed_at)
+                ORDER BY date
+            """, (f'-{days} days',))
+            daily = [dict(row) for row in cursor.fetchall()]
+            
+            # Codec breakdown
+            cursor.execute("""
+                SELECT COALESCE(codec, 'unknown') as codec, 
+                       COUNT(*) as count,
+                       COALESCE(SUM(savings_bytes), 0) as saved
+                FROM history GROUP BY codec ORDER BY count DESC
+            """)
+            codecs = [dict(row) for row in cursor.fetchall()]
+            
+            # Recent history (last 20)
+            cursor.execute("""
+                SELECT * FROM history ORDER BY completed_at DESC LIMIT 20
+            """)
+            recent = [dict(row) for row in cursor.fetchall()]
+            
+            return {
+                'totals': totals,
+                'daily': daily,
+                'codecs': codecs,
+                'recent': recent
+            }
+    
+    # Preset export/import
+    def export_profiles(self) -> List[Dict]:
+        """Export all profiles as a list of dicts for JSON export."""
+        profiles = self.get_profiles()
+        # Strip internal fields
+        for p in profiles:
+            p.pop('id', None)
+            p.pop('created_at', None)
+        return profiles
+    
+    def import_profiles(self, profiles: List[Dict]) -> Dict:
+        """Import profiles from a list of dicts. Returns stats."""
+        imported = 0
+        skipped = 0
+        errors = []
+        for p in profiles:
+            try:
+                # Skip if name already exists
+                existing = self.get_profiles()
+                existing_names = {ep['name'] for ep in existing}
+                if p.get('name') in existing_names:
+                    skipped += 1
+                    continue
+                self.create_profile(**p)
+                imported += 1
+            except Exception as e:
+                errors.append(f"{p.get('name', '?')}: {str(e)}")
+        return {'imported': imported, 'skipped': skipped, 'errors': errors}
 
 
 # Global database instance
