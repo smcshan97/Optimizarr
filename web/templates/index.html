@@ -487,6 +487,63 @@
                         </label>
                     </div>
                     
+                    <!-- Phase 2: Audio/Subtitle/Filters Section -->
+                    <div class="border-t border-gray-600 pt-4 mt-2">
+                        <h4 class="text-sm font-bold text-blue-400 mb-3">🔧 Advanced: Audio, Subtitles & Filters</h4>
+                        
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-2">Audio Handling</label>
+                                <select id="profileAudioHandling" 
+                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                                    <option value="preserve_all">🔊 Preserve All Tracks</option>
+                                    <option value="keep_primary">🔈 Keep Primary Only</option>
+                                    <option value="stereo_mixdown">🎧 Convert to Stereo</option>
+                                    <option value="hd_plus_aac">🎭 HD Audio + AAC Fallback</option>
+                                    <option value="high_quality">🎵 High Quality (256kbps)</option>
+                                </select>
+                                <p class="text-xs text-gray-400 mt-1" id="audioHandlingHelp">Keeps all original audio tracks</p>
+                            </div>
+                            
+                            <div>
+                                <label class="block text-sm font-medium mb-2">Subtitle Handling</label>
+                                <select id="profileSubtitleHandling" 
+                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                                    <option value="none">❌ Remove All</option>
+                                    <option value="preserve_all">💬 Preserve All Subtitles</option>
+                                    <option value="keep_english">🇺🇸 English Only</option>
+                                    <option value="burn_in">🔥 Burn-in First Track</option>
+                                    <option value="foreign_scan">🌍 Foreign Audio Scan</option>
+                                </select>
+                                <p class="text-xs text-gray-400 mt-1" id="subtitleHandlingHelp">No subtitles in output</p>
+                            </div>
+                        </div>
+                        
+                        <div class="grid grid-cols-3 gap-4 mt-3">
+                            <div>
+                                <label class="flex items-center">
+                                    <input type="checkbox" id="profileEnableFilters" class="mr-2">
+                                    <span class="text-sm">Auto Filters</span>
+                                </label>
+                                <p class="text-xs text-gray-400 mt-1">Deinterlace, denoise, crop</p>
+                            </div>
+                            <div>
+                                <label class="flex items-center">
+                                    <input type="checkbox" id="profileChapterMarkers" checked class="mr-2">
+                                    <span class="text-sm">Chapter Markers</span>
+                                </label>
+                                <p class="text-xs text-gray-400 mt-1">Preserve DVD/Blu-ray chapters</p>
+                            </div>
+                            <div>
+                                <label class="flex items-center">
+                                    <input type="checkbox" id="profileHwAccel" class="mr-2" onchange="checkHwAccel()">
+                                    <span class="text-sm">HW Acceleration</span>
+                                </label>
+                                <p class="text-xs text-gray-400 mt-1" id="hwAccelHelp">Use GPU encoding</p>
+                            </div>
+                        </div>
+                    </div>
+                    
                     <div>
                         <label class="flex items-center">
                             <input type="checkbox" id="profileIsDefault" class="mr-2">

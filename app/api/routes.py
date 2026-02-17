@@ -90,6 +90,11 @@ async def update_profile(
         quality=profile.quality,
         audio_codec=profile.audio_codec,
         container=profile.container,
+        audio_handling=profile.audio_handling,
+        subtitle_handling=profile.subtitle_handling,
+        enable_filters=profile.enable_filters,
+        chapter_markers=profile.chapter_markers,
+        hw_accel_enabled=profile.hw_accel_enabled,
         preset=profile.preset,
         two_pass=profile.two_pass,
         custom_args=profile.custom_args,
@@ -548,6 +553,36 @@ async def get_library_types():
     """Get all available library types with recommended settings."""
     from app.api.models import LIBRARY_TYPES
     return LIBRARY_TYPES
+
+
+# Audio/Subtitle Strategy Endpoints
+@router.get("/audio-strategies")
+async def get_audio_strategies():
+    """Get available audio handling strategies."""
+    from app.api.models import AUDIO_STRATEGIES
+    return AUDIO_STRATEGIES
+
+
+@router.get("/subtitle-strategies")
+async def get_subtitle_strategies():
+    """Get available subtitle handling strategies."""
+    from app.api.models import SUBTITLE_STRATEGIES
+    return SUBTITLE_STRATEGIES
+
+
+@router.get("/video-filters")
+async def get_video_filters():
+    """Get available video filter definitions."""
+    from app.api.models import VIDEO_FILTERS
+    return VIDEO_FILTERS
+
+
+# Hardware Acceleration Endpoint
+@router.get("/hardware-detect")
+async def detect_hardware(current_user: dict = Depends(get_current_user)):
+    """Detect available hardware encoders (NVENC, QSV, VCE, VideoToolbox)."""
+    from app.encoder import detect_hardware_acceleration
+    return detect_hardware_acceleration()
 
 
 # Log Endpoints

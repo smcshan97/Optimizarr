@@ -69,8 +69,14 @@ class EncodingJob:
         # Container format
         cmd.extend(['--format', container_info['format']])
         
-        # Encoder selection
+        # ---- Encoder Selection (with HW accel support) ----
         encoder = self.profile['encoder']
+        
+        # If hardware acceleration is enabled, try to use a GPU encoder
+        if self.profile.get('hw_accel_enabled'):
+            hw_encoder = self._get_hw_encoder(encoder)
+            if hw_encoder:
+                encoder = hw_encoder
         
         # Map encoder names to HandBrake encoder names
         encoder_map = {
@@ -81,7 +87,12 @@ class EncodingJob:
             'nvenc_h264': 'nvenc_h264',
             'nvenc_av1': 'nvenc_av1',
             'qsv_h265': 'qsv_h265',
-            'qsv_h264': 'qsv_h264'
+            'qsv_h264': 'qsv_h264',
+            'qsv_av1': 'qsv_av1',
+            'vce_h264': 'vce_h264',
+            'vce_h265': 'vce_h265',
+            'vt_h264': 'vt_h264',
+            'vt_h265': 'vt_h265',
         }
         
         hb_encoder = encoder_map.get(encoder, encoder)
@@ -106,23 +117,178 @@ class EncodingJob:
             # Variable framerate (preserve source)
             cmd.append('--vfr')
         
-        # Audio
-        audio_codec = self.profile['audio_codec']
-        if audio_codec == 'passthrough':
-            cmd.extend(['--audio', '1', '--aencoder', 'copy'])
-        else:
-            cmd.extend(['--audio', '1', '--aencoder', audio_codec])
+        # ---- Audio Handling ----
+        audio_args = self._build_audio_args()
+        cmd.extend(audio_args)
+        
+        # ---- Subtitle Handling ----
+        subtitle_args = self._build_subtitle_args()
+        cmd.extend(subtitle_args)
+        
+        # ---- Video Filters ----
+        if self.profile.get('enable_filters'):
+            filter_args = self._build_filter_args()
+            cmd.extend(filter_args)
+        
+        # ---- Chapter Markers ----
+        if self.profile.get('chapter_markers', True):
+            cmd.append('--markers')
         
         # Two-pass encoding
         if self.profile.get('two_pass'):
             cmd.append('--two-pass')
         
-        # Custom arguments
+        # Custom arguments (always last so they can override)
         if self.profile.get('custom_args'):
             custom_args = self.profile['custom_args'].split()
             cmd.extend(custom_args)
         
         return cmd
+    
+    def _build_audio_args(self) -> list:
+        """Build audio arguments based on audio handling strategy."""
+        strategy = self.profile.get('audio_handling', 'preserve_all')
+        audio_codec = self.profile.get('audio_codec', 'aac')
+        
+        # Map our codec names to HandBrake names
+        hb_audio_map = {
+            'aac': 'av_aac',
+            'opus': 'opus',
+            'ac3': 'ac3',
+            'flac': 'flac24',
+            'passthrough': 'copy',
+        }
+        hb_codec = hb_audio_map.get(audio_codec, 'av_aac')
+        
+        if strategy == 'preserve_all':
+            # Keep all audio tracks, passthrough originals
+            return [
+                '--audio', '1,2,3,4,5,6,7,8,9,10',
+                '--aencoder', 'copy',
+                '--audio-fallback', 'av_aac',
+            ]
+        
+        elif strategy == 'keep_primary':
+            # Keep only first track, encode with selected codec
+            if audio_codec == 'passthrough':
+                return ['--audio', '1', '--aencoder', 'copy']
+            return ['--audio', '1', '--aencoder', hb_codec]
+        
+        elif strategy == 'stereo_mixdown':
+            # Downmix to stereo AAC
+            return [
+                '--audio', '1',
+                '--aencoder', 'av_aac',
+                '--ab', '192',
+                '--mixdown', 'stereo',
+            ]
+        
+        elif strategy == 'hd_plus_aac':
+            # Keep original HD audio + add AAC stereo fallback
+            return [
+                '--audio', '1,1',
+                '--aencoder', 'copy,av_aac',
+                '--audio-fallback', 'av_aac',
+                '--ab', '0,192',
+                '--mixdown', ',stereo',
+            ]
+        
+        elif strategy == 'high_quality':
+            # Single high-quality AAC at 256kbps
+            return [
+                '--audio', '1',
+                '--aencoder', 'av_aac',
+                '--ab', '256',
+                '--mixdown', 'stereo',
+            ]
+        
+        else:
+            # Fallback: basic single track
+            if audio_codec == 'passthrough':
+                return ['--audio', '1', '--aencoder', 'copy']
+            return ['--audio', '1', '--aencoder', hb_codec]
+    
+    def _build_subtitle_args(self) -> list:
+        """Build subtitle arguments based on subtitle handling strategy."""
+        strategy = self.profile.get('subtitle_handling', 'none')
+        container = self.profile.get('container', 'mkv')
+        
+        if strategy == 'preserve_all':
+            args = ['--subtitle', '1,2,3,4,5,6,7,8,9,10']
+            if container == 'mp4':
+                # MP4 has limited subtitle support
+                args.append('--subtitle-default=none')
+            return args
+        
+        elif strategy == 'keep_english':
+            return [
+                '--subtitle-lang-list', 'eng',
+                '--all-subtitles',
+            ]
+        
+        elif strategy == 'burn_in':
+            return [
+                '--subtitle', '1',
+                '--subtitle-burned',
+            ]
+        
+        elif strategy == 'foreign_scan':
+            return [
+                '--subtitle', 'scan',
+                '--subtitle-forced',
+            ]
+        
+        elif strategy == 'none':
+            # No subtitle flags = no subtitles in output
+            return []
+        
+        return []
+    
+    def _build_filter_args(self) -> list:
+        """Build auto-detect video filter arguments."""
+        filters = []
+        
+        # Comb detection + decomb (for interlaced content)
+        filters.extend(['--comb-detect', '--decomb'])
+        
+        # Light denoise (safe for all content)
+        filters.append('--nlmeans=light')
+        
+        # Auto crop (remove black bars)
+        filters.append('--crop-mode=auto')
+        
+        return filters
+    
+    def _get_hw_encoder(self, current_encoder: str) -> Optional[str]:
+        """Try to map a software encoder to a hardware encoder."""
+        # Detect what's available
+        hw = detect_hardware_acceleration()
+        
+        # Map codec families to HW encoders
+        codec = self.profile.get('codec', 'av1')
+        
+        if hw.get('nvidia'):
+            hw_map = {'h264': 'nvenc_h264', 'h265': 'nvenc_h265', 'av1': 'nvenc_av1'}
+            if codec in hw_map:
+                return hw_map[codec]
+        
+        if hw.get('intel'):
+            hw_map = {'h264': 'qsv_h264', 'h265': 'qsv_h265', 'av1': 'qsv_av1'}
+            if codec in hw_map:
+                return hw_map[codec]
+        
+        if hw.get('amd'):
+            hw_map = {'h264': 'vce_h264', 'h265': 'vce_h265'}
+            if codec in hw_map:
+                return hw_map[codec]
+        
+        if hw.get('apple'):
+            hw_map = {'h264': 'vt_h264', 'h265': 'vt_h265'}
+            if codec in hw_map:
+                return hw_map[codec]
+        
+        # No HW encoder available, return None to keep software encoder
+        return None
     
     def _monitor_resources(self):
         """Background thread to monitor resources and pause/resume if needed."""
@@ -476,6 +642,71 @@ class EncoderPool:
         # Stop all active jobs
         for job in self.active_jobs:
             job.stop()
+
+
+def detect_hardware_acceleration() -> Dict:
+    """Detect available hardware encoders by querying HandBrakeCLI."""
+    available = {
+        "nvidia": False,
+        "amd": False,
+        "intel": False,
+        "apple": False,
+        "encoders": [],
+        "details": {}
+    }
+    
+    try:
+        result = subprocess.run(
+            ["HandBrakeCLI", "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10
+        )
+        
+        output = result.stdout.lower() + result.stderr.lower()
+        
+        if "nvenc" in output:
+            available["nvidia"] = True
+            available["encoders"].append("NVENC (NVIDIA)")
+            available["details"]["nvidia"] = {
+                "h264": "nvenc_h264" in output,
+                "h265": "nvenc_h265" in output,
+                "av1": "nvenc_av1" in output,
+            }
+        
+        if "vce" in output:
+            available["amd"] = True
+            available["encoders"].append("VCE (AMD)")
+            available["details"]["amd"] = {
+                "h264": "vce_h264" in output,
+                "h265": "vce_h265" in output,
+            }
+        
+        if "qsv" in output:
+            available["intel"] = True
+            available["encoders"].append("QuickSync (Intel)")
+            available["details"]["intel"] = {
+                "h264": "qsv_h264" in output,
+                "h265": "qsv_h265" in output,
+                "av1": "qsv_av1" in output,
+            }
+        
+        if "videotoolbox" in output or "vt_h" in output:
+            available["apple"] = True
+            available["encoders"].append("VideoToolbox (Apple)")
+            available["details"]["apple"] = {
+                "h264": "vt_h264" in output,
+                "h265": "vt_h265" in output,
+            }
+        
+    except FileNotFoundError:
+        available["error"] = "HandBrakeCLI not found"
+    except subprocess.TimeoutExpired:
+        available["error"] = "HandBrakeCLI timed out"
+    except Exception as e:
+        available["error"] = str(e)
+    
+    return available
 
 
 # Global encoder pool instance

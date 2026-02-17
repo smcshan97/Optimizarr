@@ -105,6 +105,11 @@ class ProfileCreate(BaseModel):
     quality: int = Field(..., ge=0, le=51)
     audio_codec: str = Field(..., pattern="^(aac|opus|ac3|flac|passthrough)$")
     container: str = Field(default="mkv", pattern="^(mkv|mp4|webm)$")
+    audio_handling: str = Field(default="preserve_all", pattern="^(preserve_all|keep_primary|stereo_mixdown|hd_plus_aac|high_quality)$")
+    subtitle_handling: str = Field(default="none", pattern="^(preserve_all|keep_english|burn_in|foreign_scan|none)$")
+    enable_filters: bool = False
+    chapter_markers: bool = True
+    hw_accel_enabled: bool = False
     preset: Optional[str] = None
     two_pass: bool = False
     custom_args: Optional[str] = None
@@ -121,6 +126,11 @@ class ProfileResponse(BaseModel):
     quality: int
     audio_codec: str
     container: Optional[str] = "mkv"
+    audio_handling: Optional[str] = "preserve_all"
+    subtitle_handling: Optional[str] = "none"
+    enable_filters: Optional[bool] = False
+    chapter_markers: Optional[bool] = True
+    hw_accel_enabled: Optional[bool] = False
     preset: Optional[str]
     two_pass: bool
     custom_args: Optional[str]
@@ -236,3 +246,111 @@ class MessageResponse(BaseModel):
 class ErrorResponse(BaseModel):
     detail: str
     success: bool = False
+
+
+# ============================================================
+# AUDIO HANDLING STRATEGIES
+# ============================================================
+
+AUDIO_STRATEGIES = {
+    "preserve_all": {
+        "name": "Preserve All Tracks",
+        "description": "Keep every audio track from the source",
+        "icon": "🔊",
+        "best_for": "Movies, Archive"
+    },
+    "keep_primary": {
+        "name": "Keep Primary Only",
+        "description": "Keep only the first/default audio track",
+        "icon": "🔈",
+        "best_for": "TV Shows, Web Content"
+    },
+    "stereo_mixdown": {
+        "name": "Convert to Stereo",
+        "description": "Downmix all audio to stereo AAC",
+        "icon": "🎧",
+        "best_for": "Mobile, Web Content"
+    },
+    "hd_plus_aac": {
+        "name": "HD Audio + AAC Fallback",
+        "description": "Keep original HD audio + add AAC stereo track",
+        "icon": "🎭",
+        "best_for": "Home Theater, Movies"
+    },
+    "high_quality": {
+        "name": "High Quality Audio",
+        "description": "Single high-bitrate AAC track at 256kbps",
+        "icon": "🎵",
+        "best_for": "Music Videos"
+    }
+}
+
+
+# ============================================================
+# SUBTITLE HANDLING STRATEGIES
+# ============================================================
+
+SUBTITLE_STRATEGIES = {
+    "preserve_all": {
+        "name": "Preserve All Subtitles",
+        "description": "Keep every subtitle track from the source",
+        "icon": "💬",
+        "best_for": "Movies, Archive"
+    },
+    "keep_english": {
+        "name": "English Only",
+        "description": "Keep only English subtitle tracks",
+        "icon": "🇺🇸",
+        "best_for": "Personal Libraries"
+    },
+    "burn_in": {
+        "name": "Burn-in First Track",
+        "description": "Burn first subtitle permanently into video",
+        "icon": "🔥",
+        "best_for": "Anime (hardcoded subs)"
+    },
+    "foreign_scan": {
+        "name": "Foreign Audio Scan",
+        "description": "Auto-detect and subtitle only foreign language parts",
+        "icon": "🌍",
+        "best_for": "Movies with mixed languages"
+    },
+    "none": {
+        "name": "Remove All",
+        "description": "Strip all subtitle tracks",
+        "icon": "❌",
+        "best_for": "Space savings, Web Content"
+    }
+}
+
+
+# ============================================================
+# VIDEO FILTER DEFINITIONS
+# ============================================================
+
+VIDEO_FILTERS = {
+    "deinterlace": {
+        "name": "Deinterlace",
+        "description": "Remove interlacing from old video (DVD, TV recordings)",
+        "icon": "📡",
+        "auto_detect": True
+    },
+    "denoise": {
+        "name": "Denoise",
+        "description": "Reduce noise from low-light or compressed sources",
+        "icon": "✨",
+        "auto_detect": True
+    },
+    "deblock": {
+        "name": "Deblock",
+        "description": "Remove compression artifacts from MPEG2/MPEG4",
+        "icon": "🧱",
+        "auto_detect": True
+    },
+    "auto_crop": {
+        "name": "Auto Crop",
+        "description": "Remove black bars automatically",
+        "icon": "✂️",
+        "auto_detect": True
+    }
+}

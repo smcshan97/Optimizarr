@@ -561,8 +561,16 @@ async function loadProfiles() {
                         <div><span class="text-gray-400">Quality:</span> CRF ${p.quality}</div>
                         <div><span class="text-gray-400">Audio:</span> ${p.audio_codec.toUpperCase()}</div>
                         <div><span class="text-gray-400">Container:</span> ${(p.container || 'mkv').toUpperCase()}</div>
+                        <div><span class="text-gray-400">Audio Mode:</span> ${getAudioLabel(p.audio_handling)}</div>
+                        ${p.subtitle_handling && p.subtitle_handling !== 'none' ? `<div><span class="text-gray-400">Subtitles:</span> ${getSubtitleLabel(p.subtitle_handling)}</div>` : ''}
                         ${p.resolution ? `<div><span class="text-gray-400">Resolution:</span> ${p.resolution}</div>` : ''}
                         ${p.preset ? `<div><span class="text-gray-400">Preset:</span> ${p.preset}</div>` : ''}
+                    </div>
+                    <div class="flex gap-2 mt-2">
+                        ${p.enable_filters ? '<span class="px-2 py-0.5 bg-purple-900 text-purple-300 text-xs rounded">Filters</span>' : ''}
+                        ${p.chapter_markers ? '<span class="px-2 py-0.5 bg-gray-600 text-gray-300 text-xs rounded">Chapters</span>' : ''}
+                        ${p.hw_accel_enabled ? '<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">GPU</span>' : ''}
+                        ${p.two_pass ? '<span class="px-2 py-0.5 bg-yellow-900 text-yellow-300 text-xs rounded">2-Pass</span>' : ''}
                     </div>
                 </div>
                 <div class="flex gap-2">
@@ -586,6 +594,14 @@ function showCreateProfileForm() {
     document.getElementById('profileForm').reset();
     document.getElementById('profileId').value = '';
     document.getElementById('profileFramerateCustom').classList.add('hidden');
+    
+    // Reset Phase 2 fields to defaults
+    document.getElementById('profileAudioHandling').value = 'preserve_all';
+    document.getElementById('profileSubtitleHandling').value = 'none';
+    document.getElementById('profileEnableFilters').checked = false;
+    document.getElementById('profileChapterMarkers').checked = true;
+    document.getElementById('profileHwAccel').checked = false;
+    document.getElementById('profileContainer').value = 'mkv';
     
     // Initialize preset options for default encoder (svt_av1)
     updatePresetOptions();
@@ -623,6 +639,11 @@ async function editProfile(id) {
     document.getElementById('profileQuality').value = profile.quality;
     document.getElementById('profilePreset').value = profile.preset || '';
     document.getElementById('profileAudioCodec').value = profile.audio_codec;
+    document.getElementById('profileAudioHandling').value = profile.audio_handling || 'preserve_all';
+    document.getElementById('profileSubtitleHandling').value = profile.subtitle_handling || 'none';
+    document.getElementById('profileEnableFilters').checked = profile.enable_filters || false;
+    document.getElementById('profileChapterMarkers').checked = profile.chapter_markers !== false;
+    document.getElementById('profileHwAccel').checked = profile.hw_accel_enabled || false;
     document.getElementById('profileTwoPass').checked = profile.two_pass;
     document.getElementById('profileIsDefault').checked = profile.is_default;
     document.getElementById('profileCustomArgs').value = profile.custom_args || '';
@@ -657,6 +678,11 @@ document.getElementById('profileForm').addEventListener('submit', async (e) => {
         preset: document.getElementById('profilePreset').value || null,
         audio_codec: document.getElementById('profileAudioCodec').value,
         container: document.getElementById('profileContainer').value,
+        audio_handling: document.getElementById('profileAudioHandling').value,
+        subtitle_handling: document.getElementById('profileSubtitleHandling').value,
+        enable_filters: document.getElementById('profileEnableFilters').checked,
+        chapter_markers: document.getElementById('profileChapterMarkers').checked,
+        hw_accel_enabled: document.getElementById('profileHwAccel').checked,
         two_pass: document.getElementById('profileTwoPass').checked,
         custom_args: document.getElementById('profileCustomArgs').value || null,
         is_default: document.getElementById('profileIsDefault').checked
@@ -1549,5 +1575,106 @@ function escapeHtml(text) {
     const div = document.createElement('div');
     div.textContent = text;
     return div.innerHTML;
+}
+
+
+// ============================================================
+// PHASE 2: AUDIO/SUBTITLE/HW HELPERS
+// ============================================================
+
+const AUDIO_LABELS = {
+    'preserve_all': '🔊 Preserve All',
+    'keep_primary': '🔈 Primary Only',
+    'stereo_mixdown': '🎧 Stereo',
+    'hd_plus_aac': '🎭 HD+AAC',
+    'high_quality': '🎵 HQ Audio'
+};
+
+const SUBTITLE_LABELS = {
+    'preserve_all': '💬 All Subs',
+    'keep_english': '🇺🇸 English',
+    'burn_in': '🔥 Burn-in',
+    'foreign_scan': '🌍 Foreign Scan',
+    'none': '❌ None'
+};
+
+const AUDIO_HELP = {
+    'preserve_all': 'Keeps all original audio tracks',
+    'keep_primary': 'Only the first/default track — saves space',
+    'stereo_mixdown': 'Downmix to stereo AAC — mobile friendly',
+    'hd_plus_aac': 'Keeps HD surround + adds AAC for compatibility',
+    'high_quality': 'Single 256kbps AAC — best for music'
+};
+
+const SUBTITLE_HELP = {
+    'preserve_all': 'Keeps every subtitle track from source',
+    'keep_english': 'Only English subtitle tracks',
+    'burn_in': 'Burns first subtitle into video permanently',
+    'foreign_scan': 'Auto-subtitles foreign language parts only',
+    'none': 'No subtitles in output'
+};
+
+function getAudioLabel(strategy) {
+    return AUDIO_LABELS[strategy] || AUDIO_LABELS['preserve_all'];
+}
+
+function getSubtitleLabel(strategy) {
+    return SUBTITLE_LABELS[strategy] || SUBTITLE_LABELS['none'];
+}
+
+// Update help text when audio/subtitle strategy changes
+document.addEventListener('DOMContentLoaded', function() {
+    const audioSelect = document.getElementById('profileAudioHandling');
+    if (audioSelect) {
+        audioSelect.addEventListener('change', function() {
+            const help = document.getElementById('audioHandlingHelp');
+            if (help) help.textContent = AUDIO_HELP[this.value] || '';
+        });
+    }
+    
+    const subSelect = document.getElementById('profileSubtitleHandling');
+    if (subSelect) {
+        subSelect.addEventListener('change', function() {
+            const help = document.getElementById('subtitleHandlingHelp');
+            if (help) help.textContent = SUBTITLE_HELP[this.value] || '';
+        });
+    }
+});
+
+// Hardware acceleration check
+async function checkHwAccel() {
+    const checkbox = document.getElementById('profileHwAccel');
+    const helpEl = document.getElementById('hwAccelHelp');
+    
+    if (!checkbox.checked) {
+        helpEl.textContent = 'Use GPU encoding';
+        return;
+    }
+    
+    helpEl.textContent = 'Detecting...';
+    
+    try {
+        const hw = await apiRequest('/hardware-detect');
+        
+        if (!hw || hw.error) {
+            helpEl.textContent = '⚠️ ' + (hw?.error || 'Detection failed');
+            helpEl.className = 'text-xs text-red-400 mt-1';
+            checkbox.checked = false;
+            return;
+        }
+        
+        if (hw.encoders && hw.encoders.length > 0) {
+            helpEl.textContent = '✓ ' + hw.encoders.join(', ');
+            helpEl.className = 'text-xs text-green-400 mt-1';
+        } else {
+            helpEl.textContent = '⚠️ No hardware encoders found';
+            helpEl.className = 'text-xs text-yellow-400 mt-1';
+            checkbox.checked = false;
+        }
+    } catch (err) {
+        helpEl.textContent = '⚠️ Detection failed';
+        helpEl.className = 'text-xs text-red-400 mt-1';
+        checkbox.checked = false;
+    }
 }
 

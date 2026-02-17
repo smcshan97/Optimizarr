@@ -55,6 +55,11 @@ class Database:
                     quality INTEGER NOT NULL,
                     audio_codec TEXT NOT NULL,
                     container TEXT DEFAULT 'mkv',
+                    audio_handling TEXT DEFAULT 'preserve_all',
+                    subtitle_handling TEXT DEFAULT 'none',
+                    enable_filters BOOLEAN DEFAULT 0,
+                    chapter_markers BOOLEAN DEFAULT 1,
+                    hw_accel_enabled BOOLEAN DEFAULT 0,
                     preset TEXT,
                     two_pass BOOLEAN DEFAULT 0,
                     custom_args TEXT,
@@ -195,6 +200,23 @@ class Database:
                 cursor.execute("ALTER TABLE profiles ADD COLUMN container TEXT DEFAULT 'mkv'")
                 print("  ↳ Migrated: added 'container' column to profiles")
             
+            # Phase 2 migrations
+            if 'audio_handling' not in profile_columns:
+                cursor.execute("ALTER TABLE profiles ADD COLUMN audio_handling TEXT DEFAULT 'preserve_all'")
+                print("  ↳ Migrated: added 'audio_handling' column to profiles")
+            if 'subtitle_handling' not in profile_columns:
+                cursor.execute("ALTER TABLE profiles ADD COLUMN subtitle_handling TEXT DEFAULT 'none'")
+                print("  ↳ Migrated: added 'subtitle_handling' column to profiles")
+            if 'enable_filters' not in profile_columns:
+                cursor.execute("ALTER TABLE profiles ADD COLUMN enable_filters BOOLEAN DEFAULT 0")
+                print("  ↳ Migrated: added 'enable_filters' column to profiles")
+            if 'chapter_markers' not in profile_columns:
+                cursor.execute("ALTER TABLE profiles ADD COLUMN chapter_markers BOOLEAN DEFAULT 1")
+                print("  ↳ Migrated: added 'chapter_markers' column to profiles")
+            if 'hw_accel_enabled' not in profile_columns:
+                cursor.execute("ALTER TABLE profiles ADD COLUMN hw_accel_enabled BOOLEAN DEFAULT 0")
+                print("  ↳ Migrated: added 'hw_accel_enabled' column to profiles")
+            
             # Add 'library_type' column to scan_roots if missing
             cursor.execute("PRAGMA table_info(scan_roots)")
             root_columns = [col[1] for col in cursor.fetchall()]
@@ -212,8 +234,9 @@ class Database:
             cursor.execute("""
                 INSERT INTO profiles 
                 (name, resolution, framerate, codec, encoder, quality, audio_codec, 
-                 container, preset, two_pass, custom_args, is_default)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 container, audio_handling, subtitle_handling, enable_filters,
+                 chapter_markers, hw_accel_enabled, preset, two_pass, custom_args, is_default)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 kwargs.get('name'),
                 kwargs.get('resolution'),
@@ -223,6 +246,11 @@ class Database:
                 kwargs.get('quality'),
                 kwargs.get('audio_codec'),
                 kwargs.get('container', 'mkv'),
+                kwargs.get('audio_handling', 'preserve_all'),
+                kwargs.get('subtitle_handling', 'none'),
+                kwargs.get('enable_filters', False),
+                kwargs.get('chapter_markers', True),
+                kwargs.get('hw_accel_enabled', False),
                 kwargs.get('preset'),
                 kwargs.get('two_pass', False),
                 kwargs.get('custom_args'),
@@ -240,8 +268,9 @@ class Database:
             
             allowed_fields = [
                 'name', 'resolution', 'framerate', 'codec', 'encoder',
-                'quality', 'audio_codec', 'container', 'preset', 'two_pass',
-                'custom_args', 'is_default'
+                'quality', 'audio_codec', 'container', 'audio_handling',
+                'subtitle_handling', 'enable_filters', 'chapter_markers',
+                'hw_accel_enabled', 'preset', 'two_pass', 'custom_args', 'is_default'
             ]
             
             for field in allowed_fields:
