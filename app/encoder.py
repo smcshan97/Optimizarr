@@ -49,12 +49,25 @@ class EncodingJob:
         """Build HandBrakeCLI command from profile settings."""
         input_file = self.queue_item['file_path']
         
-        # Create output path (temporary location)
+        # Determine container format and output extension
+        container = self.profile.get('container', 'mkv')
+        container_map = {
+            'mkv': {'ext': '.mkv', 'format': 'av_mkv'},
+            'mp4': {'ext': '.mp4', 'format': 'av_mp4'},
+            'webm': {'ext': '.webm', 'format': 'av_webm'},
+        }
+        container_info = container_map.get(container, container_map['mkv'])
+        
+        # Create output path with correct extension
         input_path = Path(input_file)
-        output_file = str(input_path.parent / f"{input_path.stem}_optimized{input_path.suffix}")
+        output_ext = container_info['ext']
+        output_file = str(input_path.parent / f"{input_path.stem}_optimized{output_ext}")
         
         # Base command
         cmd = ['HandBrakeCLI', '-i', input_file, '-o', output_file]
+        
+        # Container format
+        cmd.extend(['--format', container_info['format']])
         
         # Encoder selection
         encoder = self.profile['encoder']
@@ -162,8 +175,9 @@ class EncodingJob:
         # Build command
         cmd = self.build_command()
         
-        print(f"Starting encoding: {Path(self.queue_item['file_path']).name}")
-        print(f"Command: {' '.join(cmd)}")
+        # Log the encoding start
+        from app.logger import optimizarr_logger
+        optimizarr_logger.log_handbrake_start(self.queue_item['file_path'], cmd)
         
         try:
             # Start HandBrakeCLI process
@@ -215,11 +229,14 @@ class EncodingJob:
             return_code = self.process.wait()
             
             if return_code == 0:
-                print(f"\n✓ Encoding completed: {Path(self.queue_item['file_path']).name}")
                 self._finalize_encoding()
                 return True
             else:
-                print(f"\n✗ Encoding failed with code {return_code}")
+                from app.logger import optimizarr_logger
+                optimizarr_logger.log_handbrake_error(
+                    self.queue_item['file_path'],
+                    f"HandBrakeCLI exited with code {return_code}"
+                )
                 db.update_queue_item(
                     self.queue_item_id,
                     status='failed',
@@ -228,7 +245,8 @@ class EncodingJob:
                 return False
                 
         except Exception as e:
-            print(f"\n✗ Encoding error: {e}")
+            from app.logger import optimizarr_logger
+            optimizarr_logger.log_handbrake_error(self.queue_item['file_path'], str(e))
             db.update_queue_item(
                 self.queue_item_id,
                 status='failed',
@@ -238,8 +256,15 @@ class EncodingJob:
     
     def _finalize_encoding(self):
         """Replace original file with encoded version and update database."""
+        from app.logger import optimizarr_logger
+        
         input_path = Path(self.queue_item['file_path'])
-        output_path = input_path.parent / f"{input_path.stem}_optimized{input_path.suffix}"
+        
+        # Determine output extension based on container format
+        container = self.profile.get('container', 'mkv')
+        ext_map = {'mkv': '.mkv', 'mp4': '.mp4', 'webm': '.webm'}
+        output_ext = ext_map.get(container, '.mkv')
+        output_path = input_path.parent / f"{input_path.stem}_optimized{output_ext}"
         
         if not output_path.exists():
             db.update_queue_item(
@@ -247,18 +272,25 @@ class EncodingJob:
                 status='failed',
                 error_message='Output file not found'
             )
+            optimizarr_logger.log_handbrake_error(
+                str(input_path), 'Output file not found after encoding'
+            )
             return
         
         # Get file sizes
         original_size = input_path.stat().st_size
         new_size = output_path.stat().st_size
         savings = original_size - new_size
+        start_time = self.queue_item.get('started_at', '')
         
-        # Backup original (optional - for now just replace)
         try:
-            # Replace original with new file
+            # Remove original file
             input_path.unlink()
-            output_path.rename(input_path)
+            
+            # If container changed, the new file has a different extension
+            # Rename to same stem but with new extension
+            final_path = input_path.parent / f"{input_path.stem}{output_ext}"
+            output_path.rename(final_path)
             
             # Update queue item
             db.update_queue_item(
@@ -276,17 +308,24 @@ class EncodingJob:
                     (file_path, profile_name, original_size_bytes, new_size_bytes, savings_bytes)
                     VALUES (?, ?, ?, ?, ?)
                 """, (
-                    str(input_path),
+                    str(final_path),
                     self.profile['name'],
                     original_size,
                     new_size,
                     savings
                 ))
             
-            print(f"  Saved {savings / (1024**2):.1f} MB ({(savings/original_size)*100:.1f}%)")
+            # Log completion
+            savings_pct = (savings / original_size * 100) if original_size > 0 else 0
+            optimizarr_logger.log_handbrake_complete(str(input_path), {
+                "original_size_mb": original_size / (1024**2),
+                "new_size_mb": new_size / (1024**2),
+                "savings_percent": savings_pct,
+                "duration_seconds": 0  # TODO: calculate from started_at
+            })
             
         except Exception as e:
-            print(f"✗ Error finalizing: {e}")
+            optimizarr_logger.log_handbrake_error(str(input_path), str(e))
             db.update_queue_item(
                 self.queue_item_id,
                 status='failed',

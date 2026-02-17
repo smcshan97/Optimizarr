@@ -6,7 +6,96 @@ from typing import Optional, List, Dict, Any
 from datetime import datetime
 
 
-# Profile Models
+# ============================================================
+# LIBRARY TYPE DEFINITIONS
+# ============================================================
+
+LIBRARY_TYPES = {
+    "movie": {
+        "name": "Movies",
+        "description": "Feature films, documentaries",
+        "icon": "🎬",
+        "recommended": {
+            "codec": "av1", "encoder": "svt_av1", "quality": 28,
+            "preset": "6", "container": "mkv", "audio_codec": "opus"
+        }
+    },
+    "tv_show": {
+        "name": "TV Shows",
+        "description": "Series, sitcoms, episodic content",
+        "icon": "📺",
+        "recommended": {
+            "codec": "av1", "encoder": "svt_av1", "quality": 32,
+            "preset": "10", "container": "mkv", "audio_codec": "aac"
+        }
+    },
+    "anime": {
+        "name": "Anime",
+        "description": "Japanese animation",
+        "icon": "🎌",
+        "recommended": {
+            "codec": "av1", "encoder": "svt_av1", "quality": 26,
+            "preset": "6", "container": "mkv", "audio_codec": "opus"
+        }
+    },
+    "home_video": {
+        "name": "Home Videos",
+        "description": "Personal recordings, family videos",
+        "icon": "🎥",
+        "recommended": {
+            "codec": "h265", "encoder": "x265", "quality": 20,
+            "preset": "medium", "container": "mp4", "audio_codec": "aac"
+        }
+    },
+    "4k_content": {
+        "name": "4K/UHD Content",
+        "description": "Ultra HD, 4K movies/shows",
+        "icon": "🖥️",
+        "recommended": {
+            "codec": "av1", "encoder": "svt_av1", "quality": 32,
+            "preset": "8", "container": "mkv", "audio_codec": "opus"
+        }
+    },
+    "web_content": {
+        "name": "Web/YouTube Downloads",
+        "description": "Downloaded web videos, streams",
+        "icon": "🌐",
+        "recommended": {
+            "codec": "av1", "encoder": "svt_av1", "quality": 35,
+            "preset": "12", "container": "mp4", "audio_codec": "aac"
+        }
+    },
+    "archive": {
+        "name": "Archive / Preservation",
+        "description": "Long-term storage, near-lossless",
+        "icon": "📦",
+        "recommended": {
+            "codec": "h265", "encoder": "x265", "quality": 18,
+            "preset": "slow", "container": "mkv", "audio_codec": "passthrough"
+        }
+    },
+    "music_video": {
+        "name": "Music Videos",
+        "description": "Music content, concerts",
+        "icon": "🎵",
+        "recommended": {
+            "codec": "av1", "encoder": "svt_av1", "quality": 26,
+            "preset": "6", "container": "mkv", "audio_codec": "opus"
+        }
+    },
+    "custom": {
+        "name": "Custom",
+        "description": "Manual configuration",
+        "icon": "⚙️",
+        "recommended": None
+    }
+}
+
+
+# ============================================================
+# PROFILE MODELS
+# ============================================================
+
 class ProfileCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=100)
     resolution: Optional[str] = None
@@ -14,7 +103,8 @@ class ProfileCreate(BaseModel):
     codec: str = Field(..., pattern="^(av1|h265|h264|vp9)$")
     encoder: str
     quality: int = Field(..., ge=0, le=51)
-    audio_codec: str = Field(..., pattern="^(aac|opus|ac3|passthrough)$")
+    audio_codec: str = Field(..., pattern="^(aac|opus|ac3|flac|passthrough)$")
+    container: str = Field(default="mkv", pattern="^(mkv|mp4|webm)$")
     preset: Optional[str] = None
     two_pass: bool = False
     custom_args: Optional[str] = None
@@ -30,6 +120,7 @@ class ProfileResponse(BaseModel):
     encoder: str
     quality: int
     audio_codec: str
+    container: Optional[str] = "mkv"
     preset: Optional[str]
     two_pass: bool
     custom_args: Optional[str]
@@ -37,10 +128,14 @@ class ProfileResponse(BaseModel):
     created_at: Optional[str]
 
 
-# Scan Root Models
+# ============================================================
+# SCAN ROOT MODELS
+# ============================================================
+
 class ScanRootCreate(BaseModel):
     path: str = Field(..., min_length=1)
     profile_id: int = Field(..., gt=0)
+    library_type: str = Field(default="custom")
     enabled: bool = True
     recursive: bool = True
 
@@ -49,11 +144,15 @@ class ScanRootResponse(BaseModel):
     id: int
     path: str
     profile_id: int
+    library_type: Optional[str] = "custom"
     enabled: bool
     recursive: bool
 
 
-# Queue Models
+# ============================================================
+# QUEUE MODELS
+# ============================================================
+
 class QueueItemResponse(BaseModel):
     id: int
     file_path: str
@@ -82,7 +181,10 @@ class QueueUpdateRequest(BaseModel):
     status: Optional[str] = None
 
 
-# Authentication Models
+# ============================================================
+# AUTHENTICATION MODELS
+# ============================================================
+
 class LoginRequest(BaseModel):
     username: str = Field(..., min_length=1)
     password: str = Field(..., min_length=1)
@@ -108,7 +210,10 @@ class ChangePasswordRequest(BaseModel):
     new_password: str = Field(..., min_length=6)
 
 
-# Statistics Models
+# ============================================================
+# STATISTICS MODELS
+# ============================================================
+
 class StatsResponse(BaseModel):
     total_files_processed: int
     total_space_saved_bytes: int
@@ -119,7 +224,10 @@ class StatsResponse(BaseModel):
     queue_failed: int
 
 
-# Generic Response Models
+# ============================================================
+# GENERIC RESPONSE MODELS
+# ============================================================
+
 class MessageResponse(BaseModel):
     message: str
     success: bool = True

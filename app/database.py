@@ -54,6 +54,7 @@ class Database:
                     encoder TEXT NOT NULL,
                     quality INTEGER NOT NULL,
                     audio_codec TEXT NOT NULL,
+                    container TEXT DEFAULT 'mkv',
                     preset TEXT,
                     two_pass BOOLEAN DEFAULT 0,
                     custom_args TEXT,
@@ -68,6 +69,7 @@ class Database:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     path TEXT UNIQUE NOT NULL,
                     profile_id INTEGER,
+                    library_type TEXT DEFAULT 'custom',
                     enabled BOOLEAN DEFAULT 1,
                     recursive BOOLEAN DEFAULT 1,
                     FOREIGN KEY (profile_id) REFERENCES profiles(id)
@@ -185,6 +187,21 @@ class Database:
                     VALUES (0, '0,1,2,3,4,5,6', '22:00', '06:00')
                 """)
             
+            # ---- MIGRATIONS for existing databases ----
+            # Add 'container' column to profiles if missing
+            cursor.execute("PRAGMA table_info(profiles)")
+            profile_columns = [col[1] for col in cursor.fetchall()]
+            if 'container' not in profile_columns:
+                cursor.execute("ALTER TABLE profiles ADD COLUMN container TEXT DEFAULT 'mkv'")
+                print("  ↳ Migrated: added 'container' column to profiles")
+            
+            # Add 'library_type' column to scan_roots if missing
+            cursor.execute("PRAGMA table_info(scan_roots)")
+            root_columns = [col[1] for col in cursor.fetchall()]
+            if 'library_type' not in root_columns:
+                cursor.execute("ALTER TABLE scan_roots ADD COLUMN library_type TEXT DEFAULT 'custom'")
+                print("  ↳ Migrated: added 'library_type' column to scan_roots")
+            
             print("✓ Database schema initialized")
     
     # Profile CRUD
@@ -195,8 +212,8 @@ class Database:
             cursor.execute("""
                 INSERT INTO profiles 
                 (name, resolution, framerate, codec, encoder, quality, audio_codec, 
-                 preset, two_pass, custom_args, is_default)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 container, preset, two_pass, custom_args, is_default)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 kwargs.get('name'),
                 kwargs.get('resolution'),
@@ -205,12 +222,40 @@ class Database:
                 kwargs.get('encoder'),
                 kwargs.get('quality'),
                 kwargs.get('audio_codec'),
+                kwargs.get('container', 'mkv'),
                 kwargs.get('preset'),
                 kwargs.get('two_pass', False),
                 kwargs.get('custom_args'),
                 kwargs.get('is_default', False)
             ))
             return cursor.lastrowid
+    
+    def update_profile(self, profile_id: int, **kwargs) -> bool:
+        """Update an existing encoding profile."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            updates = []
+            values = []
+            
+            allowed_fields = [
+                'name', 'resolution', 'framerate', 'codec', 'encoder',
+                'quality', 'audio_codec', 'container', 'preset', 'two_pass',
+                'custom_args', 'is_default'
+            ]
+            
+            for field in allowed_fields:
+                if field in kwargs:
+                    updates.append(f"{field} = ?")
+                    values.append(kwargs[field])
+            
+            if not updates:
+                return False
+            
+            values.append(profile_id)
+            query = f"UPDATE profiles SET {', '.join(updates)} WHERE id = ?"
+            cursor.execute(query, values)
+            return cursor.rowcount > 0
     
     def get_profiles(self) -> List[Dict]:
         """Get all encoding profiles."""
@@ -235,14 +280,15 @@ class Database:
             return cursor.rowcount > 0
     
     # Scan Root CRUD
-    def create_scan_root(self, path: str, profile_id: int, enabled: bool = True, recursive: bool = True) -> int:
+    def create_scan_root(self, path: str, profile_id: int, library_type: str = "custom",
+                        enabled: bool = True, recursive: bool = True) -> int:
         """Create a new scan root."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO scan_roots (path, profile_id, enabled, recursive)
-                VALUES (?, ?, ?, ?)
-            """, (path, profile_id, enabled, recursive))
+                INSERT INTO scan_roots (path, profile_id, library_type, enabled, recursive)
+                VALUES (?, ?, ?, ?, ?)
+            """, (path, profile_id, library_type, enabled, recursive))
             return cursor.lastrowid
     
     def get_scan_roots(self, enabled_only: bool = False) -> List[Dict]:
@@ -263,8 +309,8 @@ class Database:
             row = cursor.fetchone()
             return dict(row) if row else None
     
-    def update_scan_root(self, root_id: int, path: str = None, profile_id: int = None, 
-                        enabled: bool = None, recursive: bool = None) -> bool:
+    def update_scan_root(self, root_id: int, path: str = None, profile_id: int = None,
+                        library_type: str = None, enabled: bool = None, recursive: bool = None) -> bool:
         """Update a scan root."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -279,6 +325,9 @@ class Database:
             if profile_id is not None:
                 updates.append("profile_id = ?")
                 values.append(profile_id)
+            if library_type is not None:
+                updates.append("library_type = ?")
+                values.append(library_type)
             if enabled is not None:
                 updates.append("enabled = ?")
                 values.append(enabled)

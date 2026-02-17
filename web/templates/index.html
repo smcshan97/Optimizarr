@@ -92,6 +92,7 @@
                     <button onclick="switchTab('profiles')" id="tab-profiles" class="tab-button">Profiles</button>
                     <button onclick="switchTab('scanroots')" id="tab-scanroots" class="tab-button">Scan Roots</button>
                     <button onclick="switchTab('schedule')" id="tab-schedule" class="tab-button">Schedule</button>
+                    <button onclick="switchTab('logs')" id="tab-logs" class="tab-button">Logs</button>
                 </nav>
             </div>
         </div>
@@ -454,15 +455,29 @@
                         </div>
                     </div>
                     
-                    <div>
-                        <label class="block text-sm font-medium mb-2">Audio Codec *</label>
-                        <select id="profileAudioCodec" required 
-                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
-                            <option value="aac">AAC</option>
-                            <option value="opus">Opus</option>
-                            <option value="ac3">AC3</option>
-                            <option value="passthrough">Passthrough (copy)</option>
-                        </select>
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Audio Codec *</label>
+                            <select id="profileAudioCodec" required 
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                                <option value="aac">AAC</option>
+                                <option value="opus">Opus</option>
+                                <option value="ac3">AC3</option>
+                                <option value="flac">FLAC (Lossless)</option>
+                                <option value="passthrough">Passthrough (copy)</option>
+                            </select>
+                        </div>
+                        
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Container Format *</label>
+                            <select id="profileContainer" required 
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                                <option value="mkv" selected>MKV (recommended)</option>
+                                <option value="mp4">MP4 (max compatibility)</option>
+                                <option value="webm">WebM (web streaming)</option>
+                            </select>
+                            <p class="text-xs text-gray-400 mt-1">MKV supports all codecs/subs; MP4 for Apple/mobile</p>
+                        </div>
                     </div>
                     
                     <div>
@@ -523,6 +538,25 @@
                             </button>
                         </div>
                         <p class="text-xs text-gray-400 mt-1">Absolute path to scan for video files</p>
+                    </div>
+                    
+                    <div>
+                        <label class="block text-sm font-medium mb-2">Library Type</label>
+                        <select id="scanRootLibraryType" onchange="handleLibraryTypeChange()"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                            <option value="custom">⚙️ Custom — Manual configuration</option>
+                            <option value="movie">🎬 Movies — Feature films, documentaries</option>
+                            <option value="tv_show">📺 TV Shows — Series, sitcoms, episodic</option>
+                            <option value="anime">🎌 Anime — Japanese animation</option>
+                            <option value="home_video">🎥 Home Videos — Personal recordings</option>
+                            <option value="4k_content">🖥️ 4K/UHD — Ultra HD content</option>
+                            <option value="web_content">🌐 Web/YouTube — Downloaded web videos</option>
+                            <option value="archive">📦 Archive — Long-term preservation</option>
+                            <option value="music_video">🎵 Music Videos — Concerts, MVs</option>
+                        </select>
+                        <p class="text-xs text-gray-400 mt-1">Selects optimized encoding settings for this content type</p>
+                        <div id="libraryTypeRecommendation" class="hidden mt-2 p-3 bg-gray-600 rounded text-sm">
+                        </div>
                     </div>
                     
                     <div>
@@ -671,6 +705,55 @@
                     </div>
                     
                     <div id="scheduleMessage" class="hidden mt-4"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Logs Tab -->
+        <div id="content-logs" class="tab-content hidden">
+            <div class="bg-gray-800 rounded-lg p-6">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-xl font-bold">System Logs</h2>
+                    <div class="flex gap-3">
+                        <select id="logType" onchange="loadLogs()" 
+                            class="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
+                            <option value="app">Application</option>
+                            <option value="handbrake">HandBrake</option>
+                            <option value="errors">Errors</option>
+                        </select>
+                        <select id="logLevel" onchange="loadLogs()" 
+                            class="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
+                            <option value="ALL">All Levels</option>
+                            <option value="DEBUG">DEBUG</option>
+                            <option value="INFO">INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR">ERROR</option>
+                        </select>
+                        <select id="logLines" onchange="loadLogs()" 
+                            class="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
+                            <option value="50">Last 50</option>
+                            <option value="100" selected>Last 100</option>
+                            <option value="250">Last 250</option>
+                            <option value="500">Last 500</option>
+                        </select>
+                        <button onclick="loadLogs()" 
+                            class="bg-blue-600 hover:bg-blue-700 px-3 py-2 rounded text-sm">
+                            🔄 Refresh
+                        </button>
+                        <button onclick="clearLogs()" 
+                            class="bg-red-600 hover:bg-red-700 px-3 py-2 rounded text-sm">
+                            🗑️ Clear
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Log Stats -->
+                <div id="logStats" class="mb-4 text-xs text-gray-400"></div>
+                
+                <!-- Log Output -->
+                <div id="logOutput" 
+                    class="bg-gray-900 rounded-lg p-4 font-mono text-xs leading-relaxed overflow-x-auto max-h-[600px] overflow-y-auto">
+                    <p class="text-gray-500">Select a log type and click Refresh...</p>
                 </div>
             </div>
         </div>

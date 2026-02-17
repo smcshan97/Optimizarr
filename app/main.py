@@ -18,7 +18,7 @@ from app.scheduler import initialize_scheduler, shutdown_scheduler
 app = FastAPI(
     title="Optimizarr",
     description="Automated Media Optimization System",
-    version="1.0.0"
+    version="2.0.0"
 )
 
 # CORS middleware
@@ -93,6 +93,8 @@ async def login_page():
 @app.on_event("startup")
 async def startup_event():
     """Initialize application on startup."""
+    from app.logger import optimizarr_logger
+    
     print("=" * 60)
     print("Optimizarr - Automated Media Optimization System")
     print("=" * 60)
@@ -118,6 +120,7 @@ async def startup_event():
             encoder="svt_av1",
             quality=28,
             audio_codec="opus",
+            container="mkv",
             preset="6",
             two_pass=False,
             custom_args=None,
@@ -128,6 +131,9 @@ async def startup_event():
     # Initialize scheduler
     initialize_scheduler()
     
+    # Log startup
+    optimizarr_logger.log_startup("2.0.0", settings.host, settings.port)
+    
     print("=" * 60)
     print(f"Server starting on http://{settings.host}:{settings.port}")
     print("=" * 60)
@@ -136,6 +142,8 @@ async def startup_event():
 @app.on_event("shutdown")
 async def shutdown_event():
     """Cleanup on shutdown."""
+    from app.logger import optimizarr_logger
+    optimizarr_logger.log_shutdown()
     print("\nShutting down Optimizarr...")
     shutdown_scheduler()
 

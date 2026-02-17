@@ -11,7 +11,7 @@ from app.api.models import (
     ProfileCreate, ProfileResponse,
     ScanRootCreate, ScanRootResponse,
     QueueItemResponse, QueueUpdateRequest,
-    StatsResponse, MessageResponse, Dict
+    StatsResponse, MessageResponse
 )
 from app.api.dependencies import get_current_user, get_current_admin_user
 from app.database import db
@@ -89,6 +89,7 @@ async def update_profile(
         encoder=profile.encoder,
         quality=profile.quality,
         audio_codec=profile.audio_codec,
+        container=profile.container,
         preset=profile.preset,
         two_pass=profile.two_pass,
         custom_args=profile.custom_args,
@@ -139,6 +140,7 @@ async def create_scan_root(
         root_id = db.create_scan_root(
             path=scan_root.path,
             profile_id=scan_root.profile_id,
+            library_type=scan_root.library_type,
             enabled=scan_root.enabled,
             recursive=scan_root.recursive
         )
@@ -209,6 +211,7 @@ async def update_scan_root(
         root_id=root_id,
         path=root_data.path,
         profile_id=root_data.profile_id,
+        library_type=root_data.library_type,
         recursive=root_data.recursive,
         enabled=root_data.enabled
     )
@@ -537,6 +540,50 @@ async def browse_directories(
         'parent': parent,
         'dirs': dirs,
     }
+
+
+# Library Types Endpoint
+@router.get("/library-types")
+async def get_library_types():
+    """Get all available library types with recommended settings."""
+    from app.api.models import LIBRARY_TYPES
+    return LIBRARY_TYPES
+
+
+# Log Endpoints
+@router.get("/logs")
+async def get_logs(
+    log_type: str = Query("app", description="Log type: app, handbrake, errors"),
+    lines: int = Query(100, ge=1, le=1000, description="Number of lines to return"),
+    level: str = Query("ALL", description="Filter by log level"),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get application logs."""
+    from app.logger import optimizarr_logger
+    return optimizarr_logger.get_logs(log_type=log_type, lines=lines, level=level)
+
+
+@router.get("/logs/statistics")
+async def get_log_statistics(
+    days: int = Query(7, ge=1, le=90, description="Number of days of statistics"),
+    current_user: dict = Depends(get_current_user)
+):
+    """Get structured encoding statistics from logs."""
+    from app.logger import optimizarr_logger
+    return optimizarr_logger.get_statistics(days=days)
+
+
+@router.post("/logs/clear")
+async def clear_logs(
+    log_type: str = Query("app", description="Log type to clear"),
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Clear a log file (admin only)."""
+    from app.logger import optimizarr_logger
+    success = optimizarr_logger.clear_log(log_type)
+    if success:
+        return MessageResponse(message=f"Cleared {log_type} logs")
+    return MessageResponse(message=f"Failed to clear {log_type} logs", success=False)
 
 
 # Health check

@@ -69,6 +69,7 @@ function switchTab(tabName) {
     if (tabName === 'scanroots') loadScanRoots();
     if (tabName === 'settings') loadSettings();
     if (tabName === 'schedule') loadSchedule();
+    if (tabName === 'logs') loadLogs();
 }
 
 // Load statistics
@@ -559,6 +560,7 @@ async function loadProfiles() {
                         <div><span class="text-gray-400">Encoder:</span> ${p.encoder}</div>
                         <div><span class="text-gray-400">Quality:</span> CRF ${p.quality}</div>
                         <div><span class="text-gray-400">Audio:</span> ${p.audio_codec.toUpperCase()}</div>
+                        <div><span class="text-gray-400">Container:</span> ${(p.container || 'mkv').toUpperCase()}</div>
                         ${p.resolution ? `<div><span class="text-gray-400">Resolution:</span> ${p.resolution}</div>` : ''}
                         ${p.preset ? `<div><span class="text-gray-400">Preset:</span> ${p.preset}</div>` : ''}
                     </div>
@@ -603,6 +605,7 @@ async function editProfile(id) {
     document.getElementById('profileCodec').value = profile.codec;
     document.getElementById('profileEncoder').value = profile.encoder;
     document.getElementById('profileResolution').value = profile.resolution || '';
+    document.getElementById('profileContainer').value = profile.container || 'mkv';
     
     // Handle framerate - check if it's a standard value
     const standardFps = ['', '24', '30', '60'];
@@ -653,6 +656,7 @@ document.getElementById('profileForm').addEventListener('submit', async (e) => {
         quality: parseInt(document.getElementById('profileQuality').value),
         preset: document.getElementById('profilePreset').value || null,
         audio_codec: document.getElementById('profileAudioCodec').value,
+        container: document.getElementById('profileContainer').value,
         two_pass: document.getElementById('profileTwoPass').checked,
         custom_args: document.getElementById('profileCustomArgs').value || null,
         is_default: document.getElementById('profileIsDefault').checked
@@ -705,6 +709,7 @@ async function loadScanRoots() {
                 <div class="flex-1">
                     <h3 class="font-semibold text-lg">${r.path}</h3>
                     <div class="flex gap-4 mt-2 text-sm text-gray-300">
+                        <div><span class="text-gray-400">Type:</span> ${getLibraryTypeLabel(r.library_type)}</div>
                         <div><span class="text-gray-400">Profile:</span> ${r.profile_name || 'Unknown'}</div>
                         <div><span class="text-gray-400">Recursive:</span> ${r.recursive ? 'Yes' : 'No'}</div>
                         <div>
@@ -740,6 +745,8 @@ async function showCreateScanRootForm() {
     document.getElementById('scanRootId').value = '';
     document.getElementById('scanRootRecursive').checked = true;
     document.getElementById('scanRootEnabled').checked = true;
+    document.getElementById('scanRootLibraryType').value = 'custom';
+    document.getElementById('libraryTypeRecommendation').classList.add('hidden');
     
     // Load profiles for dropdown
     const profiles = await apiRequest('/profiles');
@@ -768,6 +775,7 @@ async function editScanRoot(id) {
     document.getElementById('scanRootId').value = root.id;
     document.getElementById('scanRootPath').value = root.path;
     document.getElementById('scanRootProfile').value = root.profile_id;
+    document.getElementById('scanRootLibraryType').value = root.library_type || 'custom';
     document.getElementById('scanRootRecursive').checked = root.recursive;
     document.getElementById('scanRootEnabled').checked = root.enabled;
     
@@ -785,6 +793,7 @@ document.getElementById('scanRootForm').addEventListener('submit', async (e) => 
     const data = {
         path: document.getElementById('scanRootPath').value,
         profile_id: parseInt(document.getElementById('scanRootProfile').value),
+        library_type: document.getElementById('scanRootLibraryType').value,
         recursive: document.getElementById('scanRootRecursive').checked,
         enabled: document.getElementById('scanRootEnabled').checked
     };
@@ -1417,5 +1426,128 @@ async function deleteQueueItem(id) {
 // Initialize auto-refresh on page load
 if (document.getElementById('autoRefreshQueue').checked) {
     toggleAutoRefresh();
+}
+
+
+// ============================================================
+// LIBRARY TYPE HELPERS
+// ============================================================
+
+const LIBRARY_TYPE_LABELS = {
+    'movie': '🎬 Movies',
+    'tv_show': '📺 TV Shows',
+    'anime': '🎌 Anime',
+    'home_video': '🎥 Home Videos',
+    '4k_content': '🖥️ 4K/UHD',
+    'web_content': '🌐 Web/YouTube',
+    'archive': '📦 Archive',
+    'music_video': '🎵 Music Videos',
+    'custom': '⚙️ Custom'
+};
+
+function getLibraryTypeLabel(type) {
+    return LIBRARY_TYPE_LABELS[type] || LIBRARY_TYPE_LABELS['custom'];
+}
+
+// Library type change handler — show recommended settings
+async function handleLibraryTypeChange() {
+    const type = document.getElementById('scanRootLibraryType').value;
+    const recBox = document.getElementById('libraryTypeRecommendation');
+    
+    if (type === 'custom') {
+        recBox.classList.add('hidden');
+        return;
+    }
+    
+    // Fetch library type definitions from API
+    try {
+        const types = await apiRequest('/library-types');
+        if (!types || !types[type] || !types[type].recommended) {
+            recBox.classList.add('hidden');
+            return;
+        }
+        
+        const rec = types[type].recommended;
+        recBox.innerHTML = `
+            <div class="text-blue-300 font-medium mb-1">💡 Recommended Settings for ${types[type].name}:</div>
+            <div class="grid grid-cols-3 gap-2 text-xs text-gray-300">
+                <span>Codec: <strong>${rec.codec.toUpperCase()}</strong></span>
+                <span>Encoder: <strong>${rec.encoder}</strong></span>
+                <span>Quality: <strong>CRF ${rec.quality}</strong></span>
+                <span>Preset: <strong>${rec.preset}</strong></span>
+                <span>Container: <strong>${rec.container.toUpperCase()}</strong></span>
+                <span>Audio: <strong>${rec.audio_codec.toUpperCase()}</strong></span>
+            </div>
+            <p class="text-xs text-gray-400 mt-1">Tip: Create a matching profile with these settings for best results.</p>
+        `;
+        recBox.classList.remove('hidden');
+    } catch (err) {
+        recBox.classList.add('hidden');
+    }
+}
+
+
+// ============================================================
+// LOGS TAB
+// ============================================================
+
+async function loadLogs() {
+    const logType = document.getElementById('logType').value;
+    const logLevel = document.getElementById('logLevel').value;
+    const logLines = document.getElementById('logLines').value;
+    const output = document.getElementById('logOutput');
+    const stats = document.getElementById('logStats');
+    
+    output.innerHTML = '<p class="text-gray-500">Loading...</p>';
+    
+    try {
+        const data = await apiRequest(`/logs?log_type=${logType}&lines=${logLines}&level=${logLevel}`);
+        
+        if (!data || !data.logs || data.logs.length === 0) {
+            output.innerHTML = '<p class="text-gray-500">No log entries found.</p>';
+            stats.textContent = `${logType} log — 0 entries`;
+            return;
+        }
+        
+        stats.textContent = `Showing ${data.showing} of ${data.total} entries (${logType} log)`;
+        
+        // Color-code log lines
+        const coloredLines = data.logs.map(line => {
+            if (line.includes('] ERROR [')) {
+                return `<div class="text-red-400">${escapeHtml(line)}</div>`;
+            } else if (line.includes('] WARNING [')) {
+                return `<div class="text-yellow-400">${escapeHtml(line)}</div>`;
+            } else if (line.includes('] DEBUG [')) {
+                return `<div class="text-gray-500">${escapeHtml(line)}</div>`;
+            } else {
+                return `<div class="text-gray-300">${escapeHtml(line)}</div>`;
+            }
+        });
+        
+        output.innerHTML = coloredLines.join('');
+        
+        // Auto-scroll to bottom
+        output.scrollTop = output.scrollHeight;
+        
+    } catch (err) {
+        output.innerHTML = `<p class="text-red-400">Error loading logs: ${err.message}</p>`;
+    }
+}
+
+async function clearLogs() {
+    const logType = document.getElementById('logType').value;
+    if (!confirm(`Clear all ${logType} logs? This cannot be undone.`)) return;
+    
+    const result = await apiRequest(`/logs/clear?log_type=${logType}`, { method: 'POST' });
+    if (result) {
+        showMessage(`${logType} logs cleared`, 'success');
+        loadLogs();
+    }
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
