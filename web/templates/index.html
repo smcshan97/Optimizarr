@@ -120,7 +120,7 @@
                 </div>
                 
                 <!-- Filters -->
-                <div class="mb-4 flex gap-4">
+                <div class="mb-4 flex gap-4 items-center">
                     <div class="flex-1">
                         <input type="text" id="queueSearch" placeholder="🔍 Search by filename..." 
                             onkeyup="filterQueue()"
@@ -143,6 +143,20 @@
                             <span>Auto-refresh (5s)</span>
                         </label>
                     </div>
+                </div>
+                
+                <!-- Bulk Actions Bar (hidden until selection) -->
+                <div id="bulkActionsBar" class="hidden mb-4 p-3 bg-gray-700 rounded-lg flex items-center gap-4">
+                    <span id="bulkSelectedCount" class="text-sm text-blue-400 font-medium"></span>
+                    <button onclick="bulkDeleteSelected()" class="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-sm">
+                        🗑️ Delete Selected
+                    </button>
+                    <button onclick="bulkClearCompleted()" class="bg-gray-600 hover:bg-gray-500 px-3 py-1 rounded text-sm">
+                        ✅ Clear Completed
+                    </button>
+                    <button onclick="deselectAll()" class="bg-gray-600 hover:bg-gray-500 px-3 py-1 rounded text-sm">
+                        Deselect All
+                    </button>
                 </div>
                 
                 <div id="queueTable" class="overflow-x-auto">
