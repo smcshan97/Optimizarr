@@ -276,7 +276,12 @@ class MediaScanner:
                 print(f"  ⊙ Skipping (already optimized): {Path(file_path).name}")
                 continue
             file_size = Path(file_path).stat().st_size
-            savings = self._estimate_savings(file_size, current_specs.get('codec', 'unknown'), target_specs.get('codec', 'unknown'))
+            savings = self._estimate_savings(
+                file_size,
+                current_specs.get('codec', 'unknown'),
+                target_specs.get('codec', 'unknown'),
+                current_specs=current_specs
+            )
             db.add_to_queue(
                 file_path=file_path, root_id=root_id, profile_id=scan_root['profile_id'],
                 status='pending' if perm_status == 'ok' else 'permission_error',
@@ -288,14 +293,79 @@ class MediaScanner:
         print(f"✓ Added {added_count} files to queue")
         return added_count
 
-    def _estimate_savings(self, file_size: int, current_codec: str, target_codec: str) -> int:
-        if target_codec == 'av1' and current_codec not in ('av1',):
-            return int(file_size * 0.50)
-        if target_codec == 'h265' and current_codec in ('h264', 'mpeg4', 'mpeg2', 'xvid', 'wmv'):
-            return int(file_size * 0.40)
-        if target_codec == 'h264' and current_codec in ('mpeg4', 'mpeg2', 'wmv'):
-            return int(file_size * 0.30)
-        return 0
+    def _estimate_savings(self, file_size: int, current_codec: str, target_codec: str,
+                          current_specs: Dict = None) -> int:
+        """
+        Estimate post-encode savings using actual bitrate when available,
+        falling back to conservative codec-efficiency ratios.
+
+        Codec efficiency ratios are derived from published encoder benchmarks
+        (x265 vs x264 SSIM curves, AOM AV1 vs HEVC, etc.) and represent
+        average real-world savings at comparable perceptual quality.
+        """
+        if not current_specs:
+            current_specs = {}
+
+        # ── Nothing to do if already at target ──────────────────────────
+        if current_codec == target_codec:
+            return 0
+        if target_codec in ('', None, 'preserve'):
+            return 0
+
+        # ── Codec efficiency table: fraction of original bitrate retained ─
+        # (target_codec, source_codec) → expected output bitrate ratio
+        EFFICIENCY = {
+            # Anything → AV1  (best modern codec)
+            ('av1',  'h264'):   0.45,   # AV1 needs ~45% of h264 bits at same quality
+            ('av1',  'h265'):   0.65,   # AV1 ≈ 20-25% better than HEVC
+            ('av1',  'vp9'):    0.75,   # similar generation, modest gain
+            ('av1',  'mpeg4'):  0.35,
+            ('av1',  'mpeg2'):  0.25,
+            ('av1',  'xvid'):   0.35,
+            ('av1',  'wmv'):    0.30,
+            ('av1',  'unknown'):0.50,   # conservative fallback
+            # Anything → H.265
+            ('h265', 'h264'):   0.55,
+            ('h265', 'mpeg4'):  0.40,
+            ('h265', 'mpeg2'):  0.30,
+            ('h265', 'wmv'):    0.35,
+            ('h265', 'unknown'):0.55,
+            # Anything → H.264
+            ('h264', 'mpeg4'):  0.60,
+            ('h264', 'mpeg2'):  0.50,
+            ('h264', 'wmv'):    0.55,
+            ('h264', 'unknown'):0.65,
+        }
+
+        ratio = EFFICIENCY.get((target_codec, current_codec))
+        if ratio is None:
+            # Encoding to same generation or unknown pair — assume no gain
+            return 0
+
+        # ── Use actual bitrate if available ──────────────────────────────
+        # ffprobe stores it as 'bit_rate', we also accept 'bitrate' as alias
+        bitrate_bps   = current_specs.get('bit_rate') or current_specs.get('bitrate', 0)
+        duration_secs = current_specs.get('duration', 0)
+
+        if bitrate_bps and duration_secs and bitrate_bps > 0 and duration_secs > 0:
+            # Recalculate file size from bitrate (more accurate than filesystem size,
+            # which includes container overhead, chapters, attachments, etc.)
+            video_size_bytes = int((bitrate_bps / 8) * duration_secs)
+            # Use the lesser of probed size and filesystem size to stay conservative
+            base_size = min(video_size_bytes, file_size) if file_size > 0 else video_size_bytes
+        else:
+            base_size = file_size
+
+        if base_size <= 0:
+            return 0
+
+        # Savings = base_size × (1 - output_ratio)
+        # e.g. ratio=0.45 means output is 45% of input → 55% savings
+        estimated_output = int(base_size * ratio)
+        savings = base_size - estimated_output
+
+        # Never claim negative savings or more than 90% (sanity clamp)
+        return max(0, min(savings, int(base_size * 0.90)))
 
     def _needs_encoding(self, current_specs: Dict, target_specs: Dict) -> bool:
         current_codec = current_specs.get('codec', 'unknown')

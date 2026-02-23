@@ -405,6 +405,24 @@
                 
                 <div id="settingsMessage" class="mt-4 hidden"></div>
             </div>
+
+            <!-- AI Upscalers Section -->
+            <div class="bg-gray-800 rounded-lg p-6 mt-6">
+                <div class="flex justify-between items-center mb-2">
+                    <div>
+                        <h2 class="text-xl font-bold">🤖 AI Upscalers</h2>
+                        <p class="text-sm text-gray-400 mt-1">
+                            Pre-encode resolution enhancement (e.g. 480p→1080p). Click <strong>Download</strong> to install automatically.
+                        </p>
+                    </div>
+                    <button onclick="checkUpscalerUpdates()" class="bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded text-sm">
+                        🔄 Check Updates
+                    </button>
+                </div>
+                <div id="upscalerStatus" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mt-4">
+                    <p class="text-gray-500 text-sm">Loading…</p>
+                </div>
+            </div>
         </div>
 
         <!-- Profile Modal -->
@@ -897,23 +915,6 @@
                     <h3 class="text-lg font-bold mb-4">System Health</h3>
                     <div id="healthStatus" class="grid grid-cols-1 md:grid-cols-4 gap-4">
                         <p class="text-gray-500 text-sm">Loading...</p>
-                    </div>
-                </div>
-                
-                <!-- AI Upscaler Status -->
-                <div class="bg-gray-800 rounded-lg p-6">
-                    <div class="flex justify-between items-center mb-2">
-                        <h3 class="text-lg font-bold">🤖 AI Upscalers</h3>
-                        <button onclick="checkUpscalerUpdates()" class="bg-gray-600 hover:bg-gray-500 px-3 py-1 rounded text-sm">
-                            🔄 Check Updates
-                        </button>
-                    </div>
-                    <p class="text-sm text-gray-400 mb-4">
-                        AI upscalers for pre-encode resolution enhancement (e.g. 480p→1080p).
-                        Click <strong>Download</strong> to install automatically.
-                    </p>
-                    <div id="upscalerStatus" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
-                        <p class="text-gray-500 text-sm">Loading…</p>
                     </div>
                 </div>
             </div>

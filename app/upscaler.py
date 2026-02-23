@@ -136,51 +136,71 @@ def _get_binary_version(binary_path: str) -> str:
 # ---------------------------------------------------------------------------
 
 def _fetch_latest_release(owner: str, repo: str) -> Optional[Dict]:
-    """Fetch latest release info from GitHub API with simple caching."""
+    """
+    Fetch latest release with binary assets from GitHub API.
+    Falls back to walking the releases list if the 'latest' tag has no assets
+    (some repos tag source-only releases as 'latest').
+    """
     cache_key = f"{owner}/{repo}"
     cached = _update_cache.get(cache_key)
     if cached and "_error" not in cached:
         age = time.time() - cached.get("_fetched_at", 0)
         if age < _CACHE_TTL:
             return cached
-    try:
-        resp = requests.get(
-            f"https://api.github.com/repos/{owner}/{repo}/releases/latest",
-            headers={"Accept": "application/vnd.github.v3+json"},
-            timeout=15
-        )
-        if resp.status_code == 200:
-            data = resp.json()
+
+    headers = {"Accept": "application/vnd.github.v3+json"}
+
+    def _get(url):
+        try:
+            resp = requests.get(url, headers=headers, timeout=15)
+            return resp
+        except requests.exceptions.Timeout:
+            return None
+
+    # 1. Try /releases/latest first
+    resp = _get(f"https://api.github.com/repos/{owner}/{repo}/releases/latest")
+    if resp is None:
+        msg = "GitHub API request timed out. Check your internet connection."
+        return {"_error": "timeout", "_message": msg}
+
+    if resp.status_code == 403:
+        remaining = resp.headers.get("X-RateLimit-Remaining", "?")
+        reset_ts = int(resp.headers.get("X-RateLimit-Reset", 0))
+        reset_str = ""
+        if reset_ts:
+            import datetime
+            reset_str = f" Resets at {datetime.datetime.fromtimestamp(reset_ts).strftime('%H:%M:%S')}."
+        msg = f"GitHub API rate limit exceeded (remaining: {remaining}).{reset_str} Try again later."
+        return {"_error": "rate_limited", "_message": msg}
+
+    if resp.status_code == 200:
+        data = resp.json()
+        # If this release has assets, use it
+        if data.get("assets"):
             data["_fetched_at"] = time.time()
             _update_cache[cache_key] = data
             return data
-        elif resp.status_code == 403:
-            # Rate limit hit — check headers
-            remaining = resp.headers.get("X-RateLimit-Remaining", "?")
-            reset_ts = int(resp.headers.get("X-RateLimit-Reset", 0))
-            reset_str = ""
-            if reset_ts:
-                import datetime
-                reset_str = f" Resets at {datetime.datetime.fromtimestamp(reset_ts).strftime('%H:%M:%S')}."
-            msg = f"GitHub API rate limit exceeded (remaining: {remaining}).{reset_str} Try again later or add a GitHub token in Settings."
-            print(f"⚠ {msg}")
-            return {"_error": "rate_limited", "_message": msg}
-        elif resp.status_code == 404:
-            msg = f"GitHub repo {owner}/{repo} not found or has no releases."
-            print(f"⚠ {msg}")
-            return {"_error": "not_found", "_message": msg}
-        else:
-            msg = f"GitHub API returned HTTP {resp.status_code}"
-            print(f"⚠ {msg}")
-            return {"_error": "http_error", "_message": msg}
-    except requests.exceptions.Timeout:
-        msg = "GitHub API request timed out. Check your internet connection."
-        print(f"⚠ {msg}")
-        return {"_error": "timeout", "_message": msg}
-    except Exception as e:
-        print(f"⚠ GitHub API error for {owner}/{repo}: {e}")
-        return {"_error": "exception", "_message": str(e)}
-    return None
+        # No assets on latest — fall through to list search below
+
+    # 2. Walk /releases list to find most recent release WITH binary assets
+    releases_resp = _get(f"https://api.github.com/repos/{owner}/{repo}/releases?per_page=10")
+    if releases_resp and releases_resp.status_code == 200:
+        for release in releases_resp.json():
+            if release.get("assets"):
+                release["_fetched_at"] = time.time()
+                _update_cache[cache_key] = release
+                print(f"  ℹ Using release {release.get('tag_name')} (latest tag had no assets)")
+                return release
+
+    # 3. Nothing found
+    if resp.status_code == 404:
+        msg = f"GitHub repo {owner}/{repo} not found or has no releases."
+    elif resp.status_code == 200:
+        msg = f"No releases with binary assets found for {owner}/{repo}."
+    else:
+        msg = f"GitHub API returned HTTP {resp.status_code}"
+    print(f"⚠ {msg}")
+    return {"_error": "not_found", "_message": msg}
 
 
 def _find_asset(assets: List[Dict], pattern: str) -> Optional[Dict]:

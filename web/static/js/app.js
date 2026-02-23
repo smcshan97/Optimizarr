@@ -2068,41 +2068,6 @@ async function loadHealth() {
     }
 }
 
-async function loadUpscalers() {
-    try {
-        const info = await apiRequest('/upscalers');
-        if (!info) return;
-        
-        const container = document.getElementById('upscalerStatus');
-        const defs = info.definitions;
-        const det = info.detection?.details || {};
-        
-        container.innerHTML = Object.entries(defs).map(([key, up]) => {
-            const d = det[key] || {};
-            const installed = d.installed;
-            
-            return `
-                <div class="p-3 bg-gray-700 rounded">
-                    <div class="flex justify-between items-start">
-                        <div>
-                            <span class="text-lg">${up.icon}</span>
-                            <span class="font-bold ml-1">${up.name}</span>
-                            ${installed ? '<span class="ml-2 px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">Installed</span>' : '<span class="ml-2 px-2 py-0.5 bg-gray-600 text-gray-400 text-xs rounded">Not Found</span>'}
-                        </div>
-                    </div>
-                    <p class="text-xs text-gray-400 mt-1">${up.description}</p>
-                    <p class="text-xs text-gray-500 mt-1">Best for: ${up.best_for}</p>
-                    ${!installed ? `<a href="${up.download_url}" target="_blank" class="text-xs text-blue-400 hover:text-blue-300 mt-1 inline-block">Download →</a>` : ''}
-                    ${installed && d.path ? `<p class="text-xs text-gray-500 mt-1 truncate">Path: ${d.path}</p>` : ''}
-                </div>
-            `;
-        }).join('');
-    } catch (err) {
-        document.getElementById('upscalerStatus').innerHTML = '<p class="text-gray-500">Failed to detect upscalers</p>';
-    }
-}
-
-
 // ============================================================
 // PRESET IMPORT / EXPORT
 // ============================================================

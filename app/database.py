@@ -255,13 +255,24 @@ class Database:
                 cursor.execute("ALTER TABLE history ADD COLUMN container TEXT")
                 print("  ↳ Migrated: added 'container' column to history")
             
+            # Enforce single default profile — keep only the lowest-id one
+            cursor.execute("SELECT id FROM profiles WHERE is_default = 1 ORDER BY id")
+            default_rows = cursor.fetchall()
+            if len(default_rows) > 1:
+                keep_id = default_rows[0][0]
+                cursor.execute("UPDATE profiles SET is_default = 0 WHERE is_default = 1 AND id != ?", (keep_id,))
+                print(f"  ↳ Migrated: enforced single default profile (kept id={keep_id})")
+
             print("✓ Database schema initialized")
     
     # Profile CRUD
     def create_profile(self, **kwargs) -> int:
-        """Create a new encoding profile."""
+        """Create a new encoding profile. Enforces only one default at a time."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            # If this new profile is being set as default, clear any existing default first
+            if kwargs.get('is_default', False):
+                cursor.execute("UPDATE profiles SET is_default = 0 WHERE is_default = 1")
             cursor.execute("""
                 INSERT INTO profiles 
                 (name, resolution, framerate, codec, encoder, quality, audio_codec, 
@@ -290,9 +301,13 @@ class Database:
             return cursor.lastrowid
     
     def update_profile(self, profile_id: int, **kwargs) -> bool:
-        """Update an existing encoding profile."""
+        """Update an existing encoding profile. Enforces only one default at a time."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            
+            # If setting this profile as default, clear all others first
+            if kwargs.get('is_default', False):
+                cursor.execute("UPDATE profiles SET is_default = 0 WHERE is_default = 1 AND id != ?", (profile_id,))
             
             updates = []
             values = []
