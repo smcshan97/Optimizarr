@@ -1,0 +1,1607 @@
+From 1c8999a6e572267d34c1a273be8968fab4780a81 Mon Sep 17 00:00:00 2001
+From: Optimizarr Dev <smcshan97@github.com>
+Date: Tue, 17 Feb 2026 13:51:31 +0000
+Subject: [PATCH] Phase 3+4: Statistics, Folder Watch, Preset Export, AI
+ Upscaling Framework
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Features:
+- Statistics Dashboard (new tab):
+  - Summary cards: total files, original/new size, space saved, avg savings %
+  - Daily activity bar chart with configurable time range (7/30/90/365 days)
+  - Codec breakdown with progress bars
+  - Recent encode history with savings per file
+  - System health panel (service, HandBrake, database, disk space)
+  - AI upscaler detection panel with install links
+
+- Folder Watch System (app/watcher.py):
+  - Background polling thread monitors directories for new media files
+  - Auto-queues newly detected files with assigned profile
+  - Configurable: extensions, recursive, auto_queue, poll interval
+  - Initial scan (existing files not queued, only new additions)
+  - Skips _optimized files to avoid re-processing output
+  - New tab with watch management UI (add/edit/delete, status)
+  - Force check button for immediate scan
+  - Wired into app startup/shutdown lifecycle
+
+- Preset Import/Export:
+  - GET /api/profiles/export — JSON backup of all profiles
+  - POST /api/profiles/import — import from JSON (skips duplicates)
+  - Export button downloads JSON file with date stamp
+  - Import button via file picker with validation
+  - Added to profiles tab header
+
+- AI Upscaling Framework (app/upscaler.py):
+  - Detects Real-ESRGAN, Real-CUGAN, Waifu2x, Anime4K binaries
+  - Checks PATH + common install locations (Win/Linux/Mac)
+  - Full upscaler definitions with models, scale options, best-for
+  - GET /api/upscalers — full info + detection results
+  - GET /api/upscalers/detect — re-detect available upscalers
+  - UI panel on statistics tab with install status and download links
+
+- Enhanced Health Check (GET /api/health):
+  - HandBrakeCLI detection and path
+  - Database status with record counts
+  - Disk space monitoring with low-space warning
+  - Folder watcher status
+  - Version reporting
+
+Schema changes (backward compatible):
+- New folder_watches table (9 columns)
+- history: added codec, container columns
+
+New files:
+- app/watcher.py (194 lines)
+- app/upscaler.py (186 lines)
+
+API additions (11 new endpoints):
+- GET /api/stats/dashboard — comprehensive dashboard data
+- GET/POST /api/watches — folder watch management
+- PUT/DELETE /api/watches/{id}
+- GET /api/watches/status — watcher status
+- POST /api/watches/check — force immediate scan
+- GET /api/profiles/export
+- POST /api/profiles/import
+- GET /api/upscalers
+- GET /api/upscalers/detect
+
+Total: 48 routes, 8,007 lines across 19 source files
+Version: 2.1.0
+---
+ app/api/routes.py        | 218 ++++++++++++++++++++-
+ app/database.py          | 189 ++++++++++++++++++
+ app/main.py              |  15 +-
+ app/upscaler.py          | 186 ++++++++++++++++++
+ app/watcher.py           | 194 +++++++++++++++++++
+ web/static/js/app.js     | 409 +++++++++++++++++++++++++++++++++++++++
+ web/templates/index.html | 189 +++++++++++++++++-
+ 7 files changed, 1392 insertions(+), 8 deletions(-)
+ create mode 100644 app/upscaler.py
+ create mode 100644 app/watcher.py
+
+diff --git a/app/api/routes.py b/app/api/routes.py
+index d22aedc..bd4c345 100644
+--- a/app/api/routes.py
++++ b/app/api/routes.py
+@@ -621,11 +621,223 @@ async def clear_logs(
+     return MessageResponse(message=f"Failed to clear {log_type} logs", success=False)
+ 
+ 
+-# Health check
++# ============================================================
++# ENHANCED HEALTH CHECK
++# ============================================================
++
+ @router.get("/health")
+ async def health_check():
+-    """Simple health check endpoint (no auth required)."""
+-    return {"status": "ok", "service": "optimizarr"}
++    """Comprehensive health check — no auth required."""
++    import shutil
++    import time
++    from pathlib import Path
++    
++    health = {
++        "status": "ok",
++        "service": "optimizarr",
++        "version": "2.1.0",
++        "uptime_info": "running",
++    }
++    
++    # HandBrakeCLI check
++    hb_path = shutil.which("HandBrakeCLI")
++    health["handbrake"] = {
++        "installed": hb_path is not None,
++        "path": hb_path or "not found"
++    }
++    
++    # Database check
++    try:
++        with db.get_connection() as conn:
++            cursor = conn.cursor()
++            cursor.execute("SELECT COUNT(*) FROM profiles")
++            profiles = cursor.fetchone()[0]
++            cursor.execute("SELECT COUNT(*) FROM queue")
++            queue_items = cursor.fetchone()[0]
++            cursor.execute("SELECT COUNT(*) FROM history")
++            history = cursor.fetchone()[0]
++        health["database"] = {
++            "status": "ok",
++            "profiles": profiles,
++            "queue_items": queue_items,
++            "history_records": history
++        }
++    except Exception as e:
++        health["database"] = {"status": "error", "error": str(e)}
++        health["status"] = "degraded"
++    
++    # Disk space for data directory
++    try:
++        data_path = Path("data")
++        if data_path.exists():
++            usage = shutil.disk_usage(str(data_path))
++            health["disk"] = {
++                "total_gb": round(usage.total / (1024**3), 1),
++                "used_gb": round(usage.used / (1024**3), 1),
++                "free_gb": round(usage.free / (1024**3), 1),
++                "percent_used": round((usage.used / usage.total) * 100, 1)
++            }
++            if health["disk"]["percent_used"] > 95:
++                health["status"] = "warning"
++                health["disk"]["warning"] = "Low disk space!"
++    except Exception:
++        pass
++    
++    # Folder watcher status
++    try:
++        from app.watcher import folder_watcher
++        health["folder_watcher"] = {
++            "running": folder_watcher.running,
++            "active_watches": len(db.get_folder_watches(enabled_only=True))
++        }
++    except Exception:
++        health["folder_watcher"] = {"running": False}
++    
++    return health
++
++
++# ============================================================
++# STATISTICS DASHBOARD
++# ============================================================
++
++@router.get("/stats/dashboard")
++async def get_stats_dashboard(
++    days: int = Query(default=30, ge=1, le=365),
++    current_user: dict = Depends(get_current_user)
++):
++    """Get comprehensive statistics for the dashboard."""
++    return db.get_stats_dashboard(days=days)
++
++
++# ============================================================
++# FOLDER WATCH ENDPOINTS
++# ============================================================
++
++@router.get("/watches")
++async def list_folder_watches(current_user: dict = Depends(get_current_user)):
++    """Get all folder watches."""
++    return db.get_folder_watches()
++
++
++@router.post("/watches")
++async def create_folder_watch(
++    watch: dict,
++    current_user: dict = Depends(get_current_admin_user)
++):
++    """Create a new folder watch (admin only)."""
++    required = ['path', 'profile_id']
++    for field in required:
++        if field not in watch:
++            raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
++    
++    # Verify path exists
++    if not Path(watch['path']).exists():
++        raise HTTPException(status_code=400, detail=f"Path does not exist: {watch['path']}")
++    
++    try:
++        watch_id = db.create_folder_watch(
++            path=watch['path'],
++            profile_id=watch['profile_id'],
++            enabled=watch.get('enabled', True),
++            recursive=watch.get('recursive', True),
++            auto_queue=watch.get('auto_queue', True),
++            extensions=watch.get('extensions', '.mkv,.mp4,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.mpg,.mpeg')
++        )
++        return db.get_folder_watch(watch_id)
++    except Exception as e:
++        raise HTTPException(status_code=400, detail=f"Failed to create watch: {str(e)}")
++
++
++@router.put("/watches/{watch_id}")
++async def update_folder_watch(
++    watch_id: int, watch: dict,
++    current_user: dict = Depends(get_current_admin_user)
++):
++    """Update a folder watch (admin only)."""
++    success = db.update_folder_watch(watch_id, **watch)
++    if not success:
++        raise HTTPException(status_code=404, detail="Watch not found")
++    return db.get_folder_watch(watch_id)
++
++
++@router.delete("/watches/{watch_id}")
++async def delete_folder_watch(
++    watch_id: int,
++    current_user: dict = Depends(get_current_admin_user)
++):
++    """Delete a folder watch (admin only)."""
++    success = db.delete_folder_watch(watch_id)
++    if not success:
++        raise HTTPException(status_code=404, detail="Watch not found")
++    return MessageResponse(message="Folder watch deleted")
++
++
++@router.get("/watches/status")
++async def get_watcher_status(current_user: dict = Depends(get_current_user)):
++    """Get folder watcher status."""
++    from app.watcher import folder_watcher
++    return folder_watcher.get_status()
++
++
++@router.post("/watches/check")
++async def force_watcher_check(
++    watch_id: Optional[int] = None,
++    current_user: dict = Depends(get_current_admin_user)
++):
++    """Force an immediate check for new files (admin only)."""
++    from app.watcher import folder_watcher
++    result = folder_watcher.force_check(watch_id)
++    return result
++
++
++# ============================================================
++# PRESET IMPORT / EXPORT
++# ============================================================
++
++@router.get("/profiles/export")
++async def export_profiles(current_user: dict = Depends(get_current_user)):
++    """Export all profiles as JSON for backup/sharing."""
++    profiles = db.export_profiles()
++    return {
++        "version": "2.1.0",
++        "export_type": "optimizarr_profiles",
++        "count": len(profiles),
++        "profiles": profiles
++    }
++
++
++@router.post("/profiles/import")
++async def import_profiles(
++    data: dict,
++    current_user: dict = Depends(get_current_admin_user)
++):
++    """Import profiles from JSON (admin only)."""
++    if 'profiles' not in data or not isinstance(data['profiles'], list):
++        raise HTTPException(status_code=400, detail="Invalid format: expected {profiles: [...]}")
++    
++    result = db.import_profiles(data['profiles'])
++    return {
++        "message": f"Imported {result['imported']} profile(s), skipped {result['skipped']}",
++        **result
++    }
++
++
++# ============================================================
++# AI UPSCALER ENDPOINTS
++# ============================================================
++
++@router.get("/upscalers")
++async def get_upscalers(current_user: dict = Depends(get_current_user)):
++    """Get AI upscaler info and detection results."""
++    from app.upscaler import get_upscaler_info
++    return get_upscaler_info()
++
++
++@router.get("/upscalers/detect")
++async def detect_upscalers_endpoint(current_user: dict = Depends(get_current_user)):
++    """Re-detect available AI upscalers."""
++    from app.upscaler import detect_upscalers
++    return detect_upscalers()
+ 
+ 
+ # Schedule Endpoints
+diff --git a/app/database.py b/app/database.py
+index 98cf319..e788c38 100644
+--- a/app/database.py
++++ b/app/database.py
+@@ -180,10 +180,28 @@ class Database:
+                     new_size_bytes INTEGER,
+                     savings_bytes INTEGER,
+                     encoding_time_seconds INTEGER,
++                    codec TEXT,
++                    container TEXT,
+                     completed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                 )
+             """)
+             
++            # Folder watches table
++            cursor.execute("""
++                CREATE TABLE IF NOT EXISTS folder_watches (
++                    id INTEGER PRIMARY KEY AUTOINCREMENT,
++                    path TEXT UNIQUE NOT NULL,
++                    profile_id INTEGER NOT NULL,
++                    enabled BOOLEAN DEFAULT 1,
++                    recursive BOOLEAN DEFAULT 1,
++                    auto_queue BOOLEAN DEFAULT 1,
++                    extensions TEXT DEFAULT '.mkv,.mp4,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.mpg,.mpeg',
++                    last_check TIMESTAMP,
++                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
++                    FOREIGN KEY (profile_id) REFERENCES profiles(id)
++                )
++            """)
++            
+             # Insert default schedule if none exists
+             cursor.execute("SELECT COUNT(*) FROM schedule")
+             if cursor.fetchone()[0] == 0:
+@@ -224,6 +242,16 @@ class Database:
+                 cursor.execute("ALTER TABLE scan_roots ADD COLUMN library_type TEXT DEFAULT 'custom'")
+                 print("  ↳ Migrated: added 'library_type' column to scan_roots")
+             
++            # History table migrations
++            cursor.execute("PRAGMA table_info(history)")
++            history_columns = [col[1] for col in cursor.fetchall()]
++            if 'codec' not in history_columns:
++                cursor.execute("ALTER TABLE history ADD COLUMN codec TEXT")
++                print("  ↳ Migrated: added 'codec' column to history")
++            if 'container' not in history_columns:
++                cursor.execute("ALTER TABLE history ADD COLUMN container TEXT")
++                print("  ↳ Migrated: added 'container' column to history")
++            
+             print("✓ Database schema initialized")
+     
+     # Profile CRUD
+@@ -495,6 +523,167 @@ class Database:
+             cursor.execute("""
+                 UPDATE users SET last_login = CURRENT_TIMESTAMP WHERE id = ?
+             """, (user_id,))
++    
++    # Folder Watch CRUD
++    def create_folder_watch(self, path: str, profile_id: int, **kwargs) -> int:
++        """Create a new folder watch."""
++        with self.get_connection() as conn:
++            cursor = conn.cursor()
++            cursor.execute("""
++                INSERT INTO folder_watches (path, profile_id, enabled, recursive, auto_queue, extensions)
++                VALUES (?, ?, ?, ?, ?, ?)
++            """, (
++                path, profile_id,
++                kwargs.get('enabled', True),
++                kwargs.get('recursive', True),
++                kwargs.get('auto_queue', True),
++                kwargs.get('extensions', '.mkv,.mp4,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.mpg,.mpeg')
++            ))
++            return cursor.lastrowid
++    
++    def get_folder_watches(self, enabled_only: bool = False) -> List[Dict]:
++        """Get all folder watches."""
++        with self.get_connection() as conn:
++            cursor = conn.cursor()
++            if enabled_only:
++                cursor.execute("SELECT fw.*, p.name as profile_name FROM folder_watches fw LEFT JOIN profiles p ON fw.profile_id = p.id WHERE fw.enabled = 1")
++            else:
++                cursor.execute("SELECT fw.*, p.name as profile_name FROM folder_watches fw LEFT JOIN profiles p ON fw.profile_id = p.id")
++            return [dict(row) for row in cursor.fetchall()]
++    
++    def get_folder_watch(self, watch_id: int) -> Optional[Dict]:
++        """Get a folder watch by ID."""
++        with self.get_connection() as conn:
++            cursor = conn.cursor()
++            cursor.execute("SELECT fw.*, p.name as profile_name FROM folder_watches fw LEFT JOIN profiles p ON fw.profile_id = p.id WHERE fw.id = ?", (watch_id,))
++            row = cursor.fetchone()
++            return dict(row) if row else None
++    
++    def update_folder_watch(self, watch_id: int, **kwargs) -> bool:
++        """Update a folder watch."""
++        with self.get_connection() as conn:
++            cursor = conn.cursor()
++            updates = []
++            values = []
++            for field in ['path', 'profile_id', 'enabled', 'recursive', 'auto_queue', 'extensions', 'last_check']:
++                if field in kwargs:
++                    updates.append(f"{field} = ?")
++                    values.append(kwargs[field])
++            if not updates:
++                return False
++            values.append(watch_id)
++            cursor.execute(f"UPDATE folder_watches SET {', '.join(updates)} WHERE id = ?", values)
++            return cursor.rowcount > 0
++    
++    def delete_folder_watch(self, watch_id: int) -> bool:
++        """Delete a folder watch."""
++        with self.get_connection() as conn:
++            cursor = conn.cursor()
++            cursor.execute("DELETE FROM folder_watches WHERE id = ?", (watch_id,))
++            return cursor.rowcount > 0
++    
++    # History and Statistics
++    def add_history(self, **kwargs) -> int:
++        """Add a history record."""
++        with self.get_connection() as conn:
++            cursor = conn.cursor()
++            cursor.execute("""
++                INSERT INTO history (file_path, profile_name, original_size_bytes, new_size_bytes, 
++                                     savings_bytes, encoding_time_seconds, codec, container)
++                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
++            """, (
++                kwargs.get('file_path'),
++                kwargs.get('profile_name'),
++                kwargs.get('original_size_bytes', 0),
++                kwargs.get('new_size_bytes', 0),
++                kwargs.get('savings_bytes', 0),
++                kwargs.get('encoding_time_seconds', 0),
++                kwargs.get('codec'),
++                kwargs.get('container')
++            ))
++            return cursor.lastrowid
++    
++    def get_stats_dashboard(self, days: int = 30) -> Dict:
++        """Get comprehensive statistics for the dashboard."""
++        with self.get_connection() as conn:
++            cursor = conn.cursor()
++            
++            # Overall totals
++            cursor.execute("""
++                SELECT COUNT(*) as total, 
++                       COALESCE(SUM(original_size_bytes), 0) as total_original,
++                       COALESCE(SUM(new_size_bytes), 0) as total_new,
++                       COALESCE(SUM(savings_bytes), 0) as total_saved,
++                       COALESCE(SUM(encoding_time_seconds), 0) as total_time,
++                       COALESCE(AVG(CASE WHEN original_size_bytes > 0 
++                           THEN (savings_bytes * 100.0 / original_size_bytes) ELSE 0 END), 0) as avg_savings_pct
++                FROM history
++            """)
++            totals = dict(cursor.fetchone())
++            
++            # Daily breakdown (last N days)
++            cursor.execute("""
++                SELECT DATE(completed_at) as date,
++                       COUNT(*) as files,
++                       COALESCE(SUM(savings_bytes), 0) as saved,
++                       COALESCE(SUM(encoding_time_seconds), 0) as time_seconds
++                FROM history 
++                WHERE completed_at >= datetime('now', ?)
++                GROUP BY DATE(completed_at)
++                ORDER BY date
++            """, (f'-{days} days',))
++            daily = [dict(row) for row in cursor.fetchall()]
++            
++            # Codec breakdown
++            cursor.execute("""
++                SELECT COALESCE(codec, 'unknown') as codec, 
++                       COUNT(*) as count,
++                       COALESCE(SUM(savings_bytes), 0) as saved
++                FROM history GROUP BY codec ORDER BY count DESC
++            """)
++            codecs = [dict(row) for row in cursor.fetchall()]
++            
++            # Recent history (last 20)
++            cursor.execute("""
++                SELECT * FROM history ORDER BY completed_at DESC LIMIT 20
++            """)
++            recent = [dict(row) for row in cursor.fetchall()]
++            
++            return {
++                'totals': totals,
++                'daily': daily,
++                'codecs': codecs,
++                'recent': recent
++            }
++    
++    # Preset export/import
++    def export_profiles(self) -> List[Dict]:
++        """Export all profiles as a list of dicts for JSON export."""
++        profiles = self.get_profiles()
++        # Strip internal fields
++        for p in profiles:
++            p.pop('id', None)
++            p.pop('created_at', None)
++        return profiles
++    
++    def import_profiles(self, profiles: List[Dict]) -> Dict:
++        """Import profiles from a list of dicts. Returns stats."""
++        imported = 0
++        skipped = 0
++        errors = []
++        for p in profiles:
++            try:
++                # Skip if name already exists
++                existing = self.get_profiles()
++                existing_names = {ep['name'] for ep in existing}
++                if p.get('name') in existing_names:
++                    skipped += 1
++                    continue
++                self.create_profile(**p)
++                imported += 1
++            except Exception as e:
++                errors.append(f"{p.get('name', '?')}: {str(e)}")
++        return {'imported': imported, 'skipped': skipped, 'errors': errors}
+ 
+ 
+ # Global database instance
+diff --git a/app/main.py b/app/main.py
+index f94daba..496f64c 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -18,7 +18,7 @@ from app.scheduler import initialize_scheduler, shutdown_scheduler
+ app = FastAPI(
+     title="Optimizarr",
+     description="Automated Media Optimization System",
+-    version="2.0.0"
++    version="2.1.0"
+ )
+ 
+ # CORS middleware
+@@ -131,8 +131,17 @@ async def startup_event():
+     # Initialize scheduler
+     initialize_scheduler()
+     
++    # Start folder watcher
++    from app.watcher import folder_watcher
++    watches = db.get_folder_watches(enabled_only=True)
++    if watches:
++        folder_watcher.start()
++        print(f"✓ Folder watcher started ({len(watches)} active watches)")
++    else:
++        print("  Folder watcher: no active watches configured")
++    
+     # Log startup
+-    optimizarr_logger.log_startup("2.0.0", settings.host, settings.port)
++    optimizarr_logger.log_startup("2.1.0", settings.host, settings.port)
+     
+     print("=" * 60)
+     print(f"Server starting on http://{settings.host}:{settings.port}")
+@@ -143,7 +152,9 @@ async def startup_event():
+ async def shutdown_event():
+     """Cleanup on shutdown."""
+     from app.logger import optimizarr_logger
++    from app.watcher import folder_watcher
+     optimizarr_logger.log_shutdown()
++    folder_watcher.stop()
+     print("\nShutting down Optimizarr...")
+     shutdown_scheduler()
+ 
+diff --git a/app/upscaler.py b/app/upscaler.py
+new file mode 100644
+index 0000000..2b8fc7c
+--- /dev/null
++++ b/app/upscaler.py
+@@ -0,0 +1,186 @@
++"""
++AI Upscaler Framework for Optimizarr.
++Detects installed AI upscalers and provides configuration.
++Supports: Real-ESRGAN, Real-CUGAN, Anime4K, Waifu2x-NCNN-Vulkan
++"""
++import subprocess
++import shutil
++import platform
++from typing import Dict, Optional, List
++from pathlib import Path
++
++from app.logger import optimizarr_logger
++
++
++# Supported upscaler definitions
++UPSCALERS = {
++    "realesrgan": {
++        "name": "Real-ESRGAN",
++        "description": "Best for real-world content (photos, live action, films)",
++        "icon": "🎬",
++        "binary": "realesrgan-ncnn-vulkan",
++        "binary_win": "realesrgan-ncnn-vulkan.exe",
++        "models": ["realesrgan-x4plus", "realesrgan-x4plus-anime", "realesr-animevideov3"],
++        "default_model": "realesrgan-x4plus",
++        "scale_options": [2, 3, 4],
++        "default_scale": 2,
++        "url": "https://github.com/xinntao/Real-ESRGAN/releases",
++        "best_for": "Movies, TV Shows, Home Videos"
++    },
++    "realcugan": {
++        "name": "Real-CUGAN",
++        "description": "Fast GPU upscaling, good balance of speed and quality",
++        "icon": "⚡",
++        "binary": "realcugan-ncnn-vulkan",
++        "binary_win": "realcugan-ncnn-vulkan.exe",
++        "models": ["models-se", "models-pro", "models-nose"],
++        "default_model": "models-se",
++        "scale_options": [2, 3, 4],
++        "default_scale": 2,
++        "url": "https://github.com/nihui/realcugan-ncnn-vulkan/releases",
++        "best_for": "Anime, Cartoons"
++    },
++    "waifu2x": {
++        "name": "Waifu2x NCNN Vulkan",
++        "description": "Classic anime upscaler, GPU-accelerated via Vulkan",
++        "icon": "🎌",
++        "binary": "waifu2x-ncnn-vulkan",
++        "binary_win": "waifu2x-ncnn-vulkan.exe",
++        "models": ["models-cunet", "models-upconv_7_anime_style_art_rgb"],
++        "default_model": "models-cunet",
++        "scale_options": [1, 2],
++        "default_scale": 2,
++        "url": "https://github.com/nihui/waifu2x-ncnn-vulkan/releases",
++        "best_for": "Anime, Illustrations"
++    },
++    "anime4k": {
++        "name": "Anime4K",
++        "description": "Real-time anime upscaling (shader-based, very fast)",
++        "icon": "🎮",
++        "binary": None,  # Shader-based, used via mpv/ffmpeg
++        "binary_win": None,
++        "models": [],
++        "default_model": None,
++        "scale_options": [2],
++        "default_scale": 2,
++        "url": "https://github.com/bloc97/Anime4K/releases",
++        "best_for": "Anime (real-time playback upscaling)"
++    }
++}
++
++
++def detect_upscalers() -> Dict:
++    """Detect which AI upscalers are installed and available."""
++    is_windows = platform.system() == "Windows"
++    results = {
++        "available": [],
++        "not_found": [],
++        "details": {}
++    }
++    
++    for key, upscaler in UPSCALERS.items():
++        binary = upscaler.get("binary_win" if is_windows else "binary")
++        
++        if not binary:
++            # Shader-based (Anime4K), skip binary check
++            results["not_found"].append(key)
++            results["details"][key] = {
++                "name": upscaler["name"],
++                "installed": False,
++                "note": "Shader-based, requires manual setup"
++            }
++            continue
++        
++        # Check if binary is in PATH
++        found_path = shutil.which(binary)
++        
++        if not found_path:
++            # Also check common install locations
++            common_paths = _get_common_paths(binary, is_windows)
++            for cp in common_paths:
++                if Path(cp).exists():
++                    found_path = cp
++                    break
++        
++        if found_path:
++            version = _get_upscaler_version(found_path)
++            results["available"].append(key)
++            results["details"][key] = {
++                "name": upscaler["name"],
++                "installed": True,
++                "path": found_path,
++                "version": version,
++                "models": upscaler["models"],
++                "scale_options": upscaler["scale_options"]
++            }
++            optimizarr_logger.app_logger.info("Found upscaler: %s at %s", upscaler["name"], found_path)
++        else:
++            results["not_found"].append(key)
++            results["details"][key] = {
++                "name": upscaler["name"],
++                "installed": False,
++                "download_url": upscaler["url"]
++            }
++    
++    return results
++
++
++def _get_common_paths(binary: str, is_windows: bool) -> List[str]:
++    """Get common installation paths for upscaler binaries."""
++    paths = []
++    
++    if is_windows:
++        home = Path.home()
++        paths.extend([
++            str(home / "Optimizarr" / "upscalers" / binary),
++            str(home / "AppData" / "Local" / "Optimizarr" / "upscalers" / binary),
++            f"C:\\Tools\\{binary}",
++            f"C:\\Program Files\\{binary.replace('.exe', '')}\\{binary}",
++        ])
++    else:
++        paths.extend([
++            f"/usr/local/bin/{binary}",
++            f"/opt/optimizarr/upscalers/{binary}",
++            str(Path.home() / ".local" / "bin" / binary),
++            str(Path.home() / "optimizarr" / "upscalers" / binary),
++        ])
++    
++    return paths
++
++
++def _get_upscaler_version(binary_path: str) -> Optional[str]:
++    """Try to get the version string from an upscaler binary."""
++    try:
++        result = subprocess.run(
++            [binary_path, "--help"],
++            capture_output=True, text=True, timeout=5
++        )
++        # Most ncnn-vulkan tools print version in first few lines
++        output = result.stdout + result.stderr
++        for line in output.split('\n')[:5]:
++            if 'version' in line.lower() or 'v0.' in line or 'v2' in line:
++                return line.strip()
++        return "installed"
++    except Exception:
++        return "installed"
++
++
++def get_upscaler_info() -> Dict:
++    """Get full upscaler information for the UI."""
++    return {
++        "definitions": {k: {
++            "name": v["name"],
++            "description": v["description"],
++            "icon": v["icon"],
++            "best_for": v["best_for"],
++            "models": v["models"],
++            "default_model": v["default_model"],
++            "scale_options": v["scale_options"],
++            "default_scale": v["default_scale"],
++            "download_url": v["url"]
++        } for k, v in UPSCALERS.items()},
++        "detection": detect_upscalers(),
++        "workflow_note": "AI upscaling extracts frames, upscales each with AI, "
++                         "then reassembles before HandBrake encoding. "
++                         "This is VERY slow (~2-5 min/frame) and GPU-intensive."
++    }
+diff --git a/app/watcher.py b/app/watcher.py
+new file mode 100644
+index 0000000..8cbde3b
+--- /dev/null
++++ b/app/watcher.py
+@@ -0,0 +1,194 @@
++"""
++Folder Watcher for Optimizarr.
++Monitors directories for new media files and auto-queues them for encoding.
++Uses polling (no external dependencies) for maximum compatibility.
++"""
++import os
++import time
++import threading
++from pathlib import Path
++from typing import Dict, Set, Optional
++from datetime import datetime
++
++from app.database import db
++from app.logger import optimizarr_logger
++
++
++# Common video extensions
++VIDEO_EXTENSIONS = {
++    '.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm',
++    '.m4v', '.ts', '.mpg', '.mpeg', '.m2ts', '.vob'
++}
++
++
++class FolderWatcher:
++    """Watches directories for new media files and auto-queues them."""
++    
++    def __init__(self, poll_interval: int = 60):
++        self.poll_interval = poll_interval  # seconds between scans
++        self.running = False
++        self.thread: Optional[threading.Thread] = None
++        self._known_files: Dict[int, Set[str]] = {}  # watch_id -> set of known file paths
++        self._lock = threading.Lock()
++    
++    def start(self):
++        """Start the folder watcher in a background thread."""
++        if self.running:
++            return
++        self.running = True
++        self.thread = threading.Thread(target=self._poll_loop, daemon=True, name="FolderWatcher")
++        self.thread.start()
++        optimizarr_logger.app_logger.info("Folder watcher started (poll interval: %ds)", self.poll_interval)
++    
++    def stop(self):
++        """Stop the folder watcher."""
++        self.running = False
++        if self.thread and self.thread.is_alive():
++            self.thread.join(timeout=5)
++        optimizarr_logger.app_logger.info("Folder watcher stopped")
++    
++    def _poll_loop(self):
++        """Main polling loop."""
++        # Initial scan to build known files (don't queue existing files)
++        self._initial_scan()
++        
++        while self.running:
++            try:
++                self._check_watches()
++            except Exception as e:
++                optimizarr_logger.app_logger.error("Watcher error: %s", str(e))
++            
++            # Sleep in small increments so we can stop quickly
++            for _ in range(self.poll_interval):
++                if not self.running:
++                    return
++                time.sleep(1)
++    
++    def _initial_scan(self):
++        """Build the initial set of known files (don't queue them)."""
++        watches = db.get_folder_watches(enabled_only=True)
++        for watch in watches:
++            extensions = set(watch.get('extensions', '').split(','))
++            files = self._scan_directory(watch['path'], watch.get('recursive', True), extensions)
++            with self._lock:
++                self._known_files[watch['id']] = files
++            optimizarr_logger.app_logger.info(
++                "Watcher initialized: %s (%d existing files)", watch['path'], len(files)
++            )
++    
++    def _check_watches(self):
++        """Check all enabled watches for new files."""
++        watches = db.get_folder_watches(enabled_only=True)
++        
++        for watch in watches:
++            if not watch.get('auto_queue', True):
++                continue
++            
++            extensions = set(watch.get('extensions', '').split(','))
++            current_files = self._scan_directory(watch['path'], watch.get('recursive', True), extensions)
++            
++            with self._lock:
++                known = self._known_files.get(watch['id'], set())
++                new_files = current_files - known
++                
++                if new_files:
++                    self._queue_new_files(new_files, watch)
++                
++                self._known_files[watch['id']] = current_files
++            
++            # Update last check timestamp
++            db.update_folder_watch(watch['id'], last_check=datetime.now().isoformat())
++    
++    def _scan_directory(self, path: str, recursive: bool, extensions: Set[str]) -> Set[str]:
++        """Scan a directory and return all matching files."""
++        files = set()
++        try:
++            root_path = Path(path)
++            if not root_path.exists():
++                return files
++            
++            if recursive:
++                for f in root_path.rglob('*'):
++                    if f.is_file() and f.suffix.lower() in extensions:
++                        # Skip _optimized files (our own output)
++                        if '_optimized' not in f.stem:
++                            files.add(str(f))
++            else:
++                for f in root_path.iterdir():
++                    if f.is_file() and f.suffix.lower() in extensions:
++                        if '_optimized' not in f.stem:
++                            files.add(str(f))
++        except PermissionError:
++            optimizarr_logger.app_logger.warning("Permission denied: %s", path)
++        except Exception as e:
++            optimizarr_logger.app_logger.error("Scan error for %s: %s", path, str(e))
++        
++        return files
++    
++    def _queue_new_files(self, new_files: Set[str], watch: Dict):
++        """Queue newly detected files."""
++        # Get existing queue paths to avoid duplicates
++        queue_items = db.get_queue_items()
++        queued_paths = {item['file_path'] for item in queue_items}
++        
++        queued_count = 0
++        for file_path in sorted(new_files):
++            if file_path in queued_paths:
++                continue
++            
++            try:
++                file_size = os.path.getsize(file_path)
++                db.add_to_queue(
++                    file_path=file_path,
++                    root_id=None,
++                    profile_id=watch['profile_id'],
++                    file_size=file_size,
++                    status='pending'
++                )
++                queued_count += 1
++            except Exception as e:
++                optimizarr_logger.app_logger.error("Failed to queue %s: %s", file_path, str(e))
++        
++        if queued_count > 0:
++            optimizarr_logger.app_logger.info(
++                "Watcher auto-queued %d new file(s) from %s", queued_count, watch['path']
++            )
++    
++    def get_status(self) -> Dict:
++        """Get watcher status for API."""
++        watches = db.get_folder_watches()
++        with self._lock:
++            known_counts = {wid: len(files) for wid, files in self._known_files.items()}
++        
++        return {
++            'running': self.running,
++            'poll_interval': self.poll_interval,
++            'total_watches': len(watches),
++            'active_watches': len([w for w in watches if w.get('enabled')]),
++            'known_files': known_counts
++        }
++    
++    def force_check(self, watch_id: Optional[int] = None) -> Dict:
++        """Force an immediate check of one or all watches."""
++        watches = db.get_folder_watches(enabled_only=True)
++        if watch_id:
++            watches = [w for w in watches if w['id'] == watch_id]
++        
++        total_new = 0
++        for watch in watches:
++            extensions = set(watch.get('extensions', '').split(','))
++            current_files = self._scan_directory(watch['path'], watch.get('recursive', True), extensions)
++            
++            with self._lock:
++                known = self._known_files.get(watch['id'], set())
++                new_files = current_files - known
++                if new_files:
++                    self._queue_new_files(new_files, watch)
++                    total_new += len(new_files)
++                self._known_files[watch['id']] = current_files
++        
++        return {'checked': len(watches), 'new_files': total_new}
++
++
++# Global folder watcher instance
++folder_watcher = FolderWatcher(poll_interval=60)
+diff --git a/web/static/js/app.js b/web/static/js/app.js
+index 75ebb4a..bc9afa1 100644
+--- a/web/static/js/app.js
++++ b/web/static/js/app.js
+@@ -70,6 +70,8 @@ function switchTab(tabName) {
+     if (tabName === 'settings') loadSettings();
+     if (tabName === 'schedule') loadSchedule();
+     if (tabName === 'logs') loadLogs();
++    if (tabName === 'watches') loadWatches();
++    if (tabName === 'statistics') loadStatistics();
+ }
+ 
+ // Load statistics
+@@ -1678,3 +1680,410 @@ async function checkHwAccel() {
+     }
+ }
+ 
++
++// ============================================================
++// FOLDER WATCHES
++// ============================================================
++
++async function loadWatches() {
++    const list = document.getElementById('watchesList');
++    const statusEl = document.getElementById('watcherStatus');
++    
++    // Load watcher status
++    try {
++        const status = await apiRequest('/watches/status');
++        if (status) {
++            statusEl.innerHTML = `
++                <span class="${status.running ? 'text-green-400' : 'text-yellow-400'}">
++                    ${status.running ? '● Running' : '○ Stopped'}
++                </span>
++                <span class="mx-3 text-gray-500">|</span>
++                Poll interval: ${status.poll_interval}s
++                <span class="mx-3 text-gray-500">|</span>
++                Active watches: ${status.active_watches}/${status.total_watches}
++            `;
++        }
++    } catch (e) {
++        statusEl.innerHTML = '<span class="text-gray-500">Status unavailable</span>';
++    }
++    
++    // Load watches
++    const watches = await apiRequest('/watches');
++    if (!watches || watches.length === 0) {
++        list.innerHTML = '<p class="text-gray-400">No folder watches configured. Click "Add Watch" to start monitoring a folder.</p>';
++        return;
++    }
++    
++    list.innerHTML = watches.map(w => `
++        <div class="bg-gray-700 rounded-lg p-4 mb-3">
++            <div class="flex justify-between items-start">
++                <div class="flex-1">
++                    <div class="flex items-center gap-2">
++                        <span class="text-lg">${w.enabled ? '👁️' : '⏸️'}</span>
++                        <h3 class="font-semibold">${w.path}</h3>
++                        ${w.enabled ? '<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">Active</span>' : '<span class="px-2 py-0.5 bg-gray-600 text-gray-400 text-xs rounded">Disabled</span>'}
++                    </div>
++                    <div class="flex gap-4 mt-2 text-sm text-gray-300">
++                        <div><span class="text-gray-400">Profile:</span> ${w.profile_name || 'Unknown'}</div>
++                        <div><span class="text-gray-400">Recursive:</span> ${w.recursive ? 'Yes' : 'No'}</div>
++                        <div><span class="text-gray-400">Auto Queue:</span> ${w.auto_queue ? 'Yes' : 'No'}</div>
++                        ${w.last_check ? `<div><span class="text-gray-400">Last Check:</span> ${new Date(w.last_check).toLocaleString()}</div>` : ''}
++                    </div>
++                    <div class="mt-1 text-xs text-gray-500">Extensions: ${w.extensions}</div>
++                </div>
++                <div class="flex gap-2">
++                    <button onclick='editWatch(${JSON.stringify(w)})' class="bg-gray-600 hover:bg-gray-500 px-3 py-1 rounded text-sm">Edit</button>
++                    <button onclick="deleteWatch(${w.id})" class="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-sm">Delete</button>
++                </div>
++            </div>
++        </div>
++    `).join('');
++}
++
++async function showCreateWatchForm() {
++    document.getElementById('watchModalTitle').textContent = 'Add Folder Watch';
++    document.getElementById('watchForm').reset();
++    document.getElementById('watchId').value = '';
++    document.getElementById('watchEnabled').checked = true;
++    document.getElementById('watchRecursive').checked = true;
++    document.getElementById('watchAutoQueue').checked = true;
++    document.getElementById('watchExtensions').value = '.mkv,.mp4,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.mpg,.mpeg';
++    
++    // Populate profile dropdown
++    const profiles = await apiRequest('/profiles');
++    const select = document.getElementById('watchProfile');
++    select.innerHTML = profiles.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
++    
++    document.getElementById('watchModal').classList.remove('hidden');
++}
++
++function editWatch(watch) {
++    document.getElementById('watchModalTitle').textContent = 'Edit Folder Watch';
++    document.getElementById('watchId').value = watch.id;
++    document.getElementById('watchPath').value = watch.path;
++    document.getElementById('watchEnabled').checked = watch.enabled;
++    document.getElementById('watchRecursive').checked = watch.recursive;
++    document.getElementById('watchAutoQueue').checked = watch.auto_queue;
++    document.getElementById('watchExtensions').value = watch.extensions || '';
++    
++    // Populate and select profile
++    showCreateWatchForm().then(() => {
++        document.getElementById('watchProfile').value = watch.profile_id;
++        document.getElementById('watchModalTitle').textContent = 'Edit Folder Watch';
++        document.getElementById('watchId').value = watch.id;
++        document.getElementById('watchPath').value = watch.path;
++        document.getElementById('watchEnabled').checked = watch.enabled;
++        document.getElementById('watchRecursive').checked = watch.recursive;
++        document.getElementById('watchAutoQueue').checked = watch.auto_queue;
++        document.getElementById('watchExtensions').value = watch.extensions || '';
++    });
++}
++
++async function saveWatch(event) {
++    event.preventDefault();
++    
++    const data = {
++        path: document.getElementById('watchPath').value,
++        profile_id: parseInt(document.getElementById('watchProfile').value),
++        enabled: document.getElementById('watchEnabled').checked,
++        recursive: document.getElementById('watchRecursive').checked,
++        auto_queue: document.getElementById('watchAutoQueue').checked,
++        extensions: document.getElementById('watchExtensions').value
++    };
++    
++    const watchId = document.getElementById('watchId').value;
++    
++    if (watchId) {
++        await apiRequest(`/watches/${watchId}`, { method: 'PUT', body: JSON.stringify(data) });
++        showMessage('Watch updated', 'success');
++    } else {
++        await apiRequest('/watches', { method: 'POST', body: JSON.stringify(data) });
++        showMessage('Watch created', 'success');
++    }
++    
++    closeWatchModal();
++    loadWatches();
++}
++
++async function deleteWatch(id) {
++    if (!confirm('Delete this folder watch?')) return;
++    await apiRequest(`/watches/${id}`, { method: 'DELETE' });
++    showMessage('Watch deleted', 'success');
++    loadWatches();
++}
++
++function closeWatchModal() {
++    document.getElementById('watchModal').classList.add('hidden');
++}
++
++async function forceWatchCheck() {
++    const result = await apiRequest('/watches/check', { method: 'POST' });
++    if (result) {
++        showMessage(`Checked ${result.checked} watch(es), found ${result.new_files} new file(s)`, 'success');
++        loadWatches();
++    }
++}
++
++
++// ============================================================
++// STATISTICS DASHBOARD
++// ============================================================
++
++async function loadStatistics() {
++    const days = document.getElementById('statsDays').value;
++    
++    try {
++        const data = await apiRequest(`/stats/dashboard?days=${days}`);
++        if (!data) return;
++        
++        // Summary cards
++        const t = data.totals;
++        document.getElementById('statTotalFiles').textContent = t.total.toLocaleString();
++        document.getElementById('statOriginalSize').textContent = formatBytes(t.total_original);
++        document.getElementById('statNewSize').textContent = formatBytes(t.total_new);
++        document.getElementById('statSaved').textContent = formatBytes(t.total_saved);
++        document.getElementById('statAvgPct').textContent = t.avg_savings_pct.toFixed(1) + '%';
++        
++        // Daily chart
++        renderDailyChart(data.daily);
++        
++        // Codec breakdown
++        renderCodecBreakdown(data.codecs, t.total);
++        
++        // Recent history
++        renderRecentHistory(data.recent);
++        
++    } catch (err) {
++        console.error('Failed to load statistics:', err);
++    }
++    
++    // Also load health and upscalers
++    loadHealth();
++    loadUpscalers();
++}
++
++function formatBytes(bytes) {
++    if (!bytes || bytes === 0) return '0 B';
++    const gb = bytes / (1024 * 1024 * 1024);
++    if (gb >= 1) return gb.toFixed(1) + ' GB';
++    const mb = bytes / (1024 * 1024);
++    if (mb >= 1) return mb.toFixed(1) + ' MB';
++    return (bytes / 1024).toFixed(0) + ' KB';
++}
++
++function renderDailyChart(daily) {
++    const container = document.getElementById('dailyChart');
++    
++    if (!daily || daily.length === 0) {
++        container.innerHTML = '<p class="text-gray-500 text-sm">No encoding history yet. Process some files to see activity.</p>';
++        return;
++    }
++    
++    const maxFiles = Math.max(...daily.map(d => d.files), 1);
++    
++    container.innerHTML = daily.map(d => {
++        const height = Math.max((d.files / maxFiles) * 100, 4);
++        const date = new Date(d.date);
++        const label = `${date.getMonth()+1}/${date.getDate()}`;
++        const savedMB = (d.saved / (1024*1024)).toFixed(0);
++        
++        return `
++            <div class="flex flex-col items-center flex-shrink-0" style="min-width: 30px" title="${d.date}: ${d.files} files, ${savedMB}MB saved">
++                <div class="text-xs text-gray-400 mb-1">${d.files}</div>
++                <div class="w-6 bg-blue-500 rounded-t transition-all" style="height: ${height}%"></div>
++                <div class="text-xs text-gray-500 mt-1 whitespace-nowrap">${label}</div>
++            </div>
++        `;
++    }).join('');
++}
++
++function renderCodecBreakdown(codecs, total) {
++    const container = document.getElementById('codecBreakdown');
++    
++    if (!codecs || codecs.length === 0) {
++        container.innerHTML = '<p class="text-gray-500 text-sm">No data yet</p>';
++        return;
++    }
++    
++    const colors = ['bg-blue-500', 'bg-green-500', 'bg-purple-500', 'bg-yellow-500', 'bg-red-500', 'bg-cyan-500'];
++    
++    container.innerHTML = codecs.map((c, i) => {
++        const pct = total > 0 ? ((c.count / total) * 100).toFixed(1) : 0;
++        const savedMB = (c.saved / (1024*1024)).toFixed(0);
++        return `
++            <div>
++                <div class="flex justify-between text-sm mb-1">
++                    <span>${(c.codec || 'unknown').toUpperCase()}</span>
++                    <span class="text-gray-400">${c.count} files (${pct}%) — ${savedMB}MB saved</span>
++                </div>
++                <div class="w-full bg-gray-600 rounded h-2">
++                    <div class="${colors[i % colors.length]} rounded h-2" style="width: ${pct}%"></div>
++                </div>
++            </div>
++        `;
++    }).join('');
++}
++
++function renderRecentHistory(recent) {
++    const container = document.getElementById('recentHistory');
++    
++    if (!recent || recent.length === 0) {
++        container.innerHTML = '<p class="text-gray-500 text-sm">No encoding history yet</p>';
++        return;
++    }
++    
++    container.innerHTML = recent.map(h => {
++        const filename = h.file_path.split(/[/\\]/).pop();
++        const savedPct = h.original_size_bytes > 0 
++            ? ((h.savings_bytes / h.original_size_bytes) * 100).toFixed(1) 
++            : 0;
++        const timeStr = h.encoding_time_seconds > 60 
++            ? `${Math.floor(h.encoding_time_seconds/60)}m ${h.encoding_time_seconds%60}s`
++            : `${h.encoding_time_seconds}s`;
++        
++        return `
++            <div class="flex justify-between items-center p-2 bg-gray-700 rounded text-sm">
++                <div class="flex-1 truncate mr-3" title="${h.file_path}">
++                    ${filename}
++                </div>
++                <div class="flex gap-3 text-xs text-gray-400 flex-shrink-0">
++                    <span class="text-green-400">-${savedPct}%</span>
++                    <span>${formatBytes(h.original_size_bytes)} → ${formatBytes(h.new_size_bytes)}</span>
++                    <span>${timeStr}</span>
++                </div>
++            </div>
++        `;
++    }).join('');
++}
++
++async function loadHealth() {
++    try {
++        const health = await apiRequest('/health');
++        if (!health) return;
++        
++        const container = document.getElementById('healthStatus');
++        container.innerHTML = `
++            <div class="p-3 bg-gray-700 rounded">
++                <div class="text-xs text-gray-400 mb-1">Service</div>
++                <div class="font-bold ${health.status === 'ok' ? 'text-green-400' : 'text-yellow-400'}">
++                    ${health.status === 'ok' ? '● Healthy' : '⚠ ' + health.status}
++                </div>
++                <div class="text-xs text-gray-500 mt-1">v${health.version}</div>
++            </div>
++            <div class="p-3 bg-gray-700 rounded">
++                <div class="text-xs text-gray-400 mb-1">HandBrakeCLI</div>
++                <div class="font-bold ${health.handbrake?.installed ? 'text-green-400' : 'text-red-400'}">
++                    ${health.handbrake?.installed ? '● Installed' : '✗ Not Found'}
++                </div>
++                <div class="text-xs text-gray-500 mt-1 truncate">${health.handbrake?.path || 'not in PATH'}</div>
++            </div>
++            <div class="p-3 bg-gray-700 rounded">
++                <div class="text-xs text-gray-400 mb-1">Database</div>
++                <div class="font-bold ${health.database?.status === 'ok' ? 'text-green-400' : 'text-red-400'}">
++                    ${health.database?.status === 'ok' ? '● OK' : '✗ Error'}
++                </div>
++                <div class="text-xs text-gray-500 mt-1">${health.database?.profiles || 0} profiles, ${health.database?.history_records || 0} history</div>
++            </div>
++            ${health.disk ? `
++            <div class="p-3 bg-gray-700 rounded">
++                <div class="text-xs text-gray-400 mb-1">Disk Space</div>
++                <div class="font-bold ${health.disk.percent_used > 90 ? 'text-red-400' : 'text-green-400'}">
++                    ${health.disk.free_gb} GB free
++                </div>
++                <div class="text-xs text-gray-500 mt-1">${health.disk.percent_used}% used of ${health.disk.total_gb} GB</div>
++            </div>` : ''}
++        `;
++    } catch (err) {
++        document.getElementById('healthStatus').innerHTML = '<p class="text-red-400">Failed to load health status</p>';
++    }
++}
++
++async function loadUpscalers() {
++    try {
++        const info = await apiRequest('/upscalers');
++        if (!info) return;
++        
++        const container = document.getElementById('upscalerStatus');
++        const defs = info.definitions;
++        const det = info.detection?.details || {};
++        
++        container.innerHTML = Object.entries(defs).map(([key, up]) => {
++            const d = det[key] || {};
++            const installed = d.installed;
++            
++            return `
++                <div class="p-3 bg-gray-700 rounded">
++                    <div class="flex justify-between items-start">
++                        <div>
++                            <span class="text-lg">${up.icon}</span>
++                            <span class="font-bold ml-1">${up.name}</span>
++                            ${installed ? '<span class="ml-2 px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">Installed</span>' : '<span class="ml-2 px-2 py-0.5 bg-gray-600 text-gray-400 text-xs rounded">Not Found</span>'}
++                        </div>
++                    </div>
++                    <p class="text-xs text-gray-400 mt-1">${up.description}</p>
++                    <p class="text-xs text-gray-500 mt-1">Best for: ${up.best_for}</p>
++                    ${!installed ? `<a href="${up.download_url}" target="_blank" class="text-xs text-blue-400 hover:text-blue-300 mt-1 inline-block">Download →</a>` : ''}
++                    ${installed && d.path ? `<p class="text-xs text-gray-500 mt-1 truncate">Path: ${d.path}</p>` : ''}
++                </div>
++            `;
++        }).join('');
++    } catch (err) {
++        document.getElementById('upscalerStatus').innerHTML = '<p class="text-gray-500">Failed to detect upscalers</p>';
++    }
++}
++
++
++// ============================================================
++// PRESET IMPORT / EXPORT
++// ============================================================
++
++async function exportProfiles() {
++    try {
++        const data = await apiRequest('/profiles/export');
++        if (!data) return;
++        
++        const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
++        const url = URL.createObjectURL(blob);
++        const a = document.createElement('a');
++        a.href = url;
++        a.download = `optimizarr-profiles-${new Date().toISOString().split('T')[0]}.json`;
++        document.body.appendChild(a);
++        a.click();
++        document.body.removeChild(a);
++        URL.revokeObjectURL(url);
++        
++        showMessage(`Exported ${data.count} profile(s)`, 'success');
++    } catch (err) {
++        showMessage('Export failed: ' + err.message, 'error');
++    }
++}
++
++async function importProfiles(event) {
++    const file = event.target.files[0];
++    if (!file) return;
++    
++    try {
++        const text = await file.text();
++        const data = JSON.parse(text);
++        
++        if (!data.profiles || !Array.isArray(data.profiles)) {
++            showMessage('Invalid file format — expected Optimizarr profile export', 'error');
++            return;
++        }
++        
++        const result = await apiRequest('/profiles/import', {
++            method: 'POST',
++            body: JSON.stringify(data)
++        });
++        
++        if (result) {
++            showMessage(result.message, 'success');
++            loadProfiles();
++        }
++    } catch (err) {
++        showMessage('Import failed: ' + err.message, 'error');
++    }
++    
++    // Reset file input
++    event.target.value = '';
++}
+diff --git a/web/templates/index.html b/web/templates/index.html
+index acdab2d..c18bd98 100644
+--- a/web/templates/index.html
++++ b/web/templates/index.html
+@@ -91,6 +91,8 @@
+                     <button onclick="switchTab('queue')" id="tab-queue" class="tab-button active">Queue</button>
+                     <button onclick="switchTab('profiles')" id="tab-profiles" class="tab-button">Profiles</button>
+                     <button onclick="switchTab('scanroots')" id="tab-scanroots" class="tab-button">Scan Roots</button>
++                    <button onclick="switchTab('watches')" id="tab-watches" class="tab-button">Watches</button>
++                    <button onclick="switchTab('statistics')" id="tab-statistics" class="tab-button">Statistics</button>
+                     <button onclick="switchTab('schedule')" id="tab-schedule" class="tab-button">Schedule</button>
+                     <button onclick="switchTab('logs')" id="tab-logs" class="tab-button">Logs</button>
+                 </nav>
+@@ -153,9 +155,18 @@
+             <div class="bg-gray-800 rounded-lg p-6">
+                 <div class="flex justify-between items-center mb-6">
+                     <h2 class="text-xl font-bold">Encoding Profiles</h2>
+-                    <button onclick="showCreateProfileForm()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">
+-                        New Profile
+-                    </button>
++                    <div class="flex gap-2">
++                        <button onclick="exportProfiles()" class="bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded text-sm" title="Export all profiles as JSON">
++                            📤 Export
++                        </button>
++                        <label class="bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded text-sm cursor-pointer" title="Import profiles from JSON">
++                            📥 Import
++                            <input type="file" accept=".json" onchange="importProfiles(event)" class="hidden">
++                        </label>
++                        <button onclick="showCreateProfileForm()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">
++                            New Profile
++                        </button>
++                    </div>
+                 </div>
+                 
+                 <div id="profilesList">
+@@ -675,6 +686,178 @@
+             </div>
+         </div>
+ 
++        <!-- ============================================================ -->
++        <!-- FOLDER WATCHES TAB -->
++        <!-- ============================================================ -->
++        <div id="content-watches" class="tab-content hidden">
++            <div class="bg-gray-800 rounded-lg p-6">
++                <div class="flex justify-between items-center mb-6">
++                    <div>
++                        <h2 class="text-xl font-bold">Folder Watches</h2>
++                        <p class="text-sm text-gray-400 mt-1">Auto-queue new media files when they appear in watched folders</p>
++                    </div>
++                    <div class="flex gap-2">
++                        <button onclick="forceWatchCheck()" class="bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded text-sm">
++                            🔍 Check Now
++                        </button>
++                        <button onclick="showCreateWatchForm()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">
++                            Add Watch
++                        </button>
++                    </div>
++                </div>
++                
++                <!-- Watcher Status -->
++                <div id="watcherStatus" class="mb-4 p-3 bg-gray-700 rounded text-sm text-gray-300"></div>
++                
++                <div id="watchesList">
++                    <p class="text-gray-400">Loading watches...</p>
++                </div>
++            </div>
++        </div>
++        
++        <!-- Watch Modal -->
++        <div id="watchModal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
++            <div class="bg-gray-800 rounded-lg p-6 w-full max-w-lg">
++                <h3 id="watchModalTitle" class="text-xl font-bold mb-4">Add Folder Watch</h3>
++                <form id="watchForm" onsubmit="saveWatch(event)">
++                    <input type="hidden" id="watchId">
++                    
++                    <div class="space-y-4">
++                        <div>
++                            <label class="block text-sm font-medium mb-2">Folder Path *</label>
++                            <div class="flex gap-2">
++                                <input type="text" id="watchPath" required 
++                                    class="flex-1 bg-gray-700 border border-gray-600 rounded px-4 py-2"
++                                    placeholder="/path/to/media/folder">
++                                <button type="button" onclick="openFolderBrowser('watchPath')" 
++                                    class="bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded">📁</button>
++                            </div>
++                        </div>
++                        
++                        <div>
++                            <label class="block text-sm font-medium mb-2">Encoding Profile *</label>
++                            <select id="watchProfile" required 
++                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
++                            </select>
++                        </div>
++                        
++                        <div>
++                            <label class="block text-sm font-medium mb-2">File Extensions</label>
++                            <input type="text" id="watchExtensions" 
++                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2"
++                                value=".mkv,.mp4,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.mpg,.mpeg">
++                        </div>
++                        
++                        <div class="grid grid-cols-3 gap-4">
++                            <label class="flex items-center">
++                                <input type="checkbox" id="watchEnabled" checked class="mr-2">
++                                <span class="text-sm">Enabled</span>
++                            </label>
++                            <label class="flex items-center">
++                                <input type="checkbox" id="watchRecursive" checked class="mr-2">
++                                <span class="text-sm">Recursive</span>
++                            </label>
++                            <label class="flex items-center">
++                                <input type="checkbox" id="watchAutoQueue" checked class="mr-2">
++                                <span class="text-sm">Auto Queue</span>
++                            </label>
++                        </div>
++                    </div>
++                    
++                    <div class="flex justify-end gap-3 pt-4">
++                        <button type="button" onclick="closeWatchModal()" 
++                            class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded">Cancel</button>
++                        <button type="submit" 
++                            class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded">Save Watch</button>
++                    </div>
++                </form>
++            </div>
++        </div>
++
++        <!-- ============================================================ -->
++        <!-- STATISTICS TAB -->
++        <!-- ============================================================ -->
++        <div id="content-statistics" class="tab-content hidden">
++            <div class="space-y-6">
++                <!-- Summary Cards -->
++                <div class="grid grid-cols-1 md:grid-cols-5 gap-4">
++                    <div class="bg-gray-800 p-5 rounded-lg text-center">
++                        <p class="text-gray-400 text-xs mb-1">Total Files</p>
++                        <p id="statTotalFiles" class="text-2xl font-bold text-blue-400">0</p>
++                    </div>
++                    <div class="bg-gray-800 p-5 rounded-lg text-center">
++                        <p class="text-gray-400 text-xs mb-1">Original Size</p>
++                        <p id="statOriginalSize" class="text-2xl font-bold text-gray-300">0 GB</p>
++                    </div>
++                    <div class="bg-gray-800 p-5 rounded-lg text-center">
++                        <p class="text-gray-400 text-xs mb-1">New Size</p>
++                        <p id="statNewSize" class="text-2xl font-bold text-blue-300">0 GB</p>
++                    </div>
++                    <div class="bg-gray-800 p-5 rounded-lg text-center">
++                        <p class="text-gray-400 text-xs mb-1">Space Saved</p>
++                        <p id="statSaved" class="text-2xl font-bold text-green-400">0 GB</p>
++                    </div>
++                    <div class="bg-gray-800 p-5 rounded-lg text-center">
++                        <p class="text-gray-400 text-xs mb-1">Avg Savings</p>
++                        <p id="statAvgPct" class="text-2xl font-bold text-yellow-400">0%</p>
++                    </div>
++                </div>
++                
++                <!-- Daily Activity Chart -->
++                <div class="bg-gray-800 rounded-lg p-6">
++                    <div class="flex justify-between items-center mb-4">
++                        <h3 class="text-lg font-bold">Daily Activity</h3>
++                        <select id="statsDays" onchange="loadStatistics()" 
++                            class="bg-gray-700 border border-gray-600 rounded px-3 py-1 text-sm">
++                            <option value="7">Last 7 Days</option>
++                            <option value="30" selected>Last 30 Days</option>
++                            <option value="90">Last 90 Days</option>
++                            <option value="365">Last Year</option>
++                        </select>
++                    </div>
++                    <div id="dailyChart" class="h-48 flex items-end gap-1 overflow-x-auto">
++                        <p class="text-gray-500 text-sm">Loading chart...</p>
++                    </div>
++                </div>
++                
++                <!-- Two Column: Codecs + Recent History -->
++                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
++                    <!-- Codec Breakdown -->
++                    <div class="bg-gray-800 rounded-lg p-6">
++                        <h3 class="text-lg font-bold mb-4">Codec Breakdown</h3>
++                        <div id="codecBreakdown" class="space-y-3">
++                            <p class="text-gray-500 text-sm">Loading...</p>
++                        </div>
++                    </div>
++                    
++                    <!-- Recent History -->
++                    <div class="bg-gray-800 rounded-lg p-6">
++                        <h3 class="text-lg font-bold mb-4">Recent Encodes</h3>
++                        <div id="recentHistory" class="space-y-2 max-h-80 overflow-y-auto">
++                            <p class="text-gray-500 text-sm">Loading...</p>
++                        </div>
++                    </div>
++                </div>
++                
++                <!-- System Health -->
++                <div class="bg-gray-800 rounded-lg p-6">
++                    <h3 class="text-lg font-bold mb-4">System Health</h3>
++                    <div id="healthStatus" class="grid grid-cols-1 md:grid-cols-4 gap-4">
++                        <p class="text-gray-500 text-sm">Loading...</p>
++                    </div>
++                </div>
++                
++                <!-- AI Upscaler Status -->
++                <div class="bg-gray-800 rounded-lg p-6">
++                    <h3 class="text-lg font-bold mb-4">🤖 AI Upscalers</h3>
++                    <p class="text-sm text-gray-400 mb-4">Detected AI upscaler binaries for pre-encode upscaling (e.g., 480p→1080p)</p>
++                    <div id="upscalerStatus" class="grid grid-cols-1 md:grid-cols-2 gap-4">
++                        <p class="text-gray-500 text-sm">Loading...</p>
++                    </div>
++                </div>
++            </div>
++        </div>
++
+         <div id="content-schedule" class="tab-content hidden">
+             <div class="bg-gray-800 rounded-lg p-6">
+                 <h2 class="text-xl font-bold mb-6">Encoding Schedule</h2>
+-- 
+2.43.0
+

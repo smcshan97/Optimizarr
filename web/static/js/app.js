@@ -2149,3 +2149,278 @@ async function importProfiles(event) {
     // Reset file input
     event.target.value = '';
 }
+
+// ============================================================
+// QUEUE PRIORITIZATION
+// ============================================================
+
+async function applyQueuePriority() {
+    const sortBy = document.getElementById('queueSortBy').value;
+    // Map select value to API param + order
+    const sortMap = {
+        'default': { sort_by: 'default', order: 'desc' },
+        'file_size': { sort_by: 'file_size', order: 'desc' },
+        'estimated_savings': { sort_by: 'estimated_savings', order: 'desc' },
+        'filename': { sort_by: 'filename', order: 'asc' },
+    };
+    const params = sortMap[sortBy] || sortMap['default'];
+    const result = await apiRequest('/queue/prioritize', {
+        method: 'POST',
+        body: JSON.stringify(params)
+    });
+    if (result) {
+        showMessage(`✓ ${result.message}`, 'success');
+        loadQueue();
+    }
+}
+
+// ============================================================
+// UPSCALER DOWNLOAD + UPDATE CHECKER (replaces old loadUpscalers)
+// ============================================================
+
+// Track polling intervals per upscaler key
+const _upscalerPollers = {};
+
+async function loadUpscalers() {
+    try {
+        const info = await apiRequest('/upscalers');
+        if (!info) return;
+        renderUpscalerCards(info);
+    } catch (err) {
+        document.getElementById('upscalerStatus').innerHTML =
+            '<p class="text-gray-500">Failed to detect upscalers</p>';
+    }
+}
+
+function renderUpscalerCards(info) {
+    const container = document.getElementById('upscalerStatus');
+    if (!container) return;
+    const defs = info.definitions || {};
+    const det = (info.detection && info.detection.details) ? info.detection.details : {};
+
+    container.innerHTML = Object.entries(defs).map(([key, up]) => {
+        const d = det[key] || {};
+        const installed = d.installed;
+        const dl = d.download_state || {};
+        const dlStatus = dl.status || 'idle';
+        const dlProgress = dl.progress || 0;
+
+        let actionBtn = '';
+        if (dlStatus === 'downloading') {
+            actionBtn = `
+                <div class="mt-2">
+                    <div class="flex justify-between text-xs text-gray-400 mb-1">
+                        <span>${dl.message || 'Downloading…'}</span>
+                        <span>${dlProgress}%</span>
+                    </div>
+                    <div class="bg-gray-600 rounded-full h-1.5">
+                        <div class="bg-blue-500 h-1.5 rounded-full transition-all" style="width:${dlProgress}%"></div>
+                    </div>
+                </div>`;
+        } else if (dlStatus === 'installed' || installed) {
+            actionBtn = `
+                <div class="mt-2 flex items-center gap-2">
+                    <span class="text-xs text-green-400">✓ ${d.version || 'Installed'}</span>
+                    ${d.path ? `<span class="text-xs text-gray-500 truncate max-w-32" title="${d.path}">${d.path}</span>` : ''}
+                    <button onclick="startUpscalerDownload('${key}')" 
+                        class="text-xs text-blue-400 hover:text-blue-300 ml-auto">Update</button>
+                </div>`;
+        } else if (dlStatus === 'error') {
+            actionBtn = `
+                <div class="mt-2">
+                    <p class="text-xs text-red-400">${dl.error || 'Download failed'}</p>
+                    <button onclick="startUpscalerDownload('${key}')"
+                        class="mt-1 bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-xs">Retry</button>
+                </div>`;
+        } else {
+            actionBtn = `
+                <div class="mt-2">
+                    <button onclick="startUpscalerDownload('${key}')"
+                        class="bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded text-sm font-medium">
+                        ⬇ Download
+                    </button>
+                    <a href="${up.download_url}" target="_blank"
+                        class="ml-2 text-xs text-gray-400 hover:text-gray-300">Manual →</a>
+                </div>`;
+        }
+
+        const statusBadge = installed || dlStatus === 'installed'
+            ? '<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">Installed</span>'
+            : '<span class="px-2 py-0.5 bg-gray-600 text-gray-400 text-xs rounded">Not Installed</span>';
+
+        return `
+            <div class="p-4 bg-gray-700 rounded-lg" id="upscaler-card-${key}">
+                <div class="flex justify-between items-start">
+                    <div>
+                        <span class="text-lg">${up.icon}</span>
+                        <span class="font-bold ml-1">${up.name}</span>
+                        <span class="ml-2">${statusBadge}</span>
+                    </div>
+                </div>
+                <p class="text-xs text-gray-400 mt-1">${up.description}</p>
+                <p class="text-xs text-gray-500">Best for: ${up.best_for}</p>
+                ${actionBtn}
+            </div>`;
+    }).join('');
+}
+
+async function startUpscalerDownload(key) {
+    const result = await apiRequest(`/upscalers/${key}/download`, { method: 'POST' });
+    if (!result) return;
+    showMessage(`⬇ Downloading ${key}…`, 'info');
+    // Poll for progress
+    if (_upscalerPollers[key]) clearInterval(_upscalerPollers[key]);
+    _upscalerPollers[key] = setInterval(async () => {
+        const state = await apiRequest(`/upscalers/${key}/download/status`);
+        if (!state) return;
+        // Re-render just this card by refreshing all upscalers
+        const info = await apiRequest('/upscalers');
+        if (info) renderUpscalerCards(info);
+        if (state.status === 'installed' || state.status === 'error') {
+            clearInterval(_upscalerPollers[key]);
+            delete _upscalerPollers[key];
+            if (state.status === 'installed') {
+                showMessage(`✓ ${key} installed successfully!`, 'success');
+            }
+        }
+    }, 1500);
+}
+
+async function checkUpscalerUpdates() {
+    showMessage('Checking for upscaler updates…', 'info');
+    const updates = await apiRequest('/upscalers/check-updates', { method: 'POST' });
+    if (!updates) return;
+    const updateable = Object.entries(updates).filter(([, v]) => v.update_available);
+    if (updateable.length === 0) {
+        showMessage('All upscalers are up to date ✓', 'success');
+    } else {
+        const names = updateable.map(([k, v]) => `${v.name} → ${v.latest_version}`).join(', ');
+        showMessage(`Updates available: ${names}`, 'info');
+    }
+}
+
+// ============================================================
+// WINDOWS REST HOURS (Schedule tab)
+// ============================================================
+
+async function loadWindowsActiveHours() {
+    const avail = document.getElementById('windowsHoursAvailable');
+    const info = document.getElementById('windowsHoursInfo');
+    const toggle = document.getElementById('useWindowsRestHours');
+    if (!avail) return;
+
+    try {
+        const data = await apiRequest('/schedule/windows-active-hours');
+        if (!data || !data.available) {
+            avail.textContent = '(not available on this OS)';
+            if (toggle) toggle.disabled = true;
+            return;
+        }
+        avail.textContent = `(detected: active ${data.active_start}:00–${data.active_end}:00)`;
+        if (info) {
+            info.textContent = `Encoding will run from ${data.rest_start_str} to ${data.rest_end_str} (outside active hours)`;
+            info.classList.remove('hidden');
+        }
+    } catch (e) {
+        avail.textContent = '(not available)';
+        if (toggle) toggle.disabled = true;
+    }
+}
+
+function toggleWindowsHours() {
+    const useWin = document.getElementById('useWindowsRestHours');
+    const manualDiv = document.getElementById('manualTimeWindow');
+    if (!useWin || !manualDiv) return;
+    if (useWin.checked) {
+        manualDiv.style.opacity = '0.4';
+        manualDiv.style.pointerEvents = 'none';
+    } else {
+        manualDiv.style.opacity = '1';
+        manualDiv.style.pointerEvents = '';
+    }
+}
+
+// Override saveSchedule to include new fields
+const _originalSaveSchedule = typeof saveSchedule === 'function' ? saveSchedule : null;
+async function saveSchedule() {
+    const useWinEl = document.getElementById('useWindowsRestHours');
+    const config = {
+        enabled: document.getElementById('scheduleEnabled').checked,
+        days_of_week: Array.from(selectedDays).sort().join(','),
+        start_time: document.getElementById('startTime').value,
+        end_time: document.getElementById('endTime').value,
+        timezone: 'local',
+        use_windows_rest_hours: useWinEl ? useWinEl.checked : false,
+        max_concurrent_jobs: 1,
+    };
+    const result = await apiRequest('/schedule', {
+        method: 'POST',
+        body: JSON.stringify(config)
+    });
+    if (result) {
+        const msgEl = document.getElementById('scheduleMessage');
+        if (msgEl) {
+            msgEl.textContent = '✓ Schedule saved successfully';
+            msgEl.className = 'mt-4 p-3 bg-green-900/50 border border-green-700 rounded text-green-300';
+            msgEl.classList.remove('hidden');
+            setTimeout(() => msgEl.classList.add('hidden'), 3000);
+        }
+        loadSchedule();
+    }
+}
+
+// Override loadSchedule to include Windows hours fields
+const _origLoadSchedule = window._loadScheduleOriginal || null;
+async function loadSchedule() {
+    const schedule = await apiRequest('/schedule');
+    if (!schedule) return;
+    const config = schedule.config || {};
+
+    const enabledEl = document.getElementById('scheduleEnabled');
+    if (enabledEl) enabledEl.checked = config.enabled;
+
+    if (typeof selectedDays !== 'undefined') {
+        selectedDays = new Set((config.days_of_week || '0,1,2,3,4,5,6').split(',').map(Number));
+        if (typeof updateDayButtons === 'function') updateDayButtons();
+    }
+
+    const startEl = document.getElementById('startTime');
+    const endEl = document.getElementById('endTime');
+    if (startEl) startEl.value = config.start_time || '22:00';
+    if (endEl) endEl.value = config.end_time || '06:00';
+
+    const useWinEl = document.getElementById('useWindowsRestHours');
+    if (useWinEl) {
+        useWinEl.checked = config.use_windows_rest_hours || false;
+        toggleWindowsHours();
+    }
+
+    // Status indicators
+    const statusEl = document.getElementById('scheduleStatus');
+    if (statusEl) {
+        statusEl.textContent = config.enabled ? '✓ Enabled' : '✗ Disabled';
+        statusEl.className = config.enabled ? 'ml-2 font-medium text-green-400' : 'ml-2 font-medium text-gray-400';
+    }
+    const withinEl = document.getElementById('withinWindow');
+    if (withinEl) {
+        withinEl.textContent = schedule.within_schedule ? '✓ Yes' : '✗ No';
+        withinEl.className = schedule.within_schedule ? 'ml-2 font-medium text-green-400' : 'ml-2 font-medium text-gray-400';
+    }
+    const overrideEl = document.getElementById('manualOverride');
+    if (overrideEl) {
+        overrideEl.textContent = schedule.manual_override ? '✓ Active' : '✗ Inactive';
+        overrideEl.className = schedule.manual_override ? 'ml-2 font-medium text-yellow-400' : 'ml-2 font-medium text-gray-400';
+    }
+
+    // Load Windows hours info if on this tab
+    loadWindowsActiveHours();
+}
+
+// ============================================================
+// SHOW MESSAGE HELPER (if not already defined)
+// ============================================================
+if (typeof showMessage !== 'function') {
+    function showMessage(msg, type = 'info') {
+        console.log(`[${type.toUpperCase()}] ${msg}`);
+    }
+}

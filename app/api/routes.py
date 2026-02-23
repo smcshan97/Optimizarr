@@ -894,3 +894,106 @@ async def disable_schedule(current_user: dict = Depends(get_current_admin_user))
         return MessageResponse(message="Schedule disabled")
     else:
         raise HTTPException(status_code=500, detail="Failed to disable schedule")
+
+
+# ============================================================
+# UPSCALER DOWNLOAD ENDPOINTS
+# ============================================================
+
+@router.post("/upscalers/{key}/download")
+async def start_upscaler_download(
+    key: str,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Start downloading an AI upscaler binary (admin only)."""
+    from app.upscaler import UPSCALERS, download_upscaler
+    if key not in UPSCALERS:
+        raise HTTPException(status_code=404, detail=f"Unknown upscaler: {key}")
+    state = download_upscaler(key)
+    return {"message": f"Download started for {UPSCALERS[key]['name']}", "state": state}
+
+
+@router.get("/upscalers/{key}/download/status")
+async def get_upscaler_download_status(
+    key: str,
+    current_user: dict = Depends(get_current_user)
+):
+    """Get download progress for an upscaler."""
+    from app.upscaler import UPSCALERS, get_download_status
+    if key not in UPSCALERS:
+        raise HTTPException(status_code=404, detail=f"Unknown upscaler: {key}")
+    return get_download_status(key)
+
+
+@router.post("/upscalers/check-updates")
+async def check_upscaler_updates(current_user: dict = Depends(get_current_user)):
+    """Check GitHub for newer versions of installed upscalers."""
+    from app.upscaler import check_for_updates
+    return check_for_updates()
+
+
+# ============================================================
+# QUEUE PRIORITIZATION
+# ============================================================
+
+@router.post("/queue/prioritize")
+async def prioritize_queue(
+    data: dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Re-prioritize pending queue items by a given criterion.
+    sort_by: 'file_size' | 'estimated_savings' | 'filename' | 'default'
+    order: 'desc' | 'asc'  (default: desc = largest first)
+    """
+    sort_by = data.get("sort_by", "default")
+    order = data.get("order", "desc")
+    reverse = (order == "desc")
+
+    items = db.get_queue_items(status="pending")
+    if not items:
+        return {"message": "No pending items to prioritize", "count": 0}
+
+    # Sort by chosen criterion
+    if sort_by == "file_size":
+        items.sort(key=lambda i: i.get("file_size_bytes", 0), reverse=reverse)
+    elif sort_by == "estimated_savings":
+        items.sort(key=lambda i: i.get("estimated_savings_bytes", 0), reverse=reverse)
+    elif sort_by == "filename":
+        items.sort(key=lambda i: Path(i.get("file_path", "")).name.lower(), reverse=reverse)
+    # default: leave current order but we still write priorities below
+
+    # Assign priority values: highest item gets priority = len(items)*10, etc.
+    # This preserves relative order in DB ORDER BY priority DESC
+    total = len(items)
+    for rank, item in enumerate(items):
+        new_priority = (total - rank) * 10   # 1st item → highest priority
+        db.update_queue_item(item["id"], priority=new_priority)
+
+    return {
+        "message": f"Prioritized {total} pending items by {sort_by} ({order})",
+        "count": total,
+        "sort_by": sort_by,
+        "order": order,
+    }
+
+
+# ============================================================
+# WINDOWS ACTIVE HOURS
+# ============================================================
+
+@router.get("/schedule/windows-active-hours")
+async def get_windows_active_hours(current_user: dict = Depends(get_current_user)):
+    """
+    Read Windows Active Hours from the registry (Windows only).
+    Returns the detected rest window suitable for scheduled encoding.
+    """
+    from app.scheduler import schedule_manager
+    hours = schedule_manager.get_windows_active_hours()
+    if hours is None:
+        return {
+            "available": False,
+            "reason": "Windows Active Hours not available on this OS or registry key not found"
+        }
+    return {"available": True, **hours}

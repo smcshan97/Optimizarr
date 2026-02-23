@@ -1,0 +1,863 @@
+From be2cb8a5e075642f528f9da6e1211052b2fadda7 Mon Sep 17 00:00:00 2001
+From: Optimizarr Dev <smcshan97@github.com>
+Date: Tue, 17 Feb 2026 04:03:05 +0000
+Subject: [PATCH] Phase 2: HandBrake Power - Audio, subtitles, filters, HW
+ acceleration
+
+Features:
+- Audio track management (5 strategies):
+  - preserve_all: Keep every audio track from source
+  - keep_primary: Single track, encode with selected codec
+  - stereo_mixdown: Downmix to stereo AAC 192kbps
+  - hd_plus_aac: Keep original HD audio + add AAC fallback track
+  - high_quality: Single 256kbps AAC for music content
+  HandBrake flags: --audio, --aencoder, --audio-fallback, --ab, --mixdown
+
+- Subtitle handling (5 strategies):
+  - preserve_all: Keep all subtitle tracks
+  - keep_english: Keep only English subs (--subtitle-lang-list eng)
+  - burn_in: Burn first subtitle into video (--subtitle-burned)
+  - foreign_scan: Auto-detect foreign parts (--subtitle scan --subtitle-forced)
+  - none: Strip all subtitles
+
+- Video filters (auto-detect):
+  - Comb detection + decomb (deinterlacing)
+  - NLMeans light denoise
+  - Auto crop (remove black bars)
+  - All controlled by single enable_filters toggle
+  HandBrake flags: --comb-detect, --decomb, --nlmeans=light, --crop-mode=auto
+
+- Hardware acceleration:
+  - Auto-detects NVENC (NVIDIA), QSV (Intel), VCE (AMD), VideoToolbox (Apple)
+  - Queries HandBrakeCLI --help for available encoders
+  - Auto-maps software encoder to GPU equivalent when enabled
+  - GET /api/hardware-detect endpoint with detailed capability report
+
+- Chapter marker preservation (--markers flag, on by default)
+
+Schema changes (backward compatible):
+- profiles: added audio_handling, subtitle_handling, enable_filters,
+  chapter_markers, hw_accel_enabled columns with safe defaults
+
+API additions:
+- GET /api/audio-strategies - all audio handling strategies
+- GET /api/subtitle-strategies - all subtitle handling strategies
+- GET /api/video-filters - available video filter definitions
+- GET /api/hardware-detect - detect GPU encoders
+
+UI additions:
+- Advanced section in profile form with audio/subtitle dropdowns
+- Auto Filters, Chapter Markers, HW Acceleration checkboxes
+- Dynamic help text for each strategy
+- Profile cards show badges (Filters, Chapters, GPU, 2-Pass)
+- HW detect button with live status feedback
+
+Total routes: 37 (was 33)
+---
+ app/api/models.py        | 118 +++++++++++++++++++
+ app/api/routes.py        |  35 ++++++
+ app/database.py          |  37 +++++-
+ app/encoder.py           | 249 +++++++++++++++++++++++++++++++++++++--
+ web/static/js/app.js     | 127 ++++++++++++++++++++
+ web/templates/index.html |  57 +++++++++
+ 6 files changed, 610 insertions(+), 13 deletions(-)
+
+diff --git a/app/api/models.py b/app/api/models.py
+index 943ee6b..49c1129 100644
+--- a/app/api/models.py
++++ b/app/api/models.py
+@@ -105,6 +105,11 @@ class ProfileCreate(BaseModel):
+     quality: int = Field(..., ge=0, le=51)
+     audio_codec: str = Field(..., pattern="^(aac|opus|ac3|flac|passthrough)$")
+     container: str = Field(default="mkv", pattern="^(mkv|mp4|webm)$")
++    audio_handling: str = Field(default="preserve_all", pattern="^(preserve_all|keep_primary|stereo_mixdown|hd_plus_aac|high_quality)$")
++    subtitle_handling: str = Field(default="none", pattern="^(preserve_all|keep_english|burn_in|foreign_scan|none)$")
++    enable_filters: bool = False
++    chapter_markers: bool = True
++    hw_accel_enabled: bool = False
+     preset: Optional[str] = None
+     two_pass: bool = False
+     custom_args: Optional[str] = None
+@@ -121,6 +126,11 @@ class ProfileResponse(BaseModel):
+     quality: int
+     audio_codec: str
+     container: Optional[str] = "mkv"
++    audio_handling: Optional[str] = "preserve_all"
++    subtitle_handling: Optional[str] = "none"
++    enable_filters: Optional[bool] = False
++    chapter_markers: Optional[bool] = True
++    hw_accel_enabled: Optional[bool] = False
+     preset: Optional[str]
+     two_pass: bool
+     custom_args: Optional[str]
+@@ -236,3 +246,111 @@ class MessageResponse(BaseModel):
+ class ErrorResponse(BaseModel):
+     detail: str
+     success: bool = False
++
++
++# ============================================================
++# AUDIO HANDLING STRATEGIES
++# ============================================================
++
++AUDIO_STRATEGIES = {
++    "preserve_all": {
++        "name": "Preserve All Tracks",
++        "description": "Keep every audio track from the source",
++        "icon": "🔊",
++        "best_for": "Movies, Archive"
++    },
++    "keep_primary": {
++        "name": "Keep Primary Only",
++        "description": "Keep only the first/default audio track",
++        "icon": "🔈",
++        "best_for": "TV Shows, Web Content"
++    },
++    "stereo_mixdown": {
++        "name": "Convert to Stereo",
++        "description": "Downmix all audio to stereo AAC",
++        "icon": "🎧",
++        "best_for": "Mobile, Web Content"
++    },
++    "hd_plus_aac": {
++        "name": "HD Audio + AAC Fallback",
++        "description": "Keep original HD audio + add AAC stereo track",
++        "icon": "🎭",
++        "best_for": "Home Theater, Movies"
++    },
++    "high_quality": {
++        "name": "High Quality Audio",
++        "description": "Single high-bitrate AAC track at 256kbps",
++        "icon": "🎵",
++        "best_for": "Music Videos"
++    }
++}
++
++
++# ============================================================
++# SUBTITLE HANDLING STRATEGIES
++# ============================================================
++
++SUBTITLE_STRATEGIES = {
++    "preserve_all": {
++        "name": "Preserve All Subtitles",
++        "description": "Keep every subtitle track from the source",
++        "icon": "💬",
++        "best_for": "Movies, Archive"
++    },
++    "keep_english": {
++        "name": "English Only",
++        "description": "Keep only English subtitle tracks",
++        "icon": "🇺🇸",
++        "best_for": "Personal Libraries"
++    },
++    "burn_in": {
++        "name": "Burn-in First Track",
++        "description": "Burn first subtitle permanently into video",
++        "icon": "🔥",
++        "best_for": "Anime (hardcoded subs)"
++    },
++    "foreign_scan": {
++        "name": "Foreign Audio Scan",
++        "description": "Auto-detect and subtitle only foreign language parts",
++        "icon": "🌍",
++        "best_for": "Movies with mixed languages"
++    },
++    "none": {
++        "name": "Remove All",
++        "description": "Strip all subtitle tracks",
++        "icon": "❌",
++        "best_for": "Space savings, Web Content"
++    }
++}
++
++
++# ============================================================
++# VIDEO FILTER DEFINITIONS
++# ============================================================
++
++VIDEO_FILTERS = {
++    "deinterlace": {
++        "name": "Deinterlace",
++        "description": "Remove interlacing from old video (DVD, TV recordings)",
++        "icon": "📡",
++        "auto_detect": True
++    },
++    "denoise": {
++        "name": "Denoise",
++        "description": "Reduce noise from low-light or compressed sources",
++        "icon": "✨",
++        "auto_detect": True
++    },
++    "deblock": {
++        "name": "Deblock",
++        "description": "Remove compression artifacts from MPEG2/MPEG4",
++        "icon": "🧱",
++        "auto_detect": True
++    },
++    "auto_crop": {
++        "name": "Auto Crop",
++        "description": "Remove black bars automatically",
++        "icon": "✂️",
++        "auto_detect": True
++    }
++}
+diff --git a/app/api/routes.py b/app/api/routes.py
+index 1f8ad45..d22aedc 100644
+--- a/app/api/routes.py
++++ b/app/api/routes.py
+@@ -90,6 +90,11 @@ async def update_profile(
+         quality=profile.quality,
+         audio_codec=profile.audio_codec,
+         container=profile.container,
++        audio_handling=profile.audio_handling,
++        subtitle_handling=profile.subtitle_handling,
++        enable_filters=profile.enable_filters,
++        chapter_markers=profile.chapter_markers,
++        hw_accel_enabled=profile.hw_accel_enabled,
+         preset=profile.preset,
+         two_pass=profile.two_pass,
+         custom_args=profile.custom_args,
+@@ -550,6 +555,36 @@ async def get_library_types():
+     return LIBRARY_TYPES
+ 
+ 
++# Audio/Subtitle Strategy Endpoints
++@router.get("/audio-strategies")
++async def get_audio_strategies():
++    """Get available audio handling strategies."""
++    from app.api.models import AUDIO_STRATEGIES
++    return AUDIO_STRATEGIES
++
++
++@router.get("/subtitle-strategies")
++async def get_subtitle_strategies():
++    """Get available subtitle handling strategies."""
++    from app.api.models import SUBTITLE_STRATEGIES
++    return SUBTITLE_STRATEGIES
++
++
++@router.get("/video-filters")
++async def get_video_filters():
++    """Get available video filter definitions."""
++    from app.api.models import VIDEO_FILTERS
++    return VIDEO_FILTERS
++
++
++# Hardware Acceleration Endpoint
++@router.get("/hardware-detect")
++async def detect_hardware(current_user: dict = Depends(get_current_user)):
++    """Detect available hardware encoders (NVENC, QSV, VCE, VideoToolbox)."""
++    from app.encoder import detect_hardware_acceleration
++    return detect_hardware_acceleration()
++
++
+ # Log Endpoints
+ @router.get("/logs")
+ async def get_logs(
+diff --git a/app/database.py b/app/database.py
+index 6b8d696..98cf319 100644
+--- a/app/database.py
++++ b/app/database.py
+@@ -55,6 +55,11 @@ class Database:
+                     quality INTEGER NOT NULL,
+                     audio_codec TEXT NOT NULL,
+                     container TEXT DEFAULT 'mkv',
++                    audio_handling TEXT DEFAULT 'preserve_all',
++                    subtitle_handling TEXT DEFAULT 'none',
++                    enable_filters BOOLEAN DEFAULT 0,
++                    chapter_markers BOOLEAN DEFAULT 1,
++                    hw_accel_enabled BOOLEAN DEFAULT 0,
+                     preset TEXT,
+                     two_pass BOOLEAN DEFAULT 0,
+                     custom_args TEXT,
+@@ -195,6 +200,23 @@ class Database:
+                 cursor.execute("ALTER TABLE profiles ADD COLUMN container TEXT DEFAULT 'mkv'")
+                 print("  ↳ Migrated: added 'container' column to profiles")
+             
++            # Phase 2 migrations
++            if 'audio_handling' not in profile_columns:
++                cursor.execute("ALTER TABLE profiles ADD COLUMN audio_handling TEXT DEFAULT 'preserve_all'")
++                print("  ↳ Migrated: added 'audio_handling' column to profiles")
++            if 'subtitle_handling' not in profile_columns:
++                cursor.execute("ALTER TABLE profiles ADD COLUMN subtitle_handling TEXT DEFAULT 'none'")
++                print("  ↳ Migrated: added 'subtitle_handling' column to profiles")
++            if 'enable_filters' not in profile_columns:
++                cursor.execute("ALTER TABLE profiles ADD COLUMN enable_filters BOOLEAN DEFAULT 0")
++                print("  ↳ Migrated: added 'enable_filters' column to profiles")
++            if 'chapter_markers' not in profile_columns:
++                cursor.execute("ALTER TABLE profiles ADD COLUMN chapter_markers BOOLEAN DEFAULT 1")
++                print("  ↳ Migrated: added 'chapter_markers' column to profiles")
++            if 'hw_accel_enabled' not in profile_columns:
++                cursor.execute("ALTER TABLE profiles ADD COLUMN hw_accel_enabled BOOLEAN DEFAULT 0")
++                print("  ↳ Migrated: added 'hw_accel_enabled' column to profiles")
++            
+             # Add 'library_type' column to scan_roots if missing
+             cursor.execute("PRAGMA table_info(scan_roots)")
+             root_columns = [col[1] for col in cursor.fetchall()]
+@@ -212,8 +234,9 @@ class Database:
+             cursor.execute("""
+                 INSERT INTO profiles 
+                 (name, resolution, framerate, codec, encoder, quality, audio_codec, 
+-                 container, preset, two_pass, custom_args, is_default)
+-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
++                 container, audio_handling, subtitle_handling, enable_filters,
++                 chapter_markers, hw_accel_enabled, preset, two_pass, custom_args, is_default)
++                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             """, (
+                 kwargs.get('name'),
+                 kwargs.get('resolution'),
+@@ -223,6 +246,11 @@ class Database:
+                 kwargs.get('quality'),
+                 kwargs.get('audio_codec'),
+                 kwargs.get('container', 'mkv'),
++                kwargs.get('audio_handling', 'preserve_all'),
++                kwargs.get('subtitle_handling', 'none'),
++                kwargs.get('enable_filters', False),
++                kwargs.get('chapter_markers', True),
++                kwargs.get('hw_accel_enabled', False),
+                 kwargs.get('preset'),
+                 kwargs.get('two_pass', False),
+                 kwargs.get('custom_args'),
+@@ -240,8 +268,9 @@ class Database:
+             
+             allowed_fields = [
+                 'name', 'resolution', 'framerate', 'codec', 'encoder',
+-                'quality', 'audio_codec', 'container', 'preset', 'two_pass',
+-                'custom_args', 'is_default'
++                'quality', 'audio_codec', 'container', 'audio_handling',
++                'subtitle_handling', 'enable_filters', 'chapter_markers',
++                'hw_accel_enabled', 'preset', 'two_pass', 'custom_args', 'is_default'
+             ]
+             
+             for field in allowed_fields:
+diff --git a/app/encoder.py b/app/encoder.py
+index cabaee9..af39ca3 100644
+--- a/app/encoder.py
++++ b/app/encoder.py
+@@ -69,9 +69,15 @@ class EncodingJob:
+         # Container format
+         cmd.extend(['--format', container_info['format']])
+         
+-        # Encoder selection
++        # ---- Encoder Selection (with HW accel support) ----
+         encoder = self.profile['encoder']
+         
++        # If hardware acceleration is enabled, try to use a GPU encoder
++        if self.profile.get('hw_accel_enabled'):
++            hw_encoder = self._get_hw_encoder(encoder)
++            if hw_encoder:
++                encoder = hw_encoder
++        
+         # Map encoder names to HandBrake encoder names
+         encoder_map = {
+             'svt_av1': 'svt_av1',
+@@ -81,7 +87,12 @@ class EncodingJob:
+             'nvenc_h264': 'nvenc_h264',
+             'nvenc_av1': 'nvenc_av1',
+             'qsv_h265': 'qsv_h265',
+-            'qsv_h264': 'qsv_h264'
++            'qsv_h264': 'qsv_h264',
++            'qsv_av1': 'qsv_av1',
++            'vce_h264': 'vce_h264',
++            'vce_h265': 'vce_h265',
++            'vt_h264': 'vt_h264',
++            'vt_h265': 'vt_h265',
+         }
+         
+         hb_encoder = encoder_map.get(encoder, encoder)
+@@ -106,24 +117,179 @@ class EncodingJob:
+             # Variable framerate (preserve source)
+             cmd.append('--vfr')
+         
+-        # Audio
+-        audio_codec = self.profile['audio_codec']
+-        if audio_codec == 'passthrough':
+-            cmd.extend(['--audio', '1', '--aencoder', 'copy'])
+-        else:
+-            cmd.extend(['--audio', '1', '--aencoder', audio_codec])
++        # ---- Audio Handling ----
++        audio_args = self._build_audio_args()
++        cmd.extend(audio_args)
++        
++        # ---- Subtitle Handling ----
++        subtitle_args = self._build_subtitle_args()
++        cmd.extend(subtitle_args)
++        
++        # ---- Video Filters ----
++        if self.profile.get('enable_filters'):
++            filter_args = self._build_filter_args()
++            cmd.extend(filter_args)
++        
++        # ---- Chapter Markers ----
++        if self.profile.get('chapter_markers', True):
++            cmd.append('--markers')
+         
+         # Two-pass encoding
+         if self.profile.get('two_pass'):
+             cmd.append('--two-pass')
+         
+-        # Custom arguments
++        # Custom arguments (always last so they can override)
+         if self.profile.get('custom_args'):
+             custom_args = self.profile['custom_args'].split()
+             cmd.extend(custom_args)
+         
+         return cmd
+     
++    def _build_audio_args(self) -> list:
++        """Build audio arguments based on audio handling strategy."""
++        strategy = self.profile.get('audio_handling', 'preserve_all')
++        audio_codec = self.profile.get('audio_codec', 'aac')
++        
++        # Map our codec names to HandBrake names
++        hb_audio_map = {
++            'aac': 'av_aac',
++            'opus': 'opus',
++            'ac3': 'ac3',
++            'flac': 'flac24',
++            'passthrough': 'copy',
++        }
++        hb_codec = hb_audio_map.get(audio_codec, 'av_aac')
++        
++        if strategy == 'preserve_all':
++            # Keep all audio tracks, passthrough originals
++            return [
++                '--audio', '1,2,3,4,5,6,7,8,9,10',
++                '--aencoder', 'copy',
++                '--audio-fallback', 'av_aac',
++            ]
++        
++        elif strategy == 'keep_primary':
++            # Keep only first track, encode with selected codec
++            if audio_codec == 'passthrough':
++                return ['--audio', '1', '--aencoder', 'copy']
++            return ['--audio', '1', '--aencoder', hb_codec]
++        
++        elif strategy == 'stereo_mixdown':
++            # Downmix to stereo AAC
++            return [
++                '--audio', '1',
++                '--aencoder', 'av_aac',
++                '--ab', '192',
++                '--mixdown', 'stereo',
++            ]
++        
++        elif strategy == 'hd_plus_aac':
++            # Keep original HD audio + add AAC stereo fallback
++            return [
++                '--audio', '1,1',
++                '--aencoder', 'copy,av_aac',
++                '--audio-fallback', 'av_aac',
++                '--ab', '0,192',
++                '--mixdown', ',stereo',
++            ]
++        
++        elif strategy == 'high_quality':
++            # Single high-quality AAC at 256kbps
++            return [
++                '--audio', '1',
++                '--aencoder', 'av_aac',
++                '--ab', '256',
++                '--mixdown', 'stereo',
++            ]
++        
++        else:
++            # Fallback: basic single track
++            if audio_codec == 'passthrough':
++                return ['--audio', '1', '--aencoder', 'copy']
++            return ['--audio', '1', '--aencoder', hb_codec]
++    
++    def _build_subtitle_args(self) -> list:
++        """Build subtitle arguments based on subtitle handling strategy."""
++        strategy = self.profile.get('subtitle_handling', 'none')
++        container = self.profile.get('container', 'mkv')
++        
++        if strategy == 'preserve_all':
++            args = ['--subtitle', '1,2,3,4,5,6,7,8,9,10']
++            if container == 'mp4':
++                # MP4 has limited subtitle support
++                args.append('--subtitle-default=none')
++            return args
++        
++        elif strategy == 'keep_english':
++            return [
++                '--subtitle-lang-list', 'eng',
++                '--all-subtitles',
++            ]
++        
++        elif strategy == 'burn_in':
++            return [
++                '--subtitle', '1',
++                '--subtitle-burned',
++            ]
++        
++        elif strategy == 'foreign_scan':
++            return [
++                '--subtitle', 'scan',
++                '--subtitle-forced',
++            ]
++        
++        elif strategy == 'none':
++            # No subtitle flags = no subtitles in output
++            return []
++        
++        return []
++    
++    def _build_filter_args(self) -> list:
++        """Build auto-detect video filter arguments."""
++        filters = []
++        
++        # Comb detection + decomb (for interlaced content)
++        filters.extend(['--comb-detect', '--decomb'])
++        
++        # Light denoise (safe for all content)
++        filters.append('--nlmeans=light')
++        
++        # Auto crop (remove black bars)
++        filters.append('--crop-mode=auto')
++        
++        return filters
++    
++    def _get_hw_encoder(self, current_encoder: str) -> Optional[str]:
++        """Try to map a software encoder to a hardware encoder."""
++        # Detect what's available
++        hw = detect_hardware_acceleration()
++        
++        # Map codec families to HW encoders
++        codec = self.profile.get('codec', 'av1')
++        
++        if hw.get('nvidia'):
++            hw_map = {'h264': 'nvenc_h264', 'h265': 'nvenc_h265', 'av1': 'nvenc_av1'}
++            if codec in hw_map:
++                return hw_map[codec]
++        
++        if hw.get('intel'):
++            hw_map = {'h264': 'qsv_h264', 'h265': 'qsv_h265', 'av1': 'qsv_av1'}
++            if codec in hw_map:
++                return hw_map[codec]
++        
++        if hw.get('amd'):
++            hw_map = {'h264': 'vce_h264', 'h265': 'vce_h265'}
++            if codec in hw_map:
++                return hw_map[codec]
++        
++        if hw.get('apple'):
++            hw_map = {'h264': 'vt_h264', 'h265': 'vt_h265'}
++            if codec in hw_map:
++                return hw_map[codec]
++        
++        # No HW encoder available, return None to keep software encoder
++        return None
++    
+     def _monitor_resources(self):
+         """Background thread to monitor resources and pause/resume if needed."""
+         print("  Starting resource monitoring thread...")
+@@ -478,5 +644,70 @@ class EncoderPool:
+             job.stop()
+ 
+ 
++def detect_hardware_acceleration() -> Dict:
++    """Detect available hardware encoders by querying HandBrakeCLI."""
++    available = {
++        "nvidia": False,
++        "amd": False,
++        "intel": False,
++        "apple": False,
++        "encoders": [],
++        "details": {}
++    }
++    
++    try:
++        result = subprocess.run(
++            ["HandBrakeCLI", "--help"],
++            capture_output=True,
++            text=True,
++            timeout=10
++        )
++        
++        output = result.stdout.lower() + result.stderr.lower()
++        
++        if "nvenc" in output:
++            available["nvidia"] = True
++            available["encoders"].append("NVENC (NVIDIA)")
++            available["details"]["nvidia"] = {
++                "h264": "nvenc_h264" in output,
++                "h265": "nvenc_h265" in output,
++                "av1": "nvenc_av1" in output,
++            }
++        
++        if "vce" in output:
++            available["amd"] = True
++            available["encoders"].append("VCE (AMD)")
++            available["details"]["amd"] = {
++                "h264": "vce_h264" in output,
++                "h265": "vce_h265" in output,
++            }
++        
++        if "qsv" in output:
++            available["intel"] = True
++            available["encoders"].append("QuickSync (Intel)")
++            available["details"]["intel"] = {
++                "h264": "qsv_h264" in output,
++                "h265": "qsv_h265" in output,
++                "av1": "qsv_av1" in output,
++            }
++        
++        if "videotoolbox" in output or "vt_h" in output:
++            available["apple"] = True
++            available["encoders"].append("VideoToolbox (Apple)")
++            available["details"]["apple"] = {
++                "h264": "vt_h264" in output,
++                "h265": "vt_h265" in output,
++            }
++        
++    except FileNotFoundError:
++        available["error"] = "HandBrakeCLI not found"
++    except subprocess.TimeoutExpired:
++        available["error"] = "HandBrakeCLI timed out"
++    except Exception as e:
++        available["error"] = str(e)
++    
++    return available
++
++
+ # Global encoder pool instance
+ encoder_pool = EncoderPool(max_concurrent=1)
+diff --git a/web/static/js/app.js b/web/static/js/app.js
+index f79cdd9..75ebb4a 100644
+--- a/web/static/js/app.js
++++ b/web/static/js/app.js
+@@ -561,9 +561,17 @@ async function loadProfiles() {
+                         <div><span class="text-gray-400">Quality:</span> CRF ${p.quality}</div>
+                         <div><span class="text-gray-400">Audio:</span> ${p.audio_codec.toUpperCase()}</div>
+                         <div><span class="text-gray-400">Container:</span> ${(p.container || 'mkv').toUpperCase()}</div>
++                        <div><span class="text-gray-400">Audio Mode:</span> ${getAudioLabel(p.audio_handling)}</div>
++                        ${p.subtitle_handling && p.subtitle_handling !== 'none' ? `<div><span class="text-gray-400">Subtitles:</span> ${getSubtitleLabel(p.subtitle_handling)}</div>` : ''}
+                         ${p.resolution ? `<div><span class="text-gray-400">Resolution:</span> ${p.resolution}</div>` : ''}
+                         ${p.preset ? `<div><span class="text-gray-400">Preset:</span> ${p.preset}</div>` : ''}
+                     </div>
++                    <div class="flex gap-2 mt-2">
++                        ${p.enable_filters ? '<span class="px-2 py-0.5 bg-purple-900 text-purple-300 text-xs rounded">Filters</span>' : ''}
++                        ${p.chapter_markers ? '<span class="px-2 py-0.5 bg-gray-600 text-gray-300 text-xs rounded">Chapters</span>' : ''}
++                        ${p.hw_accel_enabled ? '<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">GPU</span>' : ''}
++                        ${p.two_pass ? '<span class="px-2 py-0.5 bg-yellow-900 text-yellow-300 text-xs rounded">2-Pass</span>' : ''}
++                    </div>
+                 </div>
+                 <div class="flex gap-2">
+                     <button onclick="editProfile(${p.id})" 
+@@ -587,6 +595,14 @@ function showCreateProfileForm() {
+     document.getElementById('profileId').value = '';
+     document.getElementById('profileFramerateCustom').classList.add('hidden');
+     
++    // Reset Phase 2 fields to defaults
++    document.getElementById('profileAudioHandling').value = 'preserve_all';
++    document.getElementById('profileSubtitleHandling').value = 'none';
++    document.getElementById('profileEnableFilters').checked = false;
++    document.getElementById('profileChapterMarkers').checked = true;
++    document.getElementById('profileHwAccel').checked = false;
++    document.getElementById('profileContainer').value = 'mkv';
++    
+     // Initialize preset options for default encoder (svt_av1)
+     updatePresetOptions();
+     
+@@ -623,6 +639,11 @@ async function editProfile(id) {
+     document.getElementById('profileQuality').value = profile.quality;
+     document.getElementById('profilePreset').value = profile.preset || '';
+     document.getElementById('profileAudioCodec').value = profile.audio_codec;
++    document.getElementById('profileAudioHandling').value = profile.audio_handling || 'preserve_all';
++    document.getElementById('profileSubtitleHandling').value = profile.subtitle_handling || 'none';
++    document.getElementById('profileEnableFilters').checked = profile.enable_filters || false;
++    document.getElementById('profileChapterMarkers').checked = profile.chapter_markers !== false;
++    document.getElementById('profileHwAccel').checked = profile.hw_accel_enabled || false;
+     document.getElementById('profileTwoPass').checked = profile.two_pass;
+     document.getElementById('profileIsDefault').checked = profile.is_default;
+     document.getElementById('profileCustomArgs').value = profile.custom_args || '';
+@@ -657,6 +678,11 @@ document.getElementById('profileForm').addEventListener('submit', async (e) => {
+         preset: document.getElementById('profilePreset').value || null,
+         audio_codec: document.getElementById('profileAudioCodec').value,
+         container: document.getElementById('profileContainer').value,
++        audio_handling: document.getElementById('profileAudioHandling').value,
++        subtitle_handling: document.getElementById('profileSubtitleHandling').value,
++        enable_filters: document.getElementById('profileEnableFilters').checked,
++        chapter_markers: document.getElementById('profileChapterMarkers').checked,
++        hw_accel_enabled: document.getElementById('profileHwAccel').checked,
+         two_pass: document.getElementById('profileTwoPass').checked,
+         custom_args: document.getElementById('profileCustomArgs').value || null,
+         is_default: document.getElementById('profileIsDefault').checked
+@@ -1551,3 +1577,104 @@ function escapeHtml(text) {
+     return div.innerHTML;
+ }
+ 
++
++// ============================================================
++// PHASE 2: AUDIO/SUBTITLE/HW HELPERS
++// ============================================================
++
++const AUDIO_LABELS = {
++    'preserve_all': '🔊 Preserve All',
++    'keep_primary': '🔈 Primary Only',
++    'stereo_mixdown': '🎧 Stereo',
++    'hd_plus_aac': '🎭 HD+AAC',
++    'high_quality': '🎵 HQ Audio'
++};
++
++const SUBTITLE_LABELS = {
++    'preserve_all': '💬 All Subs',
++    'keep_english': '🇺🇸 English',
++    'burn_in': '🔥 Burn-in',
++    'foreign_scan': '🌍 Foreign Scan',
++    'none': '❌ None'
++};
++
++const AUDIO_HELP = {
++    'preserve_all': 'Keeps all original audio tracks',
++    'keep_primary': 'Only the first/default track — saves space',
++    'stereo_mixdown': 'Downmix to stereo AAC — mobile friendly',
++    'hd_plus_aac': 'Keeps HD surround + adds AAC for compatibility',
++    'high_quality': 'Single 256kbps AAC — best for music'
++};
++
++const SUBTITLE_HELP = {
++    'preserve_all': 'Keeps every subtitle track from source',
++    'keep_english': 'Only English subtitle tracks',
++    'burn_in': 'Burns first subtitle into video permanently',
++    'foreign_scan': 'Auto-subtitles foreign language parts only',
++    'none': 'No subtitles in output'
++};
++
++function getAudioLabel(strategy) {
++    return AUDIO_LABELS[strategy] || AUDIO_LABELS['preserve_all'];
++}
++
++function getSubtitleLabel(strategy) {
++    return SUBTITLE_LABELS[strategy] || SUBTITLE_LABELS['none'];
++}
++
++// Update help text when audio/subtitle strategy changes
++document.addEventListener('DOMContentLoaded', function() {
++    const audioSelect = document.getElementById('profileAudioHandling');
++    if (audioSelect) {
++        audioSelect.addEventListener('change', function() {
++            const help = document.getElementById('audioHandlingHelp');
++            if (help) help.textContent = AUDIO_HELP[this.value] || '';
++        });
++    }
++    
++    const subSelect = document.getElementById('profileSubtitleHandling');
++    if (subSelect) {
++        subSelect.addEventListener('change', function() {
++            const help = document.getElementById('subtitleHandlingHelp');
++            if (help) help.textContent = SUBTITLE_HELP[this.value] || '';
++        });
++    }
++});
++
++// Hardware acceleration check
++async function checkHwAccel() {
++    const checkbox = document.getElementById('profileHwAccel');
++    const helpEl = document.getElementById('hwAccelHelp');
++    
++    if (!checkbox.checked) {
++        helpEl.textContent = 'Use GPU encoding';
++        return;
++    }
++    
++    helpEl.textContent = 'Detecting...';
++    
++    try {
++        const hw = await apiRequest('/hardware-detect');
++        
++        if (!hw || hw.error) {
++            helpEl.textContent = '⚠️ ' + (hw?.error || 'Detection failed');
++            helpEl.className = 'text-xs text-red-400 mt-1';
++            checkbox.checked = false;
++            return;
++        }
++        
++        if (hw.encoders && hw.encoders.length > 0) {
++            helpEl.textContent = '✓ ' + hw.encoders.join(', ');
++            helpEl.className = 'text-xs text-green-400 mt-1';
++        } else {
++            helpEl.textContent = '⚠️ No hardware encoders found';
++            helpEl.className = 'text-xs text-yellow-400 mt-1';
++            checkbox.checked = false;
++        }
++    } catch (err) {
++        helpEl.textContent = '⚠️ Detection failed';
++        helpEl.className = 'text-xs text-red-400 mt-1';
++        checkbox.checked = false;
++    }
++}
++
+diff --git a/web/templates/index.html b/web/templates/index.html
+index f7a7952..acdab2d 100644
+--- a/web/templates/index.html
++++ b/web/templates/index.html
+@@ -487,6 +487,63 @@
+                         </label>
+                     </div>
+                     
++                    <!-- Phase 2: Audio/Subtitle/Filters Section -->
++                    <div class="border-t border-gray-600 pt-4 mt-2">
++                        <h4 class="text-sm font-bold text-blue-400 mb-3">🔧 Advanced: Audio, Subtitles & Filters</h4>
++                        
++                        <div class="grid grid-cols-2 gap-4">
++                            <div>
++                                <label class="block text-sm font-medium mb-2">Audio Handling</label>
++                                <select id="profileAudioHandling" 
++                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
++                                    <option value="preserve_all">🔊 Preserve All Tracks</option>
++                                    <option value="keep_primary">🔈 Keep Primary Only</option>
++                                    <option value="stereo_mixdown">🎧 Convert to Stereo</option>
++                                    <option value="hd_plus_aac">🎭 HD Audio + AAC Fallback</option>
++                                    <option value="high_quality">🎵 High Quality (256kbps)</option>
++                                </select>
++                                <p class="text-xs text-gray-400 mt-1" id="audioHandlingHelp">Keeps all original audio tracks</p>
++                            </div>
++                            
++                            <div>
++                                <label class="block text-sm font-medium mb-2">Subtitle Handling</label>
++                                <select id="profileSubtitleHandling" 
++                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
++                                    <option value="none">❌ Remove All</option>
++                                    <option value="preserve_all">💬 Preserve All Subtitles</option>
++                                    <option value="keep_english">🇺🇸 English Only</option>
++                                    <option value="burn_in">🔥 Burn-in First Track</option>
++                                    <option value="foreign_scan">🌍 Foreign Audio Scan</option>
++                                </select>
++                                <p class="text-xs text-gray-400 mt-1" id="subtitleHandlingHelp">No subtitles in output</p>
++                            </div>
++                        </div>
++                        
++                        <div class="grid grid-cols-3 gap-4 mt-3">
++                            <div>
++                                <label class="flex items-center">
++                                    <input type="checkbox" id="profileEnableFilters" class="mr-2">
++                                    <span class="text-sm">Auto Filters</span>
++                                </label>
++                                <p class="text-xs text-gray-400 mt-1">Deinterlace, denoise, crop</p>
++                            </div>
++                            <div>
++                                <label class="flex items-center">
++                                    <input type="checkbox" id="profileChapterMarkers" checked class="mr-2">
++                                    <span class="text-sm">Chapter Markers</span>
++                                </label>
++                                <p class="text-xs text-gray-400 mt-1">Preserve DVD/Blu-ray chapters</p>
++                            </div>
++                            <div>
++                                <label class="flex items-center">
++                                    <input type="checkbox" id="profileHwAccel" class="mr-2" onchange="checkHwAccel()">
++                                    <span class="text-sm">HW Acceleration</span>
++                                </label>
++                                <p class="text-xs text-gray-400 mt-1" id="hwAccelHelp">Use GPU encoding</p>
++                            </div>
++                        </div>
++                    </div>
++                    
+                     <div>
+                         <label class="flex items-center">
+                             <input type="checkbox" id="profileIsDefault" class="mr-2">
+-- 
+2.43.0
+

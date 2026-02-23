@@ -1,0 +1,1262 @@
+From f13e1a3018d2019fec25f5d7eae71e4d36a38899 Mon Sep 17 00:00:00 2001
+From: Optimizarr Dev <smcshan97@github.com>
+Date: Tue, 17 Feb 2026 03:33:47 +0000
+Subject: [PATCH] Phase 1: Foundation - Library types, container format,
+ logging, preset dropdown
+
+Features:
+- Library types on scan roots (Movie, TV, Anime, Home Video, 4K, Web, Archive, Music Video, Custom)
+  - Each type shows recommended codec/quality/container settings
+  - Dropdown with icons and descriptions in scan root modal
+- Container format selection in profiles (MKV, MP4, WebM)
+  - Encoder builds correct --format flag and output extension
+  - Handles container changes during finalization (different output ext)
+- Comprehensive logging system (app/logger.py)
+  - Rotating file handlers: optimizarr.log, handbrake.log, errors.log
+  - Structured statistics in statistics.jsonl
+  - Web UI log viewer with level filtering, line count, auto-scroll
+  - API endpoints: GET /logs, GET /logs/statistics, POST /logs/clear
+- Logs tab in web UI with color-coded log output
+
+Bug fixes:
+- Added missing update_profile() method in database.py (was called but didn't exist)
+- Fixed Dict import error in routes.py (imported from models.py which didn't export it)
+- Database migration: auto-adds container/library_type columns to existing DBs
+- Fixed _finalize_encoding to handle container format changes correctly
+- Added flac to audio codec options
+
+Schema changes (backward compatible):
+- profiles: added container column (default: mkv)
+- scan_roots: added library_type column (default: custom)
+
+API additions:
+- GET /api/library-types - all library type definitions with recommended settings
+- GET /api/logs - filtered log retrieval
+- GET /api/logs/statistics - structured encoding statistics
+- POST /api/logs/clear - admin-only log clearing
+---
+ app/api/models.py        | 122 +++++++++++++++++-
+ app/api/routes.py        |  49 ++++++-
+ app/database.py          |  65 ++++++++--
+ app/encoder.py           |  67 ++++++++--
+ app/logger.py            | 268 +++++++++++++++++++++++++++++++++++++++
+ app/main.py              |  10 +-
+ web/static/js/app.js     | 132 +++++++++++++++++++
+ web/templates/index.html | 101 +++++++++++++--
+ 8 files changed, 774 insertions(+), 40 deletions(-)
+ create mode 100644 app/logger.py
+
+diff --git a/app/api/models.py b/app/api/models.py
+index c79f4ed..943ee6b 100644
+--- a/app/api/models.py
++++ b/app/api/models.py
+@@ -6,7 +6,96 @@ from typing import Optional, List, Dict, Any
+ from datetime import datetime
+ 
+ 
+-# Profile Models
++# ============================================================
++# LIBRARY TYPE DEFINITIONS
++# ============================================================
++
++LIBRARY_TYPES = {
++    "movie": {
++        "name": "Movies",
++        "description": "Feature films, documentaries",
++        "icon": "🎬",
++        "recommended": {
++            "codec": "av1", "encoder": "svt_av1", "quality": 28,
++            "preset": "6", "container": "mkv", "audio_codec": "opus"
++        }
++    },
++    "tv_show": {
++        "name": "TV Shows",
++        "description": "Series, sitcoms, episodic content",
++        "icon": "📺",
++        "recommended": {
++            "codec": "av1", "encoder": "svt_av1", "quality": 32,
++            "preset": "10", "container": "mkv", "audio_codec": "aac"
++        }
++    },
++    "anime": {
++        "name": "Anime",
++        "description": "Japanese animation",
++        "icon": "🎌",
++        "recommended": {
++            "codec": "av1", "encoder": "svt_av1", "quality": 26,
++            "preset": "6", "container": "mkv", "audio_codec": "opus"
++        }
++    },
++    "home_video": {
++        "name": "Home Videos",
++        "description": "Personal recordings, family videos",
++        "icon": "🎥",
++        "recommended": {
++            "codec": "h265", "encoder": "x265", "quality": 20,
++            "preset": "medium", "container": "mp4", "audio_codec": "aac"
++        }
++    },
++    "4k_content": {
++        "name": "4K/UHD Content",
++        "description": "Ultra HD, 4K movies/shows",
++        "icon": "🖥️",
++        "recommended": {
++            "codec": "av1", "encoder": "svt_av1", "quality": 32,
++            "preset": "8", "container": "mkv", "audio_codec": "opus"
++        }
++    },
++    "web_content": {
++        "name": "Web/YouTube Downloads",
++        "description": "Downloaded web videos, streams",
++        "icon": "🌐",
++        "recommended": {
++            "codec": "av1", "encoder": "svt_av1", "quality": 35,
++            "preset": "12", "container": "mp4", "audio_codec": "aac"
++        }
++    },
++    "archive": {
++        "name": "Archive / Preservation",
++        "description": "Long-term storage, near-lossless",
++        "icon": "📦",
++        "recommended": {
++            "codec": "h265", "encoder": "x265", "quality": 18,
++            "preset": "slow", "container": "mkv", "audio_codec": "passthrough"
++        }
++    },
++    "music_video": {
++        "name": "Music Videos",
++        "description": "Music content, concerts",
++        "icon": "🎵",
++        "recommended": {
++            "codec": "av1", "encoder": "svt_av1", "quality": 26,
++            "preset": "6", "container": "mkv", "audio_codec": "opus"
++        }
++    },
++    "custom": {
++        "name": "Custom",
++        "description": "Manual configuration",
++        "icon": "⚙️",
++        "recommended": None
++    }
++}
++
++
++# ============================================================
++# PROFILE MODELS
++# ============================================================
++
+ class ProfileCreate(BaseModel):
+     name: str = Field(..., min_length=1, max_length=100)
+     resolution: Optional[str] = None
+@@ -14,7 +103,8 @@ class ProfileCreate(BaseModel):
+     codec: str = Field(..., pattern="^(av1|h265|h264|vp9)$")
+     encoder: str
+     quality: int = Field(..., ge=0, le=51)
+-    audio_codec: str = Field(..., pattern="^(aac|opus|ac3|passthrough)$")
++    audio_codec: str = Field(..., pattern="^(aac|opus|ac3|flac|passthrough)$")
++    container: str = Field(default="mkv", pattern="^(mkv|mp4|webm)$")
+     preset: Optional[str] = None
+     two_pass: bool = False
+     custom_args: Optional[str] = None
+@@ -30,6 +120,7 @@ class ProfileResponse(BaseModel):
+     encoder: str
+     quality: int
+     audio_codec: str
++    container: Optional[str] = "mkv"
+     preset: Optional[str]
+     two_pass: bool
+     custom_args: Optional[str]
+@@ -37,10 +128,14 @@ class ProfileResponse(BaseModel):
+     created_at: Optional[str]
+ 
+ 
+-# Scan Root Models
++# ============================================================
++# SCAN ROOT MODELS
++# ============================================================
++
+ class ScanRootCreate(BaseModel):
+     path: str = Field(..., min_length=1)
+     profile_id: int = Field(..., gt=0)
++    library_type: str = Field(default="custom")
+     enabled: bool = True
+     recursive: bool = True
+ 
+@@ -49,11 +144,15 @@ class ScanRootResponse(BaseModel):
+     id: int
+     path: str
+     profile_id: int
++    library_type: Optional[str] = "custom"
+     enabled: bool
+     recursive: bool
+ 
+ 
+-# Queue Models
++# ============================================================
++# QUEUE MODELS
++# ============================================================
++
+ class QueueItemResponse(BaseModel):
+     id: int
+     file_path: str
+@@ -82,7 +181,10 @@ class QueueUpdateRequest(BaseModel):
+     status: Optional[str] = None
+ 
+ 
+-# Authentication Models
++# ============================================================
++# AUTHENTICATION MODELS
++# ============================================================
++
+ class LoginRequest(BaseModel):
+     username: str = Field(..., min_length=1)
+     password: str = Field(..., min_length=1)
+@@ -108,7 +210,10 @@ class ChangePasswordRequest(BaseModel):
+     new_password: str = Field(..., min_length=6)
+ 
+ 
+-# Statistics Models
++# ============================================================
++# STATISTICS MODELS
++# ============================================================
++
+ class StatsResponse(BaseModel):
+     total_files_processed: int
+     total_space_saved_bytes: int
+@@ -119,7 +224,10 @@ class StatsResponse(BaseModel):
+     queue_failed: int
+ 
+ 
+-# Generic Response Models
++# ============================================================
++# GENERIC RESPONSE MODELS
++# ============================================================
++
+ class MessageResponse(BaseModel):
+     message: str
+     success: bool = True
+diff --git a/app/api/routes.py b/app/api/routes.py
+index 6b96e59..1f8ad45 100644
+--- a/app/api/routes.py
++++ b/app/api/routes.py
+@@ -11,7 +11,7 @@ from app.api.models import (
+     ProfileCreate, ProfileResponse,
+     ScanRootCreate, ScanRootResponse,
+     QueueItemResponse, QueueUpdateRequest,
+-    StatsResponse, MessageResponse, Dict
++    StatsResponse, MessageResponse
+ )
+ from app.api.dependencies import get_current_user, get_current_admin_user
+ from app.database import db
+@@ -89,6 +89,7 @@ async def update_profile(
+         encoder=profile.encoder,
+         quality=profile.quality,
+         audio_codec=profile.audio_codec,
++        container=profile.container,
+         preset=profile.preset,
+         two_pass=profile.two_pass,
+         custom_args=profile.custom_args,
+@@ -139,6 +140,7 @@ async def create_scan_root(
+         root_id = db.create_scan_root(
+             path=scan_root.path,
+             profile_id=scan_root.profile_id,
++            library_type=scan_root.library_type,
+             enabled=scan_root.enabled,
+             recursive=scan_root.recursive
+         )
+@@ -209,6 +211,7 @@ async def update_scan_root(
+         root_id=root_id,
+         path=root_data.path,
+         profile_id=root_data.profile_id,
++        library_type=root_data.library_type,
+         recursive=root_data.recursive,
+         enabled=root_data.enabled
+     )
+@@ -539,6 +542,50 @@ async def browse_directories(
+     }
+ 
+ 
++# Library Types Endpoint
++@router.get("/library-types")
++async def get_library_types():
++    """Get all available library types with recommended settings."""
++    from app.api.models import LIBRARY_TYPES
++    return LIBRARY_TYPES
++
++
++# Log Endpoints
++@router.get("/logs")
++async def get_logs(
++    log_type: str = Query("app", description="Log type: app, handbrake, errors"),
++    lines: int = Query(100, ge=1, le=1000, description="Number of lines to return"),
++    level: str = Query("ALL", description="Filter by log level"),
++    current_user: dict = Depends(get_current_user)
++):
++    """Get application logs."""
++    from app.logger import optimizarr_logger
++    return optimizarr_logger.get_logs(log_type=log_type, lines=lines, level=level)
++
++
++@router.get("/logs/statistics")
++async def get_log_statistics(
++    days: int = Query(7, ge=1, le=90, description="Number of days of statistics"),
++    current_user: dict = Depends(get_current_user)
++):
++    """Get structured encoding statistics from logs."""
++    from app.logger import optimizarr_logger
++    return optimizarr_logger.get_statistics(days=days)
++
++
++@router.post("/logs/clear")
++async def clear_logs(
++    log_type: str = Query("app", description="Log type to clear"),
++    current_user: dict = Depends(get_current_admin_user)
++):
++    """Clear a log file (admin only)."""
++    from app.logger import optimizarr_logger
++    success = optimizarr_logger.clear_log(log_type)
++    if success:
++        return MessageResponse(message=f"Cleared {log_type} logs")
++    return MessageResponse(message=f"Failed to clear {log_type} logs", success=False)
++
++
+ # Health check
+ @router.get("/health")
+ async def health_check():
+diff --git a/app/database.py b/app/database.py
+index a388e74..6b8d696 100644
+--- a/app/database.py
++++ b/app/database.py
+@@ -54,6 +54,7 @@ class Database:
+                     encoder TEXT NOT NULL,
+                     quality INTEGER NOT NULL,
+                     audio_codec TEXT NOT NULL,
++                    container TEXT DEFAULT 'mkv',
+                     preset TEXT,
+                     two_pass BOOLEAN DEFAULT 0,
+                     custom_args TEXT,
+@@ -68,6 +69,7 @@ class Database:
+                     id INTEGER PRIMARY KEY AUTOINCREMENT,
+                     path TEXT UNIQUE NOT NULL,
+                     profile_id INTEGER,
++                    library_type TEXT DEFAULT 'custom',
+                     enabled BOOLEAN DEFAULT 1,
+                     recursive BOOLEAN DEFAULT 1,
+                     FOREIGN KEY (profile_id) REFERENCES profiles(id)
+@@ -185,6 +187,21 @@ class Database:
+                     VALUES (0, '0,1,2,3,4,5,6', '22:00', '06:00')
+                 """)
+             
++            # ---- MIGRATIONS for existing databases ----
++            # Add 'container' column to profiles if missing
++            cursor.execute("PRAGMA table_info(profiles)")
++            profile_columns = [col[1] for col in cursor.fetchall()]
++            if 'container' not in profile_columns:
++                cursor.execute("ALTER TABLE profiles ADD COLUMN container TEXT DEFAULT 'mkv'")
++                print("  ↳ Migrated: added 'container' column to profiles")
++            
++            # Add 'library_type' column to scan_roots if missing
++            cursor.execute("PRAGMA table_info(scan_roots)")
++            root_columns = [col[1] for col in cursor.fetchall()]
++            if 'library_type' not in root_columns:
++                cursor.execute("ALTER TABLE scan_roots ADD COLUMN library_type TEXT DEFAULT 'custom'")
++                print("  ↳ Migrated: added 'library_type' column to scan_roots")
++            
+             print("✓ Database schema initialized")
+     
+     # Profile CRUD
+@@ -195,8 +212,8 @@ class Database:
+             cursor.execute("""
+                 INSERT INTO profiles 
+                 (name, resolution, framerate, codec, encoder, quality, audio_codec, 
+-                 preset, two_pass, custom_args, is_default)
+-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
++                 container, preset, two_pass, custom_args, is_default)
++                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             """, (
+                 kwargs.get('name'),
+                 kwargs.get('resolution'),
+@@ -205,6 +222,7 @@ class Database:
+                 kwargs.get('encoder'),
+                 kwargs.get('quality'),
+                 kwargs.get('audio_codec'),
++                kwargs.get('container', 'mkv'),
+                 kwargs.get('preset'),
+                 kwargs.get('two_pass', False),
+                 kwargs.get('custom_args'),
+@@ -212,6 +230,33 @@ class Database:
+             ))
+             return cursor.lastrowid
+     
++    def update_profile(self, profile_id: int, **kwargs) -> bool:
++        """Update an existing encoding profile."""
++        with self.get_connection() as conn:
++            cursor = conn.cursor()
++            
++            updates = []
++            values = []
++            
++            allowed_fields = [
++                'name', 'resolution', 'framerate', 'codec', 'encoder',
++                'quality', 'audio_codec', 'container', 'preset', 'two_pass',
++                'custom_args', 'is_default'
++            ]
++            
++            for field in allowed_fields:
++                if field in kwargs:
++                    updates.append(f"{field} = ?")
++                    values.append(kwargs[field])
++            
++            if not updates:
++                return False
++            
++            values.append(profile_id)
++            query = f"UPDATE profiles SET {', '.join(updates)} WHERE id = ?"
++            cursor.execute(query, values)
++            return cursor.rowcount > 0
++    
+     def get_profiles(self) -> List[Dict]:
+         """Get all encoding profiles."""
+         with self.get_connection() as conn:
+@@ -235,14 +280,15 @@ class Database:
+             return cursor.rowcount > 0
+     
+     # Scan Root CRUD
+-    def create_scan_root(self, path: str, profile_id: int, enabled: bool = True, recursive: bool = True) -> int:
++    def create_scan_root(self, path: str, profile_id: int, library_type: str = "custom",
++                        enabled: bool = True, recursive: bool = True) -> int:
+         """Create a new scan root."""
+         with self.get_connection() as conn:
+             cursor = conn.cursor()
+             cursor.execute("""
+-                INSERT INTO scan_roots (path, profile_id, enabled, recursive)
+-                VALUES (?, ?, ?, ?)
+-            """, (path, profile_id, enabled, recursive))
++                INSERT INTO scan_roots (path, profile_id, library_type, enabled, recursive)
++                VALUES (?, ?, ?, ?, ?)
++            """, (path, profile_id, library_type, enabled, recursive))
+             return cursor.lastrowid
+     
+     def get_scan_roots(self, enabled_only: bool = False) -> List[Dict]:
+@@ -263,8 +309,8 @@ class Database:
+             row = cursor.fetchone()
+             return dict(row) if row else None
+     
+-    def update_scan_root(self, root_id: int, path: str = None, profile_id: int = None, 
+-                        enabled: bool = None, recursive: bool = None) -> bool:
++    def update_scan_root(self, root_id: int, path: str = None, profile_id: int = None,
++                        library_type: str = None, enabled: bool = None, recursive: bool = None) -> bool:
+         """Update a scan root."""
+         with self.get_connection() as conn:
+             cursor = conn.cursor()
+@@ -279,6 +325,9 @@ class Database:
+             if profile_id is not None:
+                 updates.append("profile_id = ?")
+                 values.append(profile_id)
++            if library_type is not None:
++                updates.append("library_type = ?")
++                values.append(library_type)
+             if enabled is not None:
+                 updates.append("enabled = ?")
+                 values.append(enabled)
+diff --git a/app/encoder.py b/app/encoder.py
+index 94e307b..cabaee9 100644
+--- a/app/encoder.py
++++ b/app/encoder.py
+@@ -49,13 +49,26 @@ class EncodingJob:
+         """Build HandBrakeCLI command from profile settings."""
+         input_file = self.queue_item['file_path']
+         
+-        # Create output path (temporary location)
++        # Determine container format and output extension
++        container = self.profile.get('container', 'mkv')
++        container_map = {
++            'mkv': {'ext': '.mkv', 'format': 'av_mkv'},
++            'mp4': {'ext': '.mp4', 'format': 'av_mp4'},
++            'webm': {'ext': '.webm', 'format': 'av_webm'},
++        }
++        container_info = container_map.get(container, container_map['mkv'])
++        
++        # Create output path with correct extension
+         input_path = Path(input_file)
+-        output_file = str(input_path.parent / f"{input_path.stem}_optimized{input_path.suffix}")
++        output_ext = container_info['ext']
++        output_file = str(input_path.parent / f"{input_path.stem}_optimized{output_ext}")
+         
+         # Base command
+         cmd = ['HandBrakeCLI', '-i', input_file, '-o', output_file]
+         
++        # Container format
++        cmd.extend(['--format', container_info['format']])
++        
+         # Encoder selection
+         encoder = self.profile['encoder']
+         
+@@ -162,8 +175,9 @@ class EncodingJob:
+         # Build command
+         cmd = self.build_command()
+         
+-        print(f"Starting encoding: {Path(self.queue_item['file_path']).name}")
+-        print(f"Command: {' '.join(cmd)}")
++        # Log the encoding start
++        from app.logger import optimizarr_logger
++        optimizarr_logger.log_handbrake_start(self.queue_item['file_path'], cmd)
+         
+         try:
+             # Start HandBrakeCLI process
+@@ -215,11 +229,14 @@ class EncodingJob:
+             return_code = self.process.wait()
+             
+             if return_code == 0:
+-                print(f"\n✓ Encoding completed: {Path(self.queue_item['file_path']).name}")
+                 self._finalize_encoding()
+                 return True
+             else:
+-                print(f"\n✗ Encoding failed with code {return_code}")
++                from app.logger import optimizarr_logger
++                optimizarr_logger.log_handbrake_error(
++                    self.queue_item['file_path'],
++                    f"HandBrakeCLI exited with code {return_code}"
++                )
+                 db.update_queue_item(
+                     self.queue_item_id,
+                     status='failed',
+@@ -228,7 +245,8 @@ class EncodingJob:
+                 return False
+                 
+         except Exception as e:
+-            print(f"\n✗ Encoding error: {e}")
++            from app.logger import optimizarr_logger
++            optimizarr_logger.log_handbrake_error(self.queue_item['file_path'], str(e))
+             db.update_queue_item(
+                 self.queue_item_id,
+                 status='failed',
+@@ -238,8 +256,15 @@ class EncodingJob:
+     
+     def _finalize_encoding(self):
+         """Replace original file with encoded version and update database."""
++        from app.logger import optimizarr_logger
++        
+         input_path = Path(self.queue_item['file_path'])
+-        output_path = input_path.parent / f"{input_path.stem}_optimized{input_path.suffix}"
++        
++        # Determine output extension based on container format
++        container = self.profile.get('container', 'mkv')
++        ext_map = {'mkv': '.mkv', 'mp4': '.mp4', 'webm': '.webm'}
++        output_ext = ext_map.get(container, '.mkv')
++        output_path = input_path.parent / f"{input_path.stem}_optimized{output_ext}"
+         
+         if not output_path.exists():
+             db.update_queue_item(
+@@ -247,18 +272,25 @@ class EncodingJob:
+                 status='failed',
+                 error_message='Output file not found'
+             )
++            optimizarr_logger.log_handbrake_error(
++                str(input_path), 'Output file not found after encoding'
++            )
+             return
+         
+         # Get file sizes
+         original_size = input_path.stat().st_size
+         new_size = output_path.stat().st_size
+         savings = original_size - new_size
++        start_time = self.queue_item.get('started_at', '')
+         
+-        # Backup original (optional - for now just replace)
+         try:
+-            # Replace original with new file
++            # Remove original file
+             input_path.unlink()
+-            output_path.rename(input_path)
++            
++            # If container changed, the new file has a different extension
++            # Rename to same stem but with new extension
++            final_path = input_path.parent / f"{input_path.stem}{output_ext}"
++            output_path.rename(final_path)
+             
+             # Update queue item
+             db.update_queue_item(
+@@ -276,17 +308,24 @@ class EncodingJob:
+                     (file_path, profile_name, original_size_bytes, new_size_bytes, savings_bytes)
+                     VALUES (?, ?, ?, ?, ?)
+                 """, (
+-                    str(input_path),
++                    str(final_path),
+                     self.profile['name'],
+                     original_size,
+                     new_size,
+                     savings
+                 ))
+             
+-            print(f"  Saved {savings / (1024**2):.1f} MB ({(savings/original_size)*100:.1f}%)")
++            # Log completion
++            savings_pct = (savings / original_size * 100) if original_size > 0 else 0
++            optimizarr_logger.log_handbrake_complete(str(input_path), {
++                "original_size_mb": original_size / (1024**2),
++                "new_size_mb": new_size / (1024**2),
++                "savings_percent": savings_pct,
++                "duration_seconds": 0  # TODO: calculate from started_at
++            })
+             
+         except Exception as e:
+-            print(f"✗ Error finalizing: {e}")
++            optimizarr_logger.log_handbrake_error(str(input_path), str(e))
+             db.update_queue_item(
+                 self.queue_item_id,
+                 status='failed',
+diff --git a/app/logger.py b/app/logger.py
+new file mode 100644
+index 0000000..92a6988
+--- /dev/null
++++ b/app/logger.py
+@@ -0,0 +1,268 @@
++"""
++Comprehensive logging system for Optimizarr.
++Multiple log files with rotation, structured statistics, and web UI support.
++"""
++import logging
++import json
++import os
++from datetime import datetime, timedelta
++from pathlib import Path
++from logging.handlers import RotatingFileHandler
++from typing import Optional, List, Dict
++
++
++class OptimizarrLogger:
++    """Centralized logging for application, HandBrake, errors, and statistics."""
++    
++    def __init__(self, log_dir: str = "logs"):
++        self.log_dir = Path(log_dir)
++        self.log_dir.mkdir(parents=True, exist_ok=True)
++        
++        # Log file paths
++        self.log_files = {
++            "app": self.log_dir / "optimizarr.log",
++            "handbrake": self.log_dir / "handbrake.log",
++            "errors": self.log_dir / "errors.log",
++        }
++        self.stats_file = self.log_dir / "statistics.jsonl"
++        
++        # Create loggers
++        self.app = self._create_logger("optimizarr", self.log_files["app"], logging.INFO)
++        self.handbrake = self._create_logger("handbrake", self.log_files["handbrake"], logging.DEBUG)
++        self.errors = self._create_logger("errors", self.log_files["errors"], logging.ERROR)
++        
++        # Also add error handler to app logger so errors show in both
++        error_handler = RotatingFileHandler(
++            str(self.log_files["errors"]),
++            maxBytes=10 * 1024 * 1024,
++            backupCount=3
++        )
++        error_handler.setLevel(logging.ERROR)
++        error_handler.setFormatter(self._get_formatter())
++        self.app.addHandler(error_handler)
++    
++    def _get_formatter(self) -> logging.Formatter:
++        return logging.Formatter(
++            '[%(asctime)s] %(levelname)s [%(name)s] %(message)s',
++            datefmt='%Y-%m-%d %H:%M:%S'
++        )
++    
++    def _create_logger(self, name: str, log_file: Path, level: int) -> logging.Logger:
++        """Create a logger with rotating file handler and console output."""
++        logger = logging.getLogger(f"optimizarr.{name}")
++        logger.setLevel(level)
++        
++        # Prevent duplicate handlers on reload
++        if logger.handlers:
++            logger.handlers.clear()
++        
++        # Rotating file handler (10MB, keep 5 backups)
++        fh = RotatingFileHandler(
++            str(log_file),
++            maxBytes=10 * 1024 * 1024,
++            backupCount=5
++        )
++        fh.setLevel(level)
++        fh.setFormatter(self._get_formatter())
++        logger.addHandler(fh)
++        
++        # Console handler (INFO and above)
++        ch = logging.StreamHandler()
++        ch.setLevel(logging.INFO)
++        ch.setFormatter(self._get_formatter())
++        logger.addHandler(ch)
++        
++        return logger
++    
++    # ---- Application Events ----
++    
++    def log_startup(self, version: str, host: str, port: int):
++        self.app.info(f"Optimizarr v{version} starting on {host}:{port}")
++    
++    def log_shutdown(self):
++        self.app.info("Optimizarr shutting down")
++    
++    def log_scan_start(self, path: str, library_type: str = "custom"):
++        self.app.info(f"Scanning library: {path} (type: {library_type})")
++    
++    def log_scan_complete(self, path: str, files_found: int, duration_seconds: float = 0):
++        self.app.info(f"Scan complete: {path} — {files_found} files found ({duration_seconds:.1f}s)")
++        self._write_stat({
++            "event": "scan_complete",
++            "path": path,
++            "files_found": files_found,
++            "duration_seconds": round(duration_seconds, 1)
++        })
++    
++    def log_scan_error(self, path: str, error: str):
++        self.app.error(f"Scan failed: {path} — {error}")
++    
++    # ---- HandBrake Events ----
++    
++    def log_handbrake_start(self, file_path: str, command: List[str]):
++        filename = Path(file_path).name
++        cmd_str = ' '.join(command)
++        self.handbrake.info(f"Starting transcode: {filename}")
++        self.handbrake.debug(f"Command: {cmd_str}")
++    
++    def log_handbrake_progress(self, file_path: str, progress: float):
++        filename = Path(file_path).name
++        self.handbrake.debug(f"Progress: {filename} — {progress:.1f}%")
++    
++    def log_handbrake_complete(self, file_path: str, stats: Dict):
++        filename = Path(file_path).name
++        original_mb = stats.get("original_size_mb", 0)
++        new_mb = stats.get("new_size_mb", 0)
++        savings = stats.get("savings_percent", 0)
++        duration = stats.get("duration_seconds", 0)
++        
++        self.handbrake.info(
++            f"Completed: {filename} — "
++            f"{original_mb:.0f}MB → {new_mb:.0f}MB "
++            f"({savings:.1f}% saved, {duration:.0f}s)"
++        )
++        self.app.info(
++            f"Transcode complete: {filename} — "
++            f"{savings:.1f}% space saved"
++        )
++        
++        self._write_stat({
++            "event": "transcode_complete",
++            "file": filename,
++            "original_size_mb": round(original_mb, 1),
++            "new_size_mb": round(new_mb, 1),
++            "savings_percent": round(savings, 1),
++            "duration_seconds": round(duration, 1)
++        })
++    
++    def log_handbrake_error(self, file_path: str, error: str):
++        filename = Path(file_path).name
++        self.handbrake.error(f"Transcode failed: {filename} — {error}")
++        self.errors.error(f"Transcode failed: {filename} — {error}")
++        
++        self._write_stat({
++            "event": "transcode_error",
++            "file": filename,
++            "error": str(error)[:200]
++        })
++    
++    def log_handbrake_output(self, line: str):
++        """Log raw HandBrake stderr/stdout output."""
++        self.handbrake.debug(f"[HB] {line.strip()}")
++    
++    # ---- Queue Events ----
++    
++    def log_queue_add(self, file_path: str, profile_name: str):
++        filename = Path(file_path).name
++        self.app.info(f"Queued: {filename} (profile: {profile_name})")
++    
++    def log_queue_clear(self, count: int, status: Optional[str] = None):
++        if status:
++            self.app.info(f"Cleared {count} queue items (status: {status})")
++        else:
++            self.app.info(f"Cleared {count} queue items (all)")
++    
++    # ---- Statistics ----
++    
++    def _write_stat(self, data: Dict):
++        """Write a structured JSON stat line."""
++        data["timestamp"] = datetime.now().isoformat()
++        try:
++            with open(self.stats_file, "a") as f:
++                f.write(json.dumps(data) + "\n")
++        except Exception:
++            pass  # Don't let stats logging break anything
++    
++    # ---- Web UI API ----
++    
++    def get_logs(self, log_type: str = "app", lines: int = 100, level: str = "ALL") -> Dict:
++        """Read log entries for the web UI."""
++        log_file = self.log_files.get(log_type)
++        if not log_file or not log_file.exists():
++            return {"logs": [], "total": 0, "log_type": log_type}
++        
++        try:
++            with open(log_file, "r", encoding="utf-8", errors="replace") as f:
++                all_lines = f.readlines()
++            
++            # Filter by level
++            if level != "ALL":
++                all_lines = [l for l in all_lines if f"] {level} [" in l]
++            
++            # Return last N lines
++            recent = all_lines[-lines:]
++            
++            return {
++                "logs": [l.rstrip() for l in recent],
++                "total": len(all_lines),
++                "showing": len(recent),
++                "log_type": log_type
++            }
++        except Exception as e:
++            return {"logs": [], "total": 0, "error": str(e), "log_type": log_type}
++    
++    def get_statistics(self, days: int = 7) -> Dict:
++        """Read structured statistics for the web UI."""
++        if not self.stats_file.exists():
++            return {"statistics": [], "days": days}
++        
++        cutoff = datetime.now() - timedelta(days=days)
++        stats = []
++        
++        try:
++            with open(self.stats_file, "r") as f:
++                for line in f:
++                    line = line.strip()
++                    if not line:
++                        continue
++                    try:
++                        entry = json.loads(line)
++                        ts = datetime.fromisoformat(entry.get("timestamp", ""))
++                        if ts >= cutoff:
++                            stats.append(entry)
++                    except (json.JSONDecodeError, ValueError):
++                        continue
++        except Exception:
++            pass
++        
++        # Summary
++        total_transcodes = len([s for s in stats if s.get("event") == "transcode_complete"])
++        total_errors = len([s for s in stats if s.get("event") == "transcode_error"])
++        total_saved_mb = sum(
++            s.get("original_size_mb", 0) - s.get("new_size_mb", 0)
++            for s in stats if s.get("event") == "transcode_complete"
++        )
++        avg_savings = 0
++        if total_transcodes > 0:
++            avg_savings = sum(
++                s.get("savings_percent", 0) for s in stats 
++                if s.get("event") == "transcode_complete"
++            ) / total_transcodes
++        
++        return {
++            "statistics": stats,
++            "summary": {
++                "total_transcodes": total_transcodes,
++                "total_errors": total_errors,
++                "total_saved_mb": round(total_saved_mb, 1),
++                "avg_savings_percent": round(avg_savings, 1)
++            },
++            "days": days
++        }
++    
++    def clear_log(self, log_type: str) -> bool:
++        """Clear a log file."""
++        log_file = self.log_files.get(log_type)
++        if log_file and log_file.exists():
++            try:
++                with open(log_file, "w") as f:
++                    f.write("")
++                self.app.info(f"Log cleared: {log_type}")
++                return True
++            except Exception:
++                return False
++        return False
++
++
++# Global logger instance
++optimizarr_logger = OptimizarrLogger()
+diff --git a/app/main.py b/app/main.py
+index 5e55fda..f94daba 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -18,7 +18,7 @@ from app.scheduler import initialize_scheduler, shutdown_scheduler
+ app = FastAPI(
+     title="Optimizarr",
+     description="Automated Media Optimization System",
+-    version="1.0.0"
++    version="2.0.0"
+ )
+ 
+ # CORS middleware
+@@ -93,6 +93,8 @@ async def login_page():
+ @app.on_event("startup")
+ async def startup_event():
+     """Initialize application on startup."""
++    from app.logger import optimizarr_logger
++    
+     print("=" * 60)
+     print("Optimizarr - Automated Media Optimization System")
+     print("=" * 60)
+@@ -118,6 +120,7 @@ async def startup_event():
+             encoder="svt_av1",
+             quality=28,
+             audio_codec="opus",
++            container="mkv",
+             preset="6",
+             two_pass=False,
+             custom_args=None,
+@@ -128,6 +131,9 @@ async def startup_event():
+     # Initialize scheduler
+     initialize_scheduler()
+     
++    # Log startup
++    optimizarr_logger.log_startup("2.0.0", settings.host, settings.port)
++    
+     print("=" * 60)
+     print(f"Server starting on http://{settings.host}:{settings.port}")
+     print("=" * 60)
+@@ -136,6 +142,8 @@ async def startup_event():
+ @app.on_event("shutdown")
+ async def shutdown_event():
+     """Cleanup on shutdown."""
++    from app.logger import optimizarr_logger
++    optimizarr_logger.log_shutdown()
+     print("\nShutting down Optimizarr...")
+     shutdown_scheduler()
+ 
+diff --git a/web/static/js/app.js b/web/static/js/app.js
+index 1437523..f79cdd9 100644
+--- a/web/static/js/app.js
++++ b/web/static/js/app.js
+@@ -69,6 +69,7 @@ function switchTab(tabName) {
+     if (tabName === 'scanroots') loadScanRoots();
+     if (tabName === 'settings') loadSettings();
+     if (tabName === 'schedule') loadSchedule();
++    if (tabName === 'logs') loadLogs();
+ }
+ 
+ // Load statistics
+@@ -559,6 +560,7 @@ async function loadProfiles() {
+                         <div><span class="text-gray-400">Encoder:</span> ${p.encoder}</div>
+                         <div><span class="text-gray-400">Quality:</span> CRF ${p.quality}</div>
+                         <div><span class="text-gray-400">Audio:</span> ${p.audio_codec.toUpperCase()}</div>
++                        <div><span class="text-gray-400">Container:</span> ${(p.container || 'mkv').toUpperCase()}</div>
+                         ${p.resolution ? `<div><span class="text-gray-400">Resolution:</span> ${p.resolution}</div>` : ''}
+                         ${p.preset ? `<div><span class="text-gray-400">Preset:</span> ${p.preset}</div>` : ''}
+                     </div>
+@@ -603,6 +605,7 @@ async function editProfile(id) {
+     document.getElementById('profileCodec').value = profile.codec;
+     document.getElementById('profileEncoder').value = profile.encoder;
+     document.getElementById('profileResolution').value = profile.resolution || '';
++    document.getElementById('profileContainer').value = profile.container || 'mkv';
+     
+     // Handle framerate - check if it's a standard value
+     const standardFps = ['', '24', '30', '60'];
+@@ -653,6 +656,7 @@ document.getElementById('profileForm').addEventListener('submit', async (e) => {
+         quality: parseInt(document.getElementById('profileQuality').value),
+         preset: document.getElementById('profilePreset').value || null,
+         audio_codec: document.getElementById('profileAudioCodec').value,
++        container: document.getElementById('profileContainer').value,
+         two_pass: document.getElementById('profileTwoPass').checked,
+         custom_args: document.getElementById('profileCustomArgs').value || null,
+         is_default: document.getElementById('profileIsDefault').checked
+@@ -705,6 +709,7 @@ async function loadScanRoots() {
+                 <div class="flex-1">
+                     <h3 class="font-semibold text-lg">${r.path}</h3>
+                     <div class="flex gap-4 mt-2 text-sm text-gray-300">
++                        <div><span class="text-gray-400">Type:</span> ${getLibraryTypeLabel(r.library_type)}</div>
+                         <div><span class="text-gray-400">Profile:</span> ${r.profile_name || 'Unknown'}</div>
+                         <div><span class="text-gray-400">Recursive:</span> ${r.recursive ? 'Yes' : 'No'}</div>
+                         <div>
+@@ -740,6 +745,8 @@ async function showCreateScanRootForm() {
+     document.getElementById('scanRootId').value = '';
+     document.getElementById('scanRootRecursive').checked = true;
+     document.getElementById('scanRootEnabled').checked = true;
++    document.getElementById('scanRootLibraryType').value = 'custom';
++    document.getElementById('libraryTypeRecommendation').classList.add('hidden');
+     
+     // Load profiles for dropdown
+     const profiles = await apiRequest('/profiles');
+@@ -768,6 +775,7 @@ async function editScanRoot(id) {
+     document.getElementById('scanRootId').value = root.id;
+     document.getElementById('scanRootPath').value = root.path;
+     document.getElementById('scanRootProfile').value = root.profile_id;
++    document.getElementById('scanRootLibraryType').value = root.library_type || 'custom';
+     document.getElementById('scanRootRecursive').checked = root.recursive;
+     document.getElementById('scanRootEnabled').checked = root.enabled;
+     
+@@ -785,6 +793,7 @@ document.getElementById('scanRootForm').addEventListener('submit', async (e) =>
+     const data = {
+         path: document.getElementById('scanRootPath').value,
+         profile_id: parseInt(document.getElementById('scanRootProfile').value),
++        library_type: document.getElementById('scanRootLibraryType').value,
+         recursive: document.getElementById('scanRootRecursive').checked,
+         enabled: document.getElementById('scanRootEnabled').checked
+     };
+@@ -1419,3 +1428,126 @@ if (document.getElementById('autoRefreshQueue').checked) {
+     toggleAutoRefresh();
+ }
+ 
++
++// ============================================================
++// LIBRARY TYPE HELPERS
++// ============================================================
++
++const LIBRARY_TYPE_LABELS = {
++    'movie': '🎬 Movies',
++    'tv_show': '📺 TV Shows',
++    'anime': '🎌 Anime',
++    'home_video': '🎥 Home Videos',
++    '4k_content': '🖥️ 4K/UHD',
++    'web_content': '🌐 Web/YouTube',
++    'archive': '📦 Archive',
++    'music_video': '🎵 Music Videos',
++    'custom': '⚙️ Custom'
++};
++
++function getLibraryTypeLabel(type) {
++    return LIBRARY_TYPE_LABELS[type] || LIBRARY_TYPE_LABELS['custom'];
++}
++
++// Library type change handler — show recommended settings
++async function handleLibraryTypeChange() {
++    const type = document.getElementById('scanRootLibraryType').value;
++    const recBox = document.getElementById('libraryTypeRecommendation');
++    
++    if (type === 'custom') {
++        recBox.classList.add('hidden');
++        return;
++    }
++    
++    // Fetch library type definitions from API
++    try {
++        const types = await apiRequest('/library-types');
++        if (!types || !types[type] || !types[type].recommended) {
++            recBox.classList.add('hidden');
++            return;
++        }
++        
++        const rec = types[type].recommended;
++        recBox.innerHTML = `
++            <div class="text-blue-300 font-medium mb-1">💡 Recommended Settings for ${types[type].name}:</div>
++            <div class="grid grid-cols-3 gap-2 text-xs text-gray-300">
++                <span>Codec: <strong>${rec.codec.toUpperCase()}</strong></span>
++                <span>Encoder: <strong>${rec.encoder}</strong></span>
++                <span>Quality: <strong>CRF ${rec.quality}</strong></span>
++                <span>Preset: <strong>${rec.preset}</strong></span>
++                <span>Container: <strong>${rec.container.toUpperCase()}</strong></span>
++                <span>Audio: <strong>${rec.audio_codec.toUpperCase()}</strong></span>
++            </div>
++            <p class="text-xs text-gray-400 mt-1">Tip: Create a matching profile with these settings for best results.</p>
++        `;
++        recBox.classList.remove('hidden');
++    } catch (err) {
++        recBox.classList.add('hidden');
++    }
++}
++
++
++// ============================================================
++// LOGS TAB
++// ============================================================
++
++async function loadLogs() {
++    const logType = document.getElementById('logType').value;
++    const logLevel = document.getElementById('logLevel').value;
++    const logLines = document.getElementById('logLines').value;
++    const output = document.getElementById('logOutput');
++    const stats = document.getElementById('logStats');
++    
++    output.innerHTML = '<p class="text-gray-500">Loading...</p>';
++    
++    try {
++        const data = await apiRequest(`/logs?log_type=${logType}&lines=${logLines}&level=${logLevel}`);
++        
++        if (!data || !data.logs || data.logs.length === 0) {
++            output.innerHTML = '<p class="text-gray-500">No log entries found.</p>';
++            stats.textContent = `${logType} log — 0 entries`;
++            return;
++        }
++        
++        stats.textContent = `Showing ${data.showing} of ${data.total} entries (${logType} log)`;
++        
++        // Color-code log lines
++        const coloredLines = data.logs.map(line => {
++            if (line.includes('] ERROR [')) {
++                return `<div class="text-red-400">${escapeHtml(line)}</div>`;
++            } else if (line.includes('] WARNING [')) {
++                return `<div class="text-yellow-400">${escapeHtml(line)}</div>`;
++            } else if (line.includes('] DEBUG [')) {
++                return `<div class="text-gray-500">${escapeHtml(line)}</div>`;
++            } else {
++                return `<div class="text-gray-300">${escapeHtml(line)}</div>`;
++            }
++        });
++        
++        output.innerHTML = coloredLines.join('');
++        
++        // Auto-scroll to bottom
++        output.scrollTop = output.scrollHeight;
++        
++    } catch (err) {
++        output.innerHTML = `<p class="text-red-400">Error loading logs: ${err.message}</p>`;
++    }
++}
++
++async function clearLogs() {
++    const logType = document.getElementById('logType').value;
++    if (!confirm(`Clear all ${logType} logs? This cannot be undone.`)) return;
++    
++    const result = await apiRequest(`/logs/clear?log_type=${logType}`, { method: 'POST' });
++    if (result) {
++        showMessage(`${logType} logs cleared`, 'success');
++        loadLogs();
++    }
++}
++
++function escapeHtml(text) {
++    const div = document.createElement('div');
++    div.textContent = text;
++    return div.innerHTML;
++}
++
+diff --git a/web/templates/index.html b/web/templates/index.html
+index ac358c6..f7a7952 100644
+--- a/web/templates/index.html
++++ b/web/templates/index.html
+@@ -92,6 +92,7 @@
+                     <button onclick="switchTab('profiles')" id="tab-profiles" class="tab-button">Profiles</button>
+                     <button onclick="switchTab('scanroots')" id="tab-scanroots" class="tab-button">Scan Roots</button>
+                     <button onclick="switchTab('schedule')" id="tab-schedule" class="tab-button">Schedule</button>
++                    <button onclick="switchTab('logs')" id="tab-logs" class="tab-button">Logs</button>
+                 </nav>
+             </div>
+         </div>
+@@ -454,15 +455,29 @@
+                         </div>
+                     </div>
+                     
+-                    <div>
+-                        <label class="block text-sm font-medium mb-2">Audio Codec *</label>
+-                        <select id="profileAudioCodec" required 
+-                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+-                            <option value="aac">AAC</option>
+-                            <option value="opus">Opus</option>
+-                            <option value="ac3">AC3</option>
+-                            <option value="passthrough">Passthrough (copy)</option>
+-                        </select>
++                    <div class="grid grid-cols-2 gap-4">
++                        <div>
++                            <label class="block text-sm font-medium mb-2">Audio Codec *</label>
++                            <select id="profileAudioCodec" required 
++                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
++                                <option value="aac">AAC</option>
++                                <option value="opus">Opus</option>
++                                <option value="ac3">AC3</option>
++                                <option value="flac">FLAC (Lossless)</option>
++                                <option value="passthrough">Passthrough (copy)</option>
++                            </select>
++                        </div>
++                        
++                        <div>
++                            <label class="block text-sm font-medium mb-2">Container Format *</label>
++                            <select id="profileContainer" required 
++                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
++                                <option value="mkv" selected>MKV (recommended)</option>
++                                <option value="mp4">MP4 (max compatibility)</option>
++                                <option value="webm">WebM (web streaming)</option>
++                            </select>
++                            <p class="text-xs text-gray-400 mt-1">MKV supports all codecs/subs; MP4 for Apple/mobile</p>
++                        </div>
+                     </div>
+                     
+                     <div>
+@@ -525,6 +540,25 @@
+                         <p class="text-xs text-gray-400 mt-1">Absolute path to scan for video files</p>
+                     </div>
+                     
++                    <div>
++                        <label class="block text-sm font-medium mb-2">Library Type</label>
++                        <select id="scanRootLibraryType" onchange="handleLibraryTypeChange()"
++                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
++                            <option value="custom">⚙️ Custom — Manual configuration</option>
++                            <option value="movie">🎬 Movies — Feature films, documentaries</option>
++                            <option value="tv_show">📺 TV Shows — Series, sitcoms, episodic</option>
++                            <option value="anime">🎌 Anime — Japanese animation</option>
++                            <option value="home_video">🎥 Home Videos — Personal recordings</option>
++                            <option value="4k_content">🖥️ 4K/UHD — Ultra HD content</option>
++                            <option value="web_content">🌐 Web/YouTube — Downloaded web videos</option>
++                            <option value="archive">📦 Archive — Long-term preservation</option>
++                            <option value="music_video">🎵 Music Videos — Concerts, MVs</option>
++                        </select>
++                        <p class="text-xs text-gray-400 mt-1">Selects optimized encoding settings for this content type</p>
++                        <div id="libraryTypeRecommendation" class="hidden mt-2 p-3 bg-gray-600 rounded text-sm">
++                        </div>
++                    </div>
++                    
+                     <div>
+                         <label class="block text-sm font-medium mb-2">Encoding Profile *</label>
+                         <select id="scanRootProfile" required 
+@@ -674,6 +708,55 @@
+                 </div>
+             </div>
+         </div>
++
++        <!-- Logs Tab -->
++        <div id="content-logs" class="tab-content hidden">
++            <div class="bg-gray-800 rounded-lg p-6">
++                <div class="flex justify-between items-center mb-6">
++                    <h2 class="text-xl font-bold">System Logs</h2>
++                    <div class="flex gap-3">
++                        <select id="logType" onchange="loadLogs()" 
++                            class="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
++                            <option value="app">Application</option>
++                            <option value="handbrake">HandBrake</option>
++                            <option value="errors">Errors</option>
++                        </select>
++                        <select id="logLevel" onchange="loadLogs()" 
++                            class="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
++                            <option value="ALL">All Levels</option>
++                            <option value="DEBUG">DEBUG</option>
++                            <option value="INFO">INFO</option>
++                            <option value="WARNING">WARNING</option>
++                            <option value="ERROR">ERROR</option>
++                        </select>
++                        <select id="logLines" onchange="loadLogs()" 
++                            class="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
++                            <option value="50">Last 50</option>
++                            <option value="100" selected>Last 100</option>
++                            <option value="250">Last 250</option>
++                            <option value="500">Last 500</option>
++                        </select>
++                        <button onclick="loadLogs()" 
++                            class="bg-blue-600 hover:bg-blue-700 px-3 py-2 rounded text-sm">
++                            🔄 Refresh
++                        </button>
++                        <button onclick="clearLogs()" 
++                            class="bg-red-600 hover:bg-red-700 px-3 py-2 rounded text-sm">
++                            🗑️ Clear
++                        </button>
++                    </div>
++                </div>
++                
++                <!-- Log Stats -->
++                <div id="logStats" class="mb-4 text-xs text-gray-400"></div>
++                
++                <!-- Log Output -->
++                <div id="logOutput" 
++                    class="bg-gray-900 rounded-lg p-4 font-mono text-xs leading-relaxed overflow-x-auto max-h-[600px] overflow-y-auto">
++                    <p class="text-gray-500">Select a log type and click Refresh...</p>
++                </div>
++            </div>
++        </div>
+     </div>
+ 
+     <script src="/static/js/app.js"></script>
+-- 
+2.43.0
+

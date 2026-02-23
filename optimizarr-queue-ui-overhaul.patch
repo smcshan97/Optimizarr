@@ -1,0 +1,866 @@
+From 5e2f0204bfc0fb370b248795313d0d575939e1aa Mon Sep 17 00:00:00 2001
+From: Optimizarr Dev <smcshan97@github.com>
+Date: Tue, 17 Feb 2026 14:08:20 +0000
+Subject: [PATCH] Queue UI overhaul: select all, original data, sortable
+ columns, progress bars
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Rewrote the entire queue table with all missing features restored:
+
+- Select All: checkbox in header, per-row checkboxes, bulk actions bar
+  (Delete Selected, Clear Completed, Deselect All)
+- Original file data: Codec column with color coding (H264=yellow,
+  H265=blue, AV1=green, VP9=purple, MPEG2=red), Resolution column
+  with FPS, full file details in hover tooltip
+- Projected savings: per-item savings with percentage, summary bar
+  showing total queue size and total projected savings
+- Sortable columns: every column header is clickable (File, Codec,
+  Resolution, Size, Savings, Status, Progress, Priority) with
+  ascending/descending toggle and ▲/▼/⇅ indicators
+- Progress bars on ALL items: completed=green 100%, processing=blue
+  animated, failed=red with error tooltip, pending=gray 0%, paused=
+  orange — all with percentage number next to the bar
+
+Bug fixes:
+- Removed duplicate loadQueue function (was defined twice)
+- Removed stale loadScanRoots, deleteProfile, deleteScanRoot,
+  showCreateProfileForm, showCreateScanRootForm stubs that were
+  shadowed by newer complete implementations
+- Removed duplicate formatBytes (consolidated to formatSize)
+- Fixed bulkClearCompleted to use POST (matching API endpoint)
+- Fixed startEncoding/stopEncoding to use showMessage() instead of
+  alert()
+
+Code cleanup: 78 unique functions, 0 duplicates, 2,151 lines
+---
+ web/static/js/app.js     | 684 +++++++++++++++++++++------------------
+ web/templates/index.html |  16 +-
+ 2 files changed, 388 insertions(+), 312 deletions(-)
+
+diff --git a/web/static/js/app.js b/web/static/js/app.js
+index bc9afa1..63d6870 100644
+--- a/web/static/js/app.js
++++ b/web/static/js/app.js
+@@ -159,206 +159,405 @@ async function loadResources() {
+     }
+ }
+ 
+-// Load queue
++// ============================================================
++// QUEUE SYSTEM — Select All, Sorting, Original Data, Progress
++// ============================================================
++
++// Queue state
++let allQueueItems = [];
++let selectedQueueIds = new Set();
++let queueSortField = 'created_at';
++let queueSortDir = 'desc'; // 'asc' or 'desc'
++
++// Load queue from API → store → filter → display
+ async function loadQueue() {
+     const items = await apiRequest('/queue');
++    if (items) {
++        allQueueItems = items;
++        filterQueue();
++    }
++}
++
++// Filter queue by search and status, then sort and display
++function filterQueue() {
++    const searchTerm = (document.getElementById('queueSearch')?.value || '').toLowerCase();
++    const statusFilter = document.getElementById('queueStatusFilter')?.value || '';
+     
+-    if (!items || items.length === 0) {
+-        document.getElementById('queueTable').innerHTML = '<p class="text-gray-400">No items in queue</p>';
+-        return;
++    let filtered = allQueueItems;
++    
++    if (searchTerm) {
++        filtered = filtered.filter(item => item.file_path.toLowerCase().includes(searchTerm));
++    }
++    if (statusFilter) {
++        filtered = filtered.filter(item => item.status === statusFilter);
+     }
+     
+-    let html = `
+-        <table class="w-full">
+-            <thead>
+-                <tr class="text-left border-b border-gray-700">
+-                    <th class="pb-3">File</th>
+-                    <th class="pb-3">Status</th>
+-                    <th class="pb-3">Progress</th>
+-                    <th class="pb-3">Size</th>
+-                    <th class="pb-3">Savings</th>
+-                    <th class="pb-3">Actions</th>
+-                </tr>
+-            </thead>
+-            <tbody>
+-    `;
++    // Apply sort
++    filtered = sortQueueItems(filtered, queueSortField, queueSortDir);
+     
+-    items.forEach(item => {
+-        const fileName = item.file_path.split('/').pop();
+-        const statusColor = {
+-            'pending': 'text-yellow-400',
+-            'processing': 'text-blue-400',
+-            'completed': 'text-green-400',
+-            'failed': 'text-red-400',
+-            'paused': 'text-orange-400'
+-        }[item.status] || 'text-gray-400';
++    displayQueueItems(filtered);
++}
++
++// Sort queue items by any field
++function sortQueueItems(items, field, dir) {
++    return [...items].sort((a, b) => {
++        let valA, valB;
+         
+-        const sizeMB = (item.file_size_bytes / (1024 * 1024)).toFixed(1);
+-        const savingsMB = (item.estimated_savings_bytes / (1024 * 1024)).toFixed(1);
++        // Extract sortable values based on field
++        switch (field) {
++            case 'file':
++                valA = a.file_path.split(/[/\\]/).pop().toLowerCase();
++                valB = b.file_path.split(/[/\\]/).pop().toLowerCase();
++                break;
++            case 'status':
++                const statusOrder = { processing: 0, paused: 1, pending: 2, failed: 3, completed: 4 };
++                valA = statusOrder[a.status] ?? 5;
++                valB = statusOrder[b.status] ?? 5;
++                break;
++            case 'progress':
++                valA = a.progress || 0;
++                valB = b.progress || 0;
++                break;
++            case 'size':
++                valA = a.file_size_bytes || 0;
++                valB = b.file_size_bytes || 0;
++                break;
++            case 'savings':
++                valA = a.estimated_savings_bytes || 0;
++                valB = b.estimated_savings_bytes || 0;
++                break;
++            case 'codec':
++                valA = getSpec(a, 'codec');
++                valB = getSpec(b, 'codec');
++                break;
++            case 'resolution':
++                valA = getSpec(a, 'resolution');
++                valB = getSpec(b, 'resolution');
++                break;
++            case 'priority':
++                valA = a.priority || 50;
++                valB = b.priority || 50;
++                break;
++            default: // created_at
++                valA = a.created_at || '';
++                valB = b.created_at || '';
++                break;
++        }
+         
+-        html += `
+-            <tr class="border-b border-gray-700">
+-                <td class="py-3 text-sm">${fileName}</td>
+-                <td class="py-3"><span class="${statusColor}">${item.status}</span></td>
+-                <td class="py-3">
+-                    <div class="w-full bg-gray-700 rounded-full h-2">
+-                        <div class="bg-blue-600 h-2 rounded-full" style="width: ${item.progress}%"></div>
+-                    </div>
+-                    <span class="text-xs text-gray-400">${item.progress.toFixed(1)}%</span>
+-                </td>
+-                <td class="py-3 text-sm">${sizeMB} MB</td>
+-                <td class="py-3 text-sm text-green-400">-${savingsMB} MB</td>
+-                <td class="py-3">
+-                    <button onclick="deleteQueueItem(${item.id})" class="text-red-400 hover:text-red-300 text-sm">
+-                        Delete
+-                    </button>
+-                </td>
+-            </tr>
+-        `;
++        // Compare
++        if (typeof valA === 'string') {
++            const cmp = valA.localeCompare(valB);
++            return dir === 'asc' ? cmp : -cmp;
++        }
++        return dir === 'asc' ? (valA - valB) : (valB - valA);
+     });
+-    
+-    html += '</tbody></table>';
+-    document.getElementById('queueTable').innerHTML = html;
+ }
+ 
+-// Load profiles
+-async function loadProfiles() {
+-    const profiles = await apiRequest('/profiles');
+-    
+-    if (!profiles || profiles.length === 0) {
+-        document.getElementById('profilesList').innerHTML = '<p class="text-gray-400">No profiles found</p>';
+-        return;
++// Toggle sort on column header click
++function toggleSort(field) {
++    if (queueSortField === field) {
++        queueSortDir = queueSortDir === 'asc' ? 'desc' : 'asc';
++    } else {
++        queueSortField = field;
++        queueSortDir = 'asc';
+     }
+-    
+-    let html = '<div class="grid gap-4">';
+-    
+-    profiles.forEach(profile => {
+-        html += `
+-            <div class="bg-gray-700 p-4 rounded">
+-                <div class="flex justify-between items-start">
+-                    <div>
+-                        <h3 class="font-bold text-lg">${profile.name}</h3>
+-                        <div class="mt-2 space-y-1 text-sm text-gray-300">
+-                            <p><span class="text-gray-400">Codec:</span> ${profile.codec} (${profile.encoder})</p>
+-                            <p><span class="text-gray-400">Quality:</span> CRF ${profile.quality}</p>
+-                            <p><span class="text-gray-400">Resolution:</span> ${profile.resolution || 'Source'}</p>
+-                            <p><span class="text-gray-400">Audio:</span> ${profile.audio_codec}</p>
+-                        </div>
+-                    </div>
+-                    <button onclick="deleteProfile(${profile.id})" class="text-red-400 hover:text-red-300">
+-                        Delete
+-                    </button>
+-                </div>
+-            </div>
+-        `;
+-    });
+-    
+-    html += '</div>';
+-    document.getElementById('profilesList').innerHTML = html;
++    filterQueue();
+ }
+ 
+-// Load scan roots
+-async function loadScanRoots() {
+-    const roots = await apiRequest('/scan-roots');
++// Get sort arrow indicator
++function sortArrow(field) {
++    if (queueSortField !== field) return '<span class="text-gray-600 ml-1">⇅</span>';
++    return queueSortDir === 'asc' 
++        ? '<span class="text-blue-400 ml-1">▲</span>' 
++        : '<span class="text-blue-400 ml-1">▼</span>';
++}
++
++// Extract spec value from current_specs JSON
++function getSpec(item, key) {
++    try {
++        const specs = typeof item.current_specs === 'string' ? JSON.parse(item.current_specs) : (item.current_specs || {});
++        return specs[key] || '-';
++    } catch { return '-'; }
++}
++
++// Format file size
++function formatSize(bytes) {
++    if (!bytes || bytes === 0) return '-';
++    const gb = bytes / (1024 * 1024 * 1024);
++    if (gb >= 1) return gb.toFixed(2) + ' GB';
++    return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
++}
++
++// Select All / Deselect All
++function toggleSelectAll(checkbox) {
++    const checkboxes = document.querySelectorAll('.queue-row-checkbox');
++    selectedQueueIds.clear();
+     
+-    if (!roots || roots.length === 0) {
+-        document.getElementById('scanRootsList').innerHTML = '<p class="text-gray-400">No scan roots configured</p>';
+-        return;
++    if (checkbox.checked) {
++        checkboxes.forEach(cb => {
++            cb.checked = true;
++            selectedQueueIds.add(parseInt(cb.dataset.id));
++        });
++    } else {
++        checkboxes.forEach(cb => cb.checked = false);
+     }
+-    
+-    let html = '<div class="grid gap-4">';
+-    
+-    roots.forEach(root => {
+-        const statusColor = root.enabled ? 'text-green-400' : 'text-gray-500';
+-        
+-        html += `
+-            <div class="bg-gray-700 p-4 rounded">
+-                <div class="flex justify-between items-start">
+-                    <div>
+-                        <h3 class="font-bold">${root.path}</h3>
+-                        <p class="text-sm text-gray-400 mt-1">
+-                            Profile ID: ${root.profile_id} | 
+-                            <span class="${statusColor}">${root.enabled ? 'Enabled' : 'Disabled'}</span> |
+-                            ${root.recursive ? 'Recursive' : 'Non-recursive'}
+-                        </p>
+-                    </div>
+-                    <button onclick="deleteScanRoot(${root.id})" class="text-red-400 hover:text-red-300">
+-                        Delete
+-                    </button>
+-                </div>
+-            </div>
+-        `;
+-    });
+-    
+-    html += '</div>';
+-    document.getElementById('scanRootsList').innerHTML = html;
++    updateBulkBar();
+ }
+ 
+-// Actions
+-async function scanRoots() {
+-    const result = await apiRequest('/queue/scan', { method: 'POST' });
+-    if (result) {
+-        alert(result.message);
+-        loadQueue();
+-        loadStats();
++function toggleRowSelect(checkbox, id) {
++    if (checkbox.checked) {
++        selectedQueueIds.add(id);
++    } else {
++        selectedQueueIds.delete(id);
++    }
++    
++    // Update select-all checkbox state
++    const allBoxes = document.querySelectorAll('.queue-row-checkbox');
++    const selectAllBox = document.getElementById('selectAllCheckbox');
++    if (selectAllBox) {
++        selectAllBox.checked = selectedQueueIds.size === allBoxes.length && allBoxes.length > 0;
++        selectAllBox.indeterminate = selectedQueueIds.size > 0 && selectedQueueIds.size < allBoxes.length;
+     }
++    updateBulkBar();
+ }
+ 
+-async function startEncoding() {
+-    const result = await apiRequest('/control/start', { method: 'POST' });
+-    if (result) {
+-        alert(result.message);
+-        setTimeout(() => {
+-            loadQueue();
+-            loadStats();
+-        }, 1000);
+-    }
++function deselectAll() {
++    selectedQueueIds.clear();
++    document.querySelectorAll('.queue-row-checkbox').forEach(cb => cb.checked = false);
++    const selectAllBox = document.getElementById('selectAllCheckbox');
++    if (selectAllBox) { selectAllBox.checked = false; selectAllBox.indeterminate = false; }
++    updateBulkBar();
+ }
+ 
+-async function stopEncoding() {
+-    const result = await apiRequest('/control/stop', { method: 'POST' });
+-    if (result) {
+-        alert(result.message);
+-        loadQueue();
++function updateBulkBar() {
++    const bar = document.getElementById('bulkActionsBar');
++    const countEl = document.getElementById('bulkSelectedCount');
++    
++    if (selectedQueueIds.size > 0) {
++        bar.classList.remove('hidden');
++        countEl.textContent = `${selectedQueueIds.size} item${selectedQueueIds.size > 1 ? 's' : ''} selected`;
++    } else {
++        bar.classList.add('hidden');
+     }
+ }
+ 
+-async function deleteQueueItem(id) {
+-    if (!confirm('Remove this item from the queue?')) return;
++async function bulkDeleteSelected() {
++    if (selectedQueueIds.size === 0) return;
++    if (!confirm(`Delete ${selectedQueueIds.size} selected item(s) from the queue?`)) return;
+     
+-    const result = await apiRequest(`/queue/${id}`, { method: 'DELETE' });
+-    if (result) {
+-        loadQueue();
+-        loadStats();
++    let deleted = 0;
++    for (const id of selectedQueueIds) {
++        const result = await apiRequest(`/queue/${id}`, { method: 'DELETE' });
++        if (result) deleted++;
+     }
++    selectedQueueIds.clear();
++    showMessage(`Deleted ${deleted} item(s)`, 'success');
++    loadQueue();
+ }
+ 
+-async function deleteProfile(id) {
+-    if (!confirm('Delete this profile?')) return;
+-    
+-    const result = await apiRequest(`/profiles/${id}`, { method: 'DELETE' });
++async function bulkClearCompleted() {
++    const result = await apiRequest('/queue/clear?status=completed', { method: 'POST' });
+     if (result) {
+-        loadProfiles();
++        selectedQueueIds.clear();
++        showMessage('Cleared completed items', 'success');
++        loadQueue();
+     }
+ }
+ 
+-async function deleteScanRoot(id) {
+-    if (!confirm('Delete this scan root?')) return;
++// Main display function
++function displayQueueItems(items) {
++    const container = document.getElementById('queueTable');
++
++    if (!items || items.length === 0) {
++        container.innerHTML = '<p class="text-gray-400">No items in queue. Click "Scan All" to find media files.</p>';
++        document.getElementById('bulkActionsBar').classList.add('hidden');
++        return;
++    }
++
++    // Count statuses for summary
++    const counts = { pending: 0, processing: 0, completed: 0, failed: 0, paused: 0 };
++    let totalSize = 0, totalSavings = 0;
++    items.forEach(item => { 
++        counts[item.status] = (counts[item.status] || 0) + 1;
++        totalSize += item.file_size_bytes || 0;
++        totalSavings += item.estimated_savings_bytes || 0;
++    });
++
++    const savingsPct = totalSize > 0 ? ((totalSavings / totalSize) * 100).toFixed(1) : 0;
++
++    let html = `
++        <div class="flex gap-4 mb-4 text-xs text-gray-400 flex-wrap">
++            <span>Total: <strong class="text-gray-200">${items.length}</strong></span>
++            ${counts.processing ? `<span class="text-blue-400">⚙️ Processing: ${counts.processing}</span>` : ''}
++            ${counts.pending ? `<span class="text-yellow-400">⏳ Pending: ${counts.pending}</span>` : ''}
++            ${counts.completed ? `<span class="text-green-400">✅ Completed: ${counts.completed}</span>` : ''}
++            ${counts.failed ? `<span class="text-red-400">❌ Failed: ${counts.failed}</span>` : ''}
++            ${counts.paused ? `<span class="text-orange-400">⏸️ Paused: ${counts.paused}</span>` : ''}
++            <span class="ml-auto">Size: <strong class="text-gray-200">${formatSize(totalSize)}</strong></span>
++            <span>Projected Savings: <strong class="text-green-400">${formatSize(totalSavings)} (${savingsPct}%)</strong></span>
++        </div>
++        <table class="w-full text-sm">
++            <thead class="border-b border-gray-600">
++                <tr class="text-left text-gray-400 text-xs uppercase tracking-wider">
++                    <th class="py-2 px-1 w-8">
++                        <input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll(this)" title="Select All">
++                    </th>
++                    <th class="py-2 px-2 cursor-pointer hover:text-white select-none" onclick="toggleSort('file')">
++                        File ${sortArrow('file')}
++                    </th>
++                    <th class="py-2 px-2 cursor-pointer hover:text-white select-none" onclick="toggleSort('codec')">
++                        Codec ${sortArrow('codec')}
++                    </th>
++                    <th class="py-2 px-2 cursor-pointer hover:text-white select-none" onclick="toggleSort('resolution')">
++                        Resolution ${sortArrow('resolution')}
++                    </th>
++                    <th class="py-2 px-2 cursor-pointer hover:text-white select-none" onclick="toggleSort('size')">
++                        Size ${sortArrow('size')}
++                    </th>
++                    <th class="py-2 px-2 cursor-pointer hover:text-white select-none" onclick="toggleSort('savings')">
++                        Savings ${sortArrow('savings')}
++                    </th>
++                    <th class="py-2 px-2 cursor-pointer hover:text-white select-none" onclick="toggleSort('status')">
++                        Status ${sortArrow('status')}
++                    </th>
++                    <th class="py-2 px-2 cursor-pointer hover:text-white select-none min-w-[180px]" onclick="toggleSort('progress')">
++                        Progress ${sortArrow('progress')}
++                    </th>
++                    <th class="py-2 px-2 cursor-pointer hover:text-white select-none" onclick="toggleSort('priority')">
++                        Priority ${sortArrow('priority')}
++                    </th>
++                    <th class="py-2 px-2">Actions</th>
++                </tr>
++            </thead>
++            <tbody>
++    `;
++
++    items.forEach(item => {
++        const fileName = item.file_path.split(/[/\\]/).pop();
++        const codec = getSpec(item, 'codec');
++        const resolution = getSpec(item, 'resolution');
++        const fps = getSpec(item, 'framerate');
++        const bitrate = getSpec(item, 'bitrate');
++        const isSelected = selectedQueueIds.has(item.id);
++
++        const statusConfig = {
++            'pending':    { emoji: '⏳', color: 'text-yellow-400', barColor: 'bg-yellow-500' },
++            'processing': { emoji: '⚙️', color: 'text-blue-400',   barColor: 'bg-blue-500' },
++            'completed':  { emoji: '✅', color: 'text-green-400',  barColor: 'bg-green-500' },
++            'failed':     { emoji: '❌', color: 'text-red-400',    barColor: 'bg-red-500' },
++            'paused':     { emoji: '⏸️', color: 'text-orange-400', barColor: 'bg-orange-500' }
++        };
++        const sc = statusConfig[item.status] || { emoji: '❓', color: 'text-gray-400', barColor: 'bg-gray-500' };
++        const progress = item.progress || 0;
++
++        // Savings column
++        const savingsBytes = item.estimated_savings_bytes || 0;
++        const savingsPctItem = item.file_size_bytes > 0 ? ((savingsBytes / item.file_size_bytes) * 100).toFixed(0) : 0;
++        const savingsDisplay = savingsBytes > 0 
++            ? `<span class="text-green-400">-${formatSize(savingsBytes)}</span> <span class="text-gray-500 text-xs">(${savingsPctItem}%)</span>`
++            : '<span class="text-gray-500">-</span>';
++
++        // Progress bar — always rendered for consistency
++        let progressBar;
++        if (item.status === 'completed') {
++            progressBar = `
++                <div class="flex items-center gap-2">
++                    <div class="flex-1 bg-gray-600 rounded-full h-2.5 overflow-hidden">
++                        <div class="bg-green-500 h-2.5 rounded-full" style="width: 100%"></div>
++                    </div>
++                    <span class="text-green-400 font-mono text-xs font-bold w-14 text-right">100%</span>
++                </div>`;
++        } else if (item.status === 'failed') {
++            progressBar = `
++                <div class="flex items-center gap-2">
++                    <div class="flex-1 bg-gray-600 rounded-full h-2.5 overflow-hidden">
++                        <div class="bg-red-500 h-2.5 rounded-full" style="width: ${progress}%"></div>
++                    </div>
++                    <span class="text-red-400 font-mono text-xs w-14 text-right" title="${item.error_message || ''}">${progress > 0 ? progress.toFixed(1) + '%' : 'ERR'}</span>
++                </div>`;
++        } else if (item.status === 'processing' || (item.status === 'paused' && progress > 0)) {
++            progressBar = `
++                <div class="flex items-center gap-2">
++                    <div class="flex-1 bg-gray-600 rounded-full h-2.5 overflow-hidden">
++                        <div class="${sc.barColor} h-2.5 rounded-full transition-all duration-700" style="width: ${progress}%"></div>
++                    </div>
++                    <span class="${sc.color} font-mono text-xs font-bold w-14 text-right">${progress.toFixed(1)}%</span>
++                </div>`;
++        } else {
++            // Pending — empty bar
++            progressBar = `
++                <div class="flex items-center gap-2">
++                    <div class="flex-1 bg-gray-600 rounded-full h-2.5 overflow-hidden">
++                        <div class="bg-gray-500 h-2.5 rounded-full" style="width: 0%"></div>
++                    </div>
++                    <span class="text-gray-500 font-mono text-xs w-14 text-right">0%</span>
++                </div>`;
++        }
++
++        // Codec display with color
++        const codecColors = {
++            'h264': 'text-yellow-300', 'h265': 'text-blue-300', 'hevc': 'text-blue-300',
++            'av1': 'text-green-300', 'vp9': 'text-purple-300', 'mpeg4': 'text-orange-300',
++            'mpeg2': 'text-red-300'
++        };
++        const codecColor = codecColors[codec.toLowerCase()] || 'text-gray-300';
++
++        // File info tooltip
++        const tooltip = `Path: ${item.file_path}\nCodec: ${codec}\nResolution: ${resolution}\nFPS: ${fps}\nBitrate: ${bitrate}`;
++
++        html += `
++            <tr class="border-b border-gray-700 hover:bg-gray-750 ${isSelected ? 'bg-gray-700' : ''}">
++                <td class="py-2 px-1">
++                    <input type="checkbox" class="queue-row-checkbox" data-id="${item.id}" 
++                        ${isSelected ? 'checked' : ''}
++                        onchange="toggleRowSelect(this, ${item.id})">
++                </td>
++                <td class="py-2 px-2 max-w-[220px] truncate" title="${tooltip}">
++                    <span class="text-gray-100">${fileName}</span>
++                </td>
++                <td class="py-2 px-2"><span class="${codecColor} text-xs font-medium">${codec.toUpperCase()}</span></td>
++                <td class="py-2 px-2 text-xs text-gray-300">${resolution}${fps !== '-' ? ` <span class="text-gray-500">@ ${fps}fps</span>` : ''}</td>
++                <td class="py-2 px-2 text-xs">${formatSize(item.file_size_bytes)}</td>
++                <td class="py-2 px-2 text-xs">${savingsDisplay}</td>
++                <td class="py-2 px-2"><span class="${sc.color} text-xs">${sc.emoji} ${item.status}</span></td>
++                <td class="py-2 px-2">${progressBar}</td>
++                <td class="py-2 px-2 text-xs text-gray-400">${item.priority}</td>
++                <td class="py-2 px-2">
++                    <button onclick="deleteQueueItem(${item.id})"
++                        class="text-red-400 hover:text-red-300 text-xs">Delete</button>
++                </td>
++            </tr>
++        `;
++    });
++
++    html += '</tbody></table>';
++    container.innerHTML = html;
+     
+-    const result = await apiRequest(`/scan-roots/${id}`, { method: 'DELETE' });
+-    if (result) {
+-        loadScanRoots();
++    // Restore selection state on select-all checkbox
++    const selectAllBox = document.getElementById('selectAllCheckbox');
++    if (selectAllBox) {
++        const allBoxes = document.querySelectorAll('.queue-row-checkbox');
++        selectAllBox.checked = selectedQueueIds.size === allBoxes.length && allBoxes.length > 0;
++        selectAllBox.indeterminate = selectedQueueIds.size > 0 && selectedQueueIds.size < allBoxes.length;
+     }
++    updateBulkBar();
+ }
+ 
+-function showCreateProfileForm() {
+-    // TODO: Implement modal form for creating profiles
+-    alert('Profile creation form coming soon! Use the API at /api/profiles for now.');
++// Start/Stop encoding
++async function startEncoding() {
++    const result = await apiRequest('/control/start', { method: 'POST' });
++    if (result) {
++        showMessage(result.message || 'Encoding started', 'success');
++        setTimeout(loadQueue, 1000);
++    }
+ }
+ 
+-function showCreateScanRootForm() {
+-    // TODO: Implement modal form for creating scan roots
+-    alert('Scan root creation form coming soon! Use the API at /api/scan-roots for now.');
++async function stopEncoding() {
++    const result = await apiRequest('/control/stop', { method: 'POST' });
++    if (result) {
++        showMessage(result.message || 'Encoding stopped', 'info');
++        loadQueue();
++    }
+ }
+ 
+ // Initialize
+@@ -1233,7 +1432,6 @@ function loadAccountInfo() {
+ // ============================================================
+ 
+ let queueRefreshInterval = null;
+-let allQueueItems = []; // Store all items for filtering
+ 
+ // Scan all enabled scan roots
+ async function scanAllRoots() {
+@@ -1293,118 +1491,19 @@ async function scanAllRoots() {
+     }
+ }
+ 
+-// Filter queue by search and status
+-function filterQueue() {
+-    const searchTerm = document.getElementById('queueSearch').value.toLowerCase();
+-    const statusFilter = document.getElementById('queueStatusFilter').value;
+-    
+-    let filtered = allQueueItems;
++// Delete queue item
++async function deleteQueueItem(id) {
++    if (!confirm('Delete this item from the queue?')) return;
+     
+-    // Apply search filter
+-    if (searchTerm) {
+-        filtered = filtered.filter(item => 
+-            item.file_path.toLowerCase().includes(searchTerm)
+-        );
+-    }
++    const result = await apiRequest(`/queue/${id}`, {
++        method: 'DELETE'
++    });
+     
+-    // Apply status filter
+-    if (statusFilter) {
+-        filtered = filtered.filter(item => 
+-            item.status === statusFilter
+-        );
++    if (result) {
++        selectedQueueIds.delete(id);
++        showMessage('Item deleted from queue', 'success');
++        loadQueue();
+     }
+-    
+-    // Display filtered results
+-    displayQueueItems(filtered);
+-}
+-
+-// Display queue items (separated from loading)
+-function displayQueueItems(items) {
+-    const container = document.getElementById('queueTable');
+-
+-    if (items.length === 0) {
+-        container.innerHTML = '<p class="text-gray-400">No items in queue</p>';
+-        return;
+-    }
+-
+-    // Count statuses for summary
+-    const counts = { pending: 0, processing: 0, completed: 0, failed: 0, paused: 0 };
+-    items.forEach(item => { counts[item.status] = (counts[item.status] || 0) + 1; });
+-
+-    let html = `
+-        <div class="flex gap-4 mb-4 text-xs text-gray-400">
+-            <span>Total: ${items.length}</span>
+-            ${counts.processing ? `<span class="text-blue-400">Processing: ${counts.processing}</span>` : ''}
+-            ${counts.pending ? `<span class="text-yellow-400">Pending: ${counts.pending}</span>` : ''}
+-            ${counts.completed ? `<span class="text-green-400">Completed: ${counts.completed}</span>` : ''}
+-            ${counts.failed ? `<span class="text-red-400">Failed: ${counts.failed}</span>` : ''}
+-            ${counts.paused ? `<span class="text-orange-400">Paused: ${counts.paused}</span>` : ''}
+-        </div>
+-        <table class="w-full text-sm">
+-            <thead class="border-b border-gray-700">
+-                <tr class="text-left">
+-                    <th class="py-2">File</th>
+-                    <th class="py-2">Status</th>
+-                    <th class="py-2">Progress</th>
+-                    <th class="py-2">Priority</th>
+-                    <th class="py-2">Actions</th>
+-                </tr>
+-            </thead>
+-            <tbody>
+-    `;
+-
+-    items.forEach(item => {
+-        const fileName = item.file_path.split(/[/\\]/).pop();
+-        const statusConfig = {
+-            'pending':    { emoji: '⏳', color: 'text-yellow-400', barColor: 'bg-yellow-500' },
+-            'processing': { emoji: '⚙️', color: 'text-blue-400',   barColor: 'bg-blue-500' },
+-            'completed':  { emoji: '✅', color: 'text-green-400',  barColor: 'bg-green-500' },
+-            'failed':     { emoji: '❌', color: 'text-red-400',    barColor: 'bg-red-500' },
+-            'paused':     { emoji: '⏸️', color: 'text-orange-400', barColor: 'bg-orange-500' }
+-        };
+-        const sc = statusConfig[item.status] || { emoji: '❓', color: 'text-gray-400', barColor: 'bg-gray-500' };
+-        const progress = item.progress || 0;
+-
+-        // Build progress cell - prominent bar for processing, simple text for others
+-        let progressCell;
+-        if (item.status === 'processing' || (item.status === 'paused' && progress > 0)) {
+-            progressCell = `
+-                <td class="py-2 min-w-[180px]">
+-                    <div class="flex items-center gap-2">
+-                        <div class="flex-1 bg-gray-600 rounded-full h-3 overflow-hidden">
+-                            <div class="${sc.barColor} h-3 rounded-full transition-all duration-700"
+-                                 style="width: ${progress}%"></div>
+-                        </div>
+-                        <span class="${sc.color} font-mono text-xs font-bold w-12 text-right">${progress.toFixed(1)}%</span>
+-                    </div>
+-                </td>
+-            `;
+-        } else if (item.status === 'completed') {
+-            progressCell = `<td class="py-2"><span class="text-green-400 text-xs font-bold">100%</span></td>`;
+-        } else if (item.status === 'failed') {
+-            progressCell = `<td class="py-2"><span class="text-red-400 text-xs" title="${item.error_message || ''}">${item.error_message ? 'Error' : '-'}</span></td>`;
+-        } else {
+-            progressCell = `<td class="py-2"><span class="text-gray-500 text-xs">-</span></td>`;
+-        }
+-
+-        html += `
+-            <tr class="border-b border-gray-700 hover:bg-gray-700">
+-                <td class="py-2 max-w-xs truncate" title="${item.file_path}">${fileName}</td>
+-                <td class="py-2"><span class="${sc.color}">${sc.emoji} ${item.status}</span></td>
+-                ${progressCell}
+-                <td class="py-2">${item.priority}</td>
+-                <td class="py-2">
+-                    <button onclick="deleteQueueItem(${item.id})"
+-                        class="text-red-400 hover:text-red-300 text-xs">
+-                        Delete
+-                    </button>
+-                </td>
+-            </tr>
+-        `;
+-    });
+-
+-    html += '</tbody></table>';
+-    container.innerHTML = html;
+ }
+ 
+ // Toggle auto-refresh
+@@ -1412,42 +1511,14 @@ function toggleAutoRefresh() {
+     const enabled = document.getElementById('autoRefreshQueue').checked;
+     
+     if (enabled) {
+-        // Start auto-refresh every 5 seconds
+         queueRefreshInterval = setInterval(() => {
+             loadQueue();
+         }, 5000);
+-        showMessage('Auto-refresh enabled (5s)', 'info');
+     } else {
+-        // Stop auto-refresh
+         if (queueRefreshInterval) {
+             clearInterval(queueRefreshInterval);
+             queueRefreshInterval = null;
+         }
+-        showMessage('Auto-refresh disabled', 'info');
+-    }
+-}
+-
+-// Update loadQueue to store items for filtering
+-const originalLoadQueue = loadQueue;
+-async function loadQueue() {
+-    const items = await apiRequest('/queue');
+-    if (items) {
+-        allQueueItems = items; // Store for filtering
+-        filterQueue(); // Apply current filters
+-    }
+-}
+-
+-// Delete queue item
+-async function deleteQueueItem(id) {
+-    if (!confirm('Delete this item from the queue?')) return;
+-    
+-    const result = await apiRequest(`/queue/${id}`, {
+-        method: 'DELETE'
+-    });
+-    
+-    if (result) {
+-        showMessage('Item deleted from queue', 'success');
+-        loadQueue();
+     }
+ }
+ 
+@@ -1839,9 +1910,9 @@ async function loadStatistics() {
+         // Summary cards
+         const t = data.totals;
+         document.getElementById('statTotalFiles').textContent = t.total.toLocaleString();
+-        document.getElementById('statOriginalSize').textContent = formatBytes(t.total_original);
+-        document.getElementById('statNewSize').textContent = formatBytes(t.total_new);
+-        document.getElementById('statSaved').textContent = formatBytes(t.total_saved);
++        document.getElementById('statOriginalSize').textContent = formatSize(t.total_original);
++        document.getElementById('statNewSize').textContent = formatSize(t.total_new);
++        document.getElementById('statSaved').textContent = formatSize(t.total_saved);
+         document.getElementById('statAvgPct').textContent = t.avg_savings_pct.toFixed(1) + '%';
+         
+         // Daily chart
+@@ -1862,15 +1933,6 @@ async function loadStatistics() {
+     loadUpscalers();
+ }
+ 
+-function formatBytes(bytes) {
+-    if (!bytes || bytes === 0) return '0 B';
+-    const gb = bytes / (1024 * 1024 * 1024);
+-    if (gb >= 1) return gb.toFixed(1) + ' GB';
+-    const mb = bytes / (1024 * 1024);
+-    if (mb >= 1) return mb.toFixed(1) + ' MB';
+-    return (bytes / 1024).toFixed(0) + ' KB';
+-}
+-
+ function renderDailyChart(daily) {
+     const container = document.getElementById('dailyChart');
+     
+@@ -1948,7 +2010,7 @@ function renderRecentHistory(recent) {
+                 </div>
+                 <div class="flex gap-3 text-xs text-gray-400 flex-shrink-0">
+                     <span class="text-green-400">-${savedPct}%</span>
+-                    <span>${formatBytes(h.original_size_bytes)} → ${formatBytes(h.new_size_bytes)}</span>
++                    <span>${formatSize(h.original_size_bytes)} → ${formatSize(h.new_size_bytes)}</span>
+                     <span>${timeStr}</span>
+                 </div>
+             </div>
+diff --git a/web/templates/index.html b/web/templates/index.html
+index c18bd98..713bcd9 100644
+--- a/web/templates/index.html
++++ b/web/templates/index.html
+@@ -120,7 +120,7 @@
+                 </div>
+                 
+                 <!-- Filters -->
+-                <div class="mb-4 flex gap-4">
++                <div class="mb-4 flex gap-4 items-center">
+                     <div class="flex-1">
+                         <input type="text" id="queueSearch" placeholder="🔍 Search by filename..." 
+                             onkeyup="filterQueue()"
+@@ -145,6 +145,20 @@
+                     </div>
+                 </div>
+                 
++                <!-- Bulk Actions Bar (hidden until selection) -->
++                <div id="bulkActionsBar" class="hidden mb-4 p-3 bg-gray-700 rounded-lg flex items-center gap-4">
++                    <span id="bulkSelectedCount" class="text-sm text-blue-400 font-medium"></span>
++                    <button onclick="bulkDeleteSelected()" class="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-sm">
++                        🗑️ Delete Selected
++                    </button>
++                    <button onclick="bulkClearCompleted()" class="bg-gray-600 hover:bg-gray-500 px-3 py-1 rounded text-sm">
++                        ✅ Clear Completed
++                    </button>
++                    <button onclick="deselectAll()" class="bg-gray-600 hover:bg-gray-500 px-3 py-1 rounded text-sm">
++                        Deselect All
++                    </button>
++                </div>
++                
+                 <div id="queueTable" class="overflow-x-auto">
+                     <p class="text-gray-400">Loading queue...</p>
+                 </div>
+-- 
+2.43.0
+
