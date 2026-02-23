@@ -2,6 +2,12 @@
 Resource monitoring module for Optimizarr.
 Monitors CPU, memory, GPU, and disk I/O to enable intelligent throttling.
 """
+import warnings
+# Suppress the FutureWarning from the deprecated pynvml package at import time.
+# nvidia-ml-py is the maintained replacement; install it to remove pynvml entirely.
+warnings.filterwarnings("ignore", category=FutureWarning, module="pynvml")
+warnings.filterwarnings("ignore", message=".*pynvml.*deprecated.*", category=FutureWarning)
+
 import psutil
 import subprocess
 import json

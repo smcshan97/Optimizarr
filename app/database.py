@@ -235,12 +235,15 @@ class Database:
                 cursor.execute("ALTER TABLE profiles ADD COLUMN hw_accel_enabled BOOLEAN DEFAULT 0")
                 print("  ↳ Migrated: added 'hw_accel_enabled' column to profiles")
             
-            # Add 'library_type' column to scan_roots if missing
+            # Add columns to scan_roots if missing
             cursor.execute("PRAGMA table_info(scan_roots)")
             root_columns = [col[1] for col in cursor.fetchall()]
             if 'library_type' not in root_columns:
                 cursor.execute("ALTER TABLE scan_roots ADD COLUMN library_type TEXT DEFAULT 'custom'")
                 print("  ↳ Migrated: added 'library_type' column to scan_roots")
+            if 'show_in_stats' not in root_columns:
+                cursor.execute("ALTER TABLE scan_roots ADD COLUMN show_in_stats BOOLEAN DEFAULT 1")
+                print("  ↳ Migrated: added 'show_in_stats' column to scan_roots")
             
             # History table migrations
             cursor.execute("PRAGMA table_info(history)")
@@ -338,14 +341,14 @@ class Database:
     
     # Scan Root CRUD
     def create_scan_root(self, path: str, profile_id: int, library_type: str = "custom",
-                        enabled: bool = True, recursive: bool = True) -> int:
+                        enabled: bool = True, recursive: bool = True, show_in_stats: bool = True) -> int:
         """Create a new scan root."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO scan_roots (path, profile_id, library_type, enabled, recursive)
-                VALUES (?, ?, ?, ?, ?)
-            """, (path, profile_id, library_type, enabled, recursive))
+                INSERT INTO scan_roots (path, profile_id, library_type, enabled, recursive, show_in_stats)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (path, profile_id, library_type, enabled, recursive, show_in_stats))
             return cursor.lastrowid
     
     def get_scan_roots(self, enabled_only: bool = False) -> List[Dict]:
@@ -367,7 +370,8 @@ class Database:
             return dict(row) if row else None
     
     def update_scan_root(self, root_id: int, path: str = None, profile_id: int = None,
-                        library_type: str = None, enabled: bool = None, recursive: bool = None) -> bool:
+                        library_type: str = None, enabled: bool = None, recursive: bool = None,
+                        show_in_stats: bool = None) -> bool:
         """Update a scan root."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -391,6 +395,9 @@ class Database:
             if recursive is not None:
                 updates.append("recursive = ?")
                 values.append(recursive)
+            if show_in_stats is not None:
+                updates.append("show_in_stats = ?")
+                values.append(show_in_stats)
             
             if not updates:
                 return False

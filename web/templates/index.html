@@ -17,10 +17,8 @@
             <div class="flex items-center gap-4">
                 <span id="username" class="text-gray-300"></span>
                 <button onclick="switchTab('settings')" 
-                    class="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded text-sm flex items-center gap-2"
-                    title="Settings">
-                    ⚙️ Settings
-                </button>
+                    class="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded text-sm"
+                    title="Settings">⚙️</button>
                 <button onclick="logout()" class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded text-sm">
                     Logout
                 </button>
@@ -95,6 +93,7 @@
                     <button onclick="switchTab('statistics')" id="tab-statistics" class="tab-button">Statistics</button>
                     <button onclick="switchTab('schedule')" id="tab-schedule" class="tab-button">Schedule</button>
                     <button onclick="switchTab('logs')" id="tab-logs" class="tab-button">Logs</button>
+                    <button onclick="switchTab('settings')" id="tab-settings" class="tab-button">Settings</button>
                 </nav>
             </div>
         </div>
@@ -105,6 +104,17 @@
                 <div class="flex justify-between items-center mb-6">
                     <h2 class="text-xl font-bold">Encoding Queue</h2>
                     <div class="flex gap-3">
+                        <button onclick="reprobeQueue()" id="reprobeBtn"
+                            class="bg-gray-600 hover:bg-gray-500 px-4 py-2 rounded flex items-center gap-2 text-sm"
+                            title="Re-detect codec and resolution for UNKNOWN items">
+                            <span id="reproBtnIcon">🔬</span>
+                            <span id="reproBtnText">Re-probe</span>
+                        </button>
+                        <button onclick="clearCompleted()" 
+                            class="bg-gray-600 hover:bg-gray-500 px-4 py-2 rounded text-sm"
+                            title="Remove all completed items from queue">
+                            ✅ Clear Done
+                        </button>
                         <button onclick="scanAllRoots()" id="scanAllBtn" 
                             class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded flex items-center gap-2">
                             <span id="scanAllIcon">🔍</span>
@@ -184,6 +194,11 @@
                 <div class="flex justify-between items-center mb-6">
                     <h2 class="text-xl font-bold">Encoding Profiles</h2>
                     <div class="flex gap-2">
+                        <button onclick="seedDefaultProfiles()" 
+                            class="bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded text-sm" 
+                            title="Add missing built-in default profiles">
+                            ➕ Add Defaults
+                        </button>
                         <button onclick="exportProfiles()" class="bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded text-sm" title="Export all profiles as JSON">
                             📤 Export
                         </button>
@@ -674,6 +689,16 @@
                         <label class="flex items-center">
                             <input type="checkbox" id="scanRootEnabled" checked class="mr-2">
                             <span class="text-sm">Enabled</span>
+                        </label>
+                    </div>
+
+                    <div>
+                        <label class="flex items-center gap-2">
+                            <input type="checkbox" id="scanRootShowInStats" checked class="mr-1">
+                            <div>
+                                <span class="text-sm">Show in Statistics</span>
+                                <p class="text-xs text-gray-400">When disabled, this root's files and paths are hidden from the Statistics tab for privacy</p>
+                            </div>
                         </label>
                     </div>
                     

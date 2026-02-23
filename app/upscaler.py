@@ -35,8 +35,8 @@ UPSCALERS = {
         "default_scale": 2,
         "github_owner": "xinntao",
         "github_repo": "Real-ESRGAN",
-        "asset_pattern_win": r"realesrgan-ncnn-vulkan.*windows.*\.zip",
-        "asset_pattern_linux": r"realesrgan-ncnn-vulkan.*linux.*\.zip",
+        "asset_pattern_win": r"realesrgan-ncnn-vulkan.*(?:windows|win).*\.(zip|7z)",
+        "asset_pattern_linux": r"realesrgan-ncnn-vulkan.*(?:linux|ubuntu).*\.(zip|tar\.gz)",
         "best_for": "Movies, TV Shows, Home Videos",
         "url": "https://github.com/xinntao/Real-ESRGAN/releases",
     },
@@ -139,7 +139,7 @@ def _fetch_latest_release(owner: str, repo: str) -> Optional[Dict]:
     """Fetch latest release info from GitHub API with simple caching."""
     cache_key = f"{owner}/{repo}"
     cached = _update_cache.get(cache_key)
-    if cached:
+    if cached and "_error" not in cached:
         age = time.time() - cached.get("_fetched_at", 0)
         if age < _CACHE_TTL:
             return cached
@@ -147,21 +147,49 @@ def _fetch_latest_release(owner: str, repo: str) -> Optional[Dict]:
         resp = requests.get(
             f"https://api.github.com/repos/{owner}/{repo}/releases/latest",
             headers={"Accept": "application/vnd.github.v3+json"},
-            timeout=10
+            timeout=15
         )
         if resp.status_code == 200:
             data = resp.json()
             data["_fetched_at"] = time.time()
             _update_cache[cache_key] = data
             return data
+        elif resp.status_code == 403:
+            # Rate limit hit — check headers
+            remaining = resp.headers.get("X-RateLimit-Remaining", "?")
+            reset_ts = int(resp.headers.get("X-RateLimit-Reset", 0))
+            reset_str = ""
+            if reset_ts:
+                import datetime
+                reset_str = f" Resets at {datetime.datetime.fromtimestamp(reset_ts).strftime('%H:%M:%S')}."
+            msg = f"GitHub API rate limit exceeded (remaining: {remaining}).{reset_str} Try again later or add a GitHub token in Settings."
+            print(f"⚠ {msg}")
+            return {"_error": "rate_limited", "_message": msg}
+        elif resp.status_code == 404:
+            msg = f"GitHub repo {owner}/{repo} not found or has no releases."
+            print(f"⚠ {msg}")
+            return {"_error": "not_found", "_message": msg}
+        else:
+            msg = f"GitHub API returned HTTP {resp.status_code}"
+            print(f"⚠ {msg}")
+            return {"_error": "http_error", "_message": msg}
+    except requests.exceptions.Timeout:
+        msg = "GitHub API request timed out. Check your internet connection."
+        print(f"⚠ {msg}")
+        return {"_error": "timeout", "_message": msg}
     except Exception as e:
         print(f"⚠ GitHub API error for {owner}/{repo}: {e}")
+        return {"_error": "exception", "_message": str(e)}
     return None
 
 
 def _find_asset(assets: List[Dict], pattern: str) -> Optional[Dict]:
     """Find the best matching release asset for the current OS."""
-    regex = re.compile(pattern, re.IGNORECASE)
+    try:
+        regex = re.compile(pattern, re.IGNORECASE)
+    except re.error:
+        # Fallback to plain string match if pattern is invalid
+        regex = re.compile(re.escape(pattern), re.IGNORECASE)
     for asset in assets:
         if regex.search(asset.get("name", "")):
             return asset
@@ -211,6 +239,9 @@ def _download_worker(key: str):
         release = _fetch_latest_release(upscaler["github_owner"], upscaler["github_repo"])
         if not release:
             raise RuntimeError("Could not fetch release info from GitHub")
+        # Surface API errors with friendly messages
+        if "_error" in release:
+            raise RuntimeError(release.get("_message", "GitHub API error"))
 
         tag = release.get("tag_name", "unknown")
         assets = release.get("assets", [])
@@ -218,10 +249,17 @@ def _download_worker(key: str):
         asset = _find_asset(assets, pattern)
 
         if not asset:
-            # Fallback: grab the first zip
-            asset = next((a for a in assets if a["name"].endswith(".zip")), None)
+            # Fallback 1: any zip/tar.gz for this OS hint
+            if is_win:
+                asset = next((a for a in assets if a["name"].lower().endswith(".zip")), None)
+            else:
+                asset = next((a for a in assets if a["name"].lower().endswith((".tar.gz", ".zip"))), None)
         if not asset:
-            raise RuntimeError(f"No suitable release asset found for {upscaler['name']} on this OS")
+            asset_names = [a["name"] for a in assets]
+            raise RuntimeError(
+                f"No suitable release asset found for {upscaler['name']} on this OS. "
+                f"Available assets: {asset_names}"
+            )
 
         download_url = asset["browser_download_url"]
         asset_name = asset["name"]

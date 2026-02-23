@@ -944,6 +944,11 @@ async function loadScanRoots() {
                                 ${r.enabled ? 'Enabled' : 'Disabled'}
                             </span>
                         </div>
+                        <div>
+                            <span class="px-2 py-1 rounded text-xs ${r.show_in_stats !== false ? 'bg-blue-900 text-blue-300' : 'bg-yellow-900 text-yellow-300'}" title="${r.show_in_stats !== false ? 'Visible in Statistics' : 'Hidden from Statistics (privacy)'}">
+                                ${r.show_in_stats !== false ? '📊 Stats: On' : '🔒 Stats: Hidden'}
+                            </span>
+                        </div>
                     </div>
                 </div>
                 <div class="flex gap-2">
@@ -972,6 +977,7 @@ async function showCreateScanRootForm() {
     document.getElementById('scanRootId').value = '';
     document.getElementById('scanRootRecursive').checked = true;
     document.getElementById('scanRootEnabled').checked = true;
+    document.getElementById('scanRootShowInStats').checked = true;
     document.getElementById('scanRootLibraryType').value = 'custom';
     document.getElementById('libraryTypeRecommendation').classList.add('hidden');
     
@@ -1005,6 +1011,7 @@ async function editScanRoot(id) {
     document.getElementById('scanRootLibraryType').value = root.library_type || 'custom';
     document.getElementById('scanRootRecursive').checked = root.recursive;
     document.getElementById('scanRootEnabled').checked = root.enabled;
+    document.getElementById('scanRootShowInStats').checked = root.show_in_stats !== false;
     
     document.getElementById('scanRootModal').classList.remove('hidden');
 }
@@ -1022,7 +1029,8 @@ document.getElementById('scanRootForm').addEventListener('submit', async (e) => 
         profile_id: parseInt(document.getElementById('scanRootProfile').value),
         library_type: document.getElementById('scanRootLibraryType').value,
         recursive: document.getElementById('scanRootRecursive').checked,
-        enabled: document.getElementById('scanRootEnabled').checked
+        enabled: document.getElementById('scanRootEnabled').checked,
+        show_in_stats: document.getElementById('scanRootShowInStats').checked,
     };
     
     const method = currentScanRootId ? 'PUT' : 'POST';
@@ -2156,21 +2164,30 @@ async function importProfiles(event) {
 
 async function applyQueuePriority() {
     const sortBy = document.getElementById('queueSortBy').value;
-    // Map select value to API param + order
     const sortMap = {
-        'default': { sort_by: 'default', order: 'desc' },
-        'file_size': { sort_by: 'file_size', order: 'desc' },
-        'estimated_savings': { sort_by: 'estimated_savings', order: 'desc' },
-        'filename': { sort_by: 'filename', order: 'asc' },
+        'default':            { sort_by: 'default',            order: 'desc' },
+        'file_size':          { sort_by: 'file_size',          order: 'desc' },
+        'estimated_savings':  { sort_by: 'estimated_savings',  order: 'desc' },
+        'filename':           { sort_by: 'filename',           order: 'asc'  },
     };
     const params = sortMap[sortBy] || sortMap['default'];
-    const result = await apiRequest('/queue/prioritize', {
-        method: 'POST',
-        body: JSON.stringify(params)
-    });
-    if (result) {
-        showMessage(`✓ ${result.message}`, 'success');
-        loadQueue();
+
+    // Show spinner on the button
+    const btn = document.querySelector('button[onclick="applyQueuePriority()"]');
+    const origText = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Applying…'; }
+
+    try {
+        const result = await apiRequest('/queue/prioritize', {
+            method: 'POST',
+            body: JSON.stringify(params)
+        });
+        if (result) {
+            showMessage(`✓ ${result.message}`, 'success');
+            loadQueue();
+        }
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = origText; }
     }
 }
 
@@ -2422,5 +2439,69 @@ async function loadSchedule() {
 if (typeof showMessage !== 'function') {
     function showMessage(msg, type = 'info') {
         console.log(`[${type.toUpperCase()}] ${msg}`);
+    }
+}
+
+
+// ============================================================
+// QUEUE RE-PROBE
+// ============================================================
+
+async function reprobeQueue() {
+    const btn = document.getElementById('reprobeBtn');
+    const icon = document.getElementById('reproBtnIcon');
+    const text = document.getElementById('reproBtnText');
+    if (btn) { btn.disabled = true; }
+    if (icon) icon.textContent = '⏳';
+    if (text) text.textContent = 'Probing…';
+
+    try {
+        const result = await apiRequest('/queue/reprobe', { method: 'POST' });
+        if (result) {
+            showMessage(`✓ ${result.message}`, 'success');
+            loadQueue();
+        }
+    } finally {
+        if (btn) { btn.disabled = false; }
+        if (icon) icon.textContent = '🔬';
+        if (text) text.textContent = 'Re-probe';
+    }
+}
+
+
+// ============================================================
+// CLEAR COMPLETED
+// ============================================================
+
+async function clearCompleted() {
+    const result = await apiRequest('/queue/clear-completed', { method: 'POST' });
+    if (result) {
+        showMessage(`✓ ${result.message}`, 'success');
+        loadQueue();
+    }
+}
+
+
+// ============================================================
+// SEED DEFAULT PROFILES
+// ============================================================
+
+async function seedDefaultProfiles() {
+    const btn = document.querySelector('button[onclick="seedDefaultProfiles()"]');
+    const origText = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '⏳ Adding…'; }
+
+    try {
+        const result = await apiRequest('/profiles/seed-defaults', { method: 'POST' });
+        if (result) {
+            if (result.created && result.created.length > 0) {
+                showMessage(`✓ ${result.message}`, 'success');
+            } else {
+                showMessage('All default profiles already exist', 'info');
+            }
+            loadProfiles();
+        }
+    } finally {
+        if (btn) { btn.disabled = false; btn.textContent = origText; }
     }
 }

@@ -148,6 +148,7 @@ class ScanRootCreate(BaseModel):
     library_type: str = Field(default="custom")
     enabled: bool = True
     recursive: bool = True
+    show_in_stats: bool = True
 
 
 class ScanRootResponse(BaseModel):
@@ -157,6 +158,7 @@ class ScanRootResponse(BaseModel):
     library_type: Optional[str] = "custom"
     enabled: bool
     recursive: bool
+    show_in_stats: Optional[bool] = True
 
 
 # ============================================================

@@ -66,6 +66,10 @@ class MediaScanner:
                 return result
         return self._get_basic_file_info(file_path)
 
+    def probe_file(self, file_path: str) -> Optional[Dict]:
+        """Public alias for analyze_file — re-probe a single file and return its specs dict."""
+        return self.analyze_file(file_path)
+
     def _probe_with_ffprobe(self, file_path: str) -> Optional[Dict]:
         try:
             result = subprocess.run(

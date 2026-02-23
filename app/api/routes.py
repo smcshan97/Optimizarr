@@ -147,7 +147,8 @@ async def create_scan_root(
             profile_id=scan_root.profile_id,
             library_type=scan_root.library_type,
             enabled=scan_root.enabled,
-            recursive=scan_root.recursive
+            recursive=scan_root.recursive,
+            show_in_stats=scan_root.show_in_stats
         )
         
         # Get created scan root
@@ -218,7 +219,8 @@ async def update_scan_root(
         profile_id=root_data.profile_id,
         library_type=root_data.library_type,
         recursive=root_data.recursive,
-        enabled=root_data.enabled
+        enabled=root_data.enabled,
+        show_in_stats=root_data.show_in_stats
     )
     
     if success:
@@ -997,3 +999,138 @@ async def get_windows_active_hours(current_user: dict = Depends(get_current_user
             "reason": "Windows Active Hours not available on this OS or registry key not found"
         }
     return {"available": True, **hours}
+
+
+# ============================================================
+# QUEUE RE-PROBE (fix UNKNOWN codec/resolution)
+# ============================================================
+
+@router.post("/queue/reprobe")
+async def reprobe_queue_items(
+    current_user: dict = Depends(get_current_user)
+):
+    """
+    Re-run ffprobe on all queue items with UNKNOWN codec or resolution.
+    Useful after updating the scanner or adding new media.
+    """
+    import json
+    from app.scanner import MediaScanner
+
+    scanner = MediaScanner()
+    items = db.get_queue_items()
+
+    # Filter to items where codec is unknown/missing
+    to_probe = []
+    for item in items:
+        specs = item.get("current_specs") or {}
+        if isinstance(specs, str):
+            try:
+                specs = json.loads(specs)
+            except Exception:
+                specs = {}
+        codec = specs.get("codec", "unknown")
+        if codec in ("unknown", "", None):
+            to_probe.append(item)
+
+    if not to_probe:
+        return {"message": "No items with unknown codec found", "updated": 0, "total_checked": len(items)}
+
+    updated = 0
+    failed = 0
+    for item in to_probe:
+        try:
+            probe = scanner.probe_file(item["file_path"])
+            if probe and probe.get("codec", "unknown") != "unknown":
+                db.update_queue_item(item["id"], current_specs=json.dumps(probe))
+                updated += 1
+        except Exception:
+            failed += 1
+
+    return {
+        "message": f"Re-probed {len(to_probe)} items: {updated} updated, {failed} failed",
+        "updated": updated,
+        "failed": failed,
+        "total_checked": len(items),
+        "items_probed": len(to_probe),
+    }
+
+
+# ============================================================
+# PROFILES — SEED MISSING DEFAULTS
+# ============================================================
+
+@router.post("/profiles/seed-defaults")
+async def seed_default_profiles(
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """
+    Add the built-in default profiles if they don't already exist.
+    Safe to call multiple times — won't create duplicates.
+    """
+    from app.main import _seed_default_profiles
+
+    existing_names = {p["name"] for p in db.get_profiles()}
+    defaults = [
+        {"name": "🎬 Movies — AV1 1080p High Quality",  "resolution": "", "framerate": None,
+         "codec": "av1",  "encoder": "svt_av1",   "quality": 28, "audio_codec": "passthrough",
+         "container": "mkv",  "audio_handling": "preserve_all", "subtitle_handling": "preserve_all",
+         "chapter_markers": True,  "enable_filters": False, "hw_accel_enabled": False,
+         "preset": "6",  "two_pass": False, "custom_args": None, "is_default": True},
+        {"name": "📺 TV Shows — AV1 1080p Balanced",    "resolution": "", "framerate": None,
+         "codec": "av1",  "encoder": "svt_av1",   "quality": 32, "audio_codec": "aac",
+         "container": "mkv",  "audio_handling": "keep_primary",  "subtitle_handling": "keep_english",
+         "chapter_markers": False, "enable_filters": False, "hw_accel_enabled": False,
+         "preset": "8",  "two_pass": False, "custom_args": None, "is_default": False},
+        {"name": "⚡ Fast H.265 — GPU Encode (NVENC)",  "resolution": "", "framerate": None,
+         "codec": "h265", "encoder": "nvenc_h265", "quality": 28, "audio_codec": "aac",
+         "container": "mkv",  "audio_handling": "preserve_all", "subtitle_handling": "none",
+         "chapter_markers": True,  "enable_filters": False, "hw_accel_enabled": True,
+         "preset": None,  "two_pass": False, "custom_args": None, "is_default": False},
+        {"name": "📦 Archive — HEVC 10-bit Near Lossless", "resolution": "", "framerate": None,
+         "codec": "h265", "encoder": "x265",       "quality": 18, "audio_codec": "passthrough",
+         "container": "mkv",  "audio_handling": "preserve_all", "subtitle_handling": "preserve_all",
+         "chapter_markers": True,  "enable_filters": False, "hw_accel_enabled": False,
+         "preset": "slower", "two_pass": False,
+         "custom_args": "--encoder-profile main10 --encoder-level 5.1", "is_default": False},
+        {"name": "📱 Mobile — H.264 720p Compatible",   "resolution": "1280x720", "framerate": 30,
+         "codec": "h264", "encoder": "x264",       "quality": 23, "audio_codec": "aac",
+         "container": "mp4",  "audio_handling": "stereo_mixdown","subtitle_handling": "none",
+         "chapter_markers": False, "enable_filters": True,  "hw_accel_enabled": False,
+         "preset": "fast", "two_pass": False, "custom_args": None, "is_default": False},
+    ]
+
+    created = []
+    skipped = []
+    for p in defaults:
+        if p["name"] in existing_names:
+            skipped.append(p["name"])
+        else:
+            try:
+                db.create_profile(**p)
+                created.append(p["name"])
+            except Exception as e:
+                skipped.append(f"{p['name']} (error: {e})")
+
+    return {
+        "message": f"Added {len(created)} default profile(s), skipped {len(skipped)} already present",
+        "created": created,
+        "skipped": skipped,
+    }
+
+
+# ============================================================
+# QUEUE — CLEAR COMPLETED
+# ============================================================
+
+@router.post("/queue/clear-completed")
+async def clear_completed_queue(
+    current_user: dict = Depends(get_current_user)
+):
+    """Remove all completed items from the queue."""
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM queue WHERE status = 'completed'")
+        count = cursor.fetchone()[0]
+        cursor.execute("DELETE FROM queue WHERE status = 'completed'")
+
+    return {"message": f"Cleared {count} completed item(s)", "count": count}
