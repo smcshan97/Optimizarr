@@ -21,22 +21,34 @@ class ResourceMonitor:
 
     def _init_gpu_monitoring(self) -> bool:
         """Initialize GPU monitoring if NVIDIA GPU is available."""
-        # Try pynvml first
-        try:
-            import pynvml
-            pynvml.nvmlInit()
-            device_count = pynvml.nvmlDeviceGetCount()
-            if device_count > 0:
-                name = pynvml.nvmlDeviceGetName(pynvml.nvmlDeviceGetHandleByIndex(0))
-                if isinstance(name, bytes):
-                    name = name.decode('utf-8')
-                print(f"GPU monitoring enabled (pynvml): {device_count} NVIDIA GPU(s) detected - {name}")
-                self._gpu_method = 'pynvml'
-                return True
-        except ImportError:
-            print("pynvml not installed, trying nvidia-smi fallback...")
-        except Exception as e:
-            print(f"pynvml init failed ({e}), trying nvidia-smi fallback...")
+        # Try nvidia-ml-py (the maintained replacement for pynvml) then pynvml as fallback
+        nvml = None
+        for pkg in ('nvidia_ml_py', 'pynvml'):
+            try:
+                import importlib
+                nvml = importlib.import_module(pkg if pkg == 'pynvml' else 'pynvml')
+                # nvidia-ml-py installs as 'pynvml' module, so just importing pynvml works
+                break
+            except ImportError:
+                continue
+
+        if nvml:
+            try:
+                import warnings
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", FutureWarning)
+                    import pynvml
+                    pynvml.nvmlInit()
+                device_count = pynvml.nvmlDeviceGetCount()
+                if device_count > 0:
+                    name = pynvml.nvmlDeviceGetName(pynvml.nvmlDeviceGetHandleByIndex(0))
+                    if isinstance(name, bytes):
+                        name = name.decode('utf-8')
+                    print(f"GPU monitoring enabled: {device_count} NVIDIA GPU(s) detected - {name}")
+                    self._gpu_method = 'pynvml'
+                    return True
+            except Exception as e:
+                print(f"nvml init failed ({e}), trying nvidia-smi fallback...")
 
         # Fallback: try nvidia-smi
         try:

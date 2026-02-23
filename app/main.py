@@ -2,6 +2,7 @@
 Main FastAPI application for Optimizarr.
 """
 import uvicorn
+from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, FileResponse
@@ -14,114 +15,37 @@ from app.auth import auth
 from app.api import routes, auth_routes
 from app.scheduler import initialize_scheduler, shutdown_scheduler
 
-# Create FastAPI app
-app = FastAPI(
-    title="Optimizarr",
-    description="Automated Media Optimization System",
-    version="2.1.0"
-)
 
-# CORS middleware
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # In production, specify exact origins
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# ============================================================
+# Lifespan (replaces deprecated @app.on_event)
+# ============================================================
 
-# Include routers
-app.include_router(routes.router, prefix="/api", tags=["api"])
-app.include_router(auth_routes.router, prefix="/api")
-
-# Static files
-web_dir = Path(__file__).parent.parent / "web"
-if web_dir.exists():
-    app.mount("/static", StaticFiles(directory=str(web_dir / "static")), name="static")
-
-
-@app.get("/", response_class=HTMLResponse)
-async def root():
-    """Serve the main web interface."""
-    index_file = web_dir / "templates" / "index.html"
-    
-    if index_file.exists():
-        return FileResponse(index_file)
-    
-    # Fallback if template doesn't exist yet
-    return HTMLResponse("""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Optimizarr</title>
-    </head>
-    <body>
-        <h1>Optimizarr API</h1>
-        <p>Welcome to Optimizarr - Automated Media Optimization System</p>
-        <ul>
-            <li><a href="/docs">API Documentation</a></li>
-            <li><a href="/api/health">Health Check</a></li>
-        </ul>
-    </body>
-    </html>
-    """)
-
-
-@app.get("/login", response_class=HTMLResponse)
-async def login_page():
-    """Serve the login page."""
-    login_file = web_dir / "templates" / "login.html"
-    
-    if login_file.exists():
-        return FileResponse(login_file)
-    
-    # Fallback
-    return HTMLResponse("""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Login - Optimizarr</title>
-    </head>
-    <body>
-        <h1>Login</h1>
-        <p>Please use the API at /api/auth/login</p>
-    </body>
-    </html>
-    """)
-
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize application on startup."""
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup and shutdown logic using modern lifespan handler."""
+    # ---- STARTUP ----
     from app.logger import optimizarr_logger
-    
+
     print("=" * 60)
     print("Optimizarr - Automated Media Optimization System")
     print("=" * 60)
-    
-    # Ensure data directories exist
+
     ensure_data_directories()
-    
-    # Initialize database (already done in database.py, but explicit here)
     print(f"Database: {settings.db_path}")
-    
-    # Create default admin user
+
     auth.create_default_admin()
-    
-    # Seed default profiles if none exist
-    profiles = db.get_profiles()
-    if not profiles:
+
+    # Seed default profiles on first run
+    if not db.get_profiles():
         print("Seeding default encoding profiles…")
         _seed_default_profiles()
 
     # Start upscaler update checker background thread
     from app.upscaler import start_update_checker
     start_update_checker()
-    
-    # Initialize scheduler
+
     initialize_scheduler()
-    
-    # Start folder watcher
+
     from app.watcher import folder_watcher
     watches = db.get_folder_watches(enabled_only=True)
     if watches:
@@ -129,28 +53,91 @@ async def startup_event():
         print(f"✓ Folder watcher started ({len(watches)} active watches)")
     else:
         print("  Folder watcher: no active watches configured")
-    
-    # Log startup
+
     optimizarr_logger.log_startup("2.1.0", settings.host, settings.port)
-    
+
     print("=" * 60)
     print(f"Server starting on http://{settings.host}:{settings.port}")
     print("=" * 60)
 
+    yield  # Application runs here
 
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Cleanup on shutdown."""
-    from app.logger import optimizarr_logger
-    from app.watcher import folder_watcher
-    optimizarr_logger.log_shutdown()
-    folder_watcher.stop()
+    # ---- SHUTDOWN ----
+    from app.logger import optimizarr_logger as _log
+    from app.watcher import folder_watcher as _fw
+    _log.log_shutdown()
+    _fw.stop()
     print("\nShutting down Optimizarr...")
     shutdown_scheduler()
 
 
+# ============================================================
+# App instance
+# ============================================================
+
+app = FastAPI(
+    title="Optimizarr",
+    description="Automated Media Optimization System",
+    version="2.1.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(routes.router, prefix="/api", tags=["api"])
+app.include_router(auth_routes.router, prefix="/api")
+
+web_dir = Path(__file__).parent.parent / "web"
+if web_dir.exists():
+    app.mount("/static", StaticFiles(directory=str(web_dir / "static")), name="static")
+
+
+# ============================================================
+# Page routes
+# ============================================================
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    """Serve the main web interface."""
+    index_file = web_dir / "templates" / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+    return HTMLResponse("""
+    <!DOCTYPE html><html><head><title>Optimizarr</title></head>
+    <body>
+        <h1>Optimizarr API</h1>
+        <ul>
+            <li><a href="/docs">API Documentation</a></li>
+            <li><a href="/api/health">Health Check</a></li>
+        </ul>
+    </body></html>
+    """)
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page():
+    """Serve the login page."""
+    login_file = web_dir / "templates" / "login.html"
+    if login_file.exists():
+        return FileResponse(login_file)
+    return HTMLResponse("""
+    <!DOCTYPE html><html><head><title>Login - Optimizarr</title></head>
+    <body><h1>Login</h1><p>Use the API at /api/auth/login</p></body></html>
+    """)
+
+
+# ============================================================
+# Default profile seeder
+# ============================================================
+
 def _seed_default_profiles():
-    """Create a set of sensible default profiles covering the most common use cases."""
+    """Seed sensible default profiles on first run."""
     profiles = [
         {
             "name": "🎬 Movies — AV1 1080p High Quality",
@@ -213,13 +200,17 @@ def _seed_default_profiles():
             print(f"  ⚠ Could not create profile '{p['name']}': {e}")
 
 
+# ============================================================
+# Entry point
+# ============================================================
 
+def main():
     """Main entry point for running the application."""
     uvicorn.run(
         "app.main:app",
         host=settings.host,
         port=settings.port,
-        reload=True,  # Enable auto-reload during development
+        reload=True,
         log_level=settings.log_level.lower()
     )
 

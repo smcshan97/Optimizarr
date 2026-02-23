@@ -1,0 +1,2507 @@
+From 3220f540248601266120742cf98b577af31532c3 Mon Sep 17 00:00:00 2001
+From: Optimizarr Dev <optimizarr@dev.local>
+Date: Mon, 23 Feb 2026 15:56:04 +0000
+Subject: [PATCH 1/2] feat: major improvements - codec detection, upscaler
+ downloads, ultra-wide UI, profiles, Windows rest hours, queue prioritization
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+## Bug Fixes
+- scanner.py: Complete rewrite of media probing
+  - Use ffprobe as primary tool (JSON output, fast & reliable)
+  - HandBrake scan as fallback with proper JSON extraction via depth-tracking parser
+  - Fixed broken JSON extraction that used naive line-matching (was always failing)
+  - Added _normalise_codec() covering h264/avc1, hevc/h265, av01/av1, vp09/vp9, wmv, mpeg4
+  - Codec and resolution now correctly populated in queue items
+  - Fixed _needs_encoding() to handle 'unknown' codec (now defaults to needs-encoding)
+
+## New Features
+
+### 1. Upscaler Auto-Download + Update Checking (upscaler.py)
+- Download button triggers background thread that fetches GitHub releases API
+- Streams binary zip/tar.gz to ~/.local/share/optimizarr/upscalers/ (Linux)
+         or AppData/Local/Optimizarr/upscalers/ (Windows)
+- Extracts binary, sets executable bit on Linux/macOS
+- _download_state dict tracks progress per-upscaler for polling
+- check_for_updates() pings GitHub releases API with 24h TTL cache
+- start_update_checker() background thread runs every 24h
+- API endpoints: POST /upscalers/{key}/download, GET status, POST check-updates
+
+### 2. Ultra-Wide Monitor UI Adaptation (index.html)
+- Removed fixed max-width container (container mx-auto)
+- Full fluid layout: px-4 sm:px-6 lg:px-8 xl:px-10
+- Stats grid: 2col mobile → 4col md → 8col 2xl
+- Resource cards: 3col md → 3col xl (space-efficient)
+- Queue filters now use flex-wrap for responsive flow
+
+### 3. Queue Sort → Actual Priority (routes.py + app.js)
+- POST /queue/prioritize rewrites priority column in DB for all pending items
+- sort_by: file_size | estimated_savings | filename | default
+- Priority values: (total-rank)*10 so ORDER BY priority DESC works correctly
+- UI: 'Prioritize by' dropdown + '↑ Apply' button above queue table
+- Sorting now affects actual processing order, not just display
+
+### 4. New Default Encoding Profiles (main.py)
+- Movies — AV1 1080p High Quality (default, passthrough audio)
+- TV Shows — AV1 1080p Balanced (aggressive compression, keep primary audio)
+- Fast H.265 GPU Encode (NVENC, hw_accel_enabled)
+- Archive — HEVC 10-bit Near Lossless (CRF 18, main10 profile)
+- Mobile — H.264 720p (MP4, stereo mixdown, 720p target)
+
+### 5. Windows Rest Hours Scheduler (scheduler.py)
+- Reads HKLM\SOFTWARE\Microsoft\WindowsUpdate\UX\Settings ActiveHoursStart/End
+- 'Use Windows Active Hours' toggle in Schedule tab
+- When enabled, overrides manual time window with inverted active hours
+- Manual time window grayed out when Windows hours active
+- GET /schedule/windows-active-hours returns detected values
+- Graceful fallback when registry key missing or non-Windows
+
+### 6. requirements.txt
+- Added requests>=2.31.0 (needed for upscaler GitHub API calls)
+---
+ app/api/routes.py        | 103 +++++++++
+ app/main.py              |  90 ++++++--
+ app/scanner.py           | 444 ++++++++++++++++++---------------------
+ app/scheduler.py         | 217 ++++++++++++-------
+ app/upscaler.py          | 433 +++++++++++++++++++++++++++++---------
+ requirements.txt         |   1 +
+ web/static/js/app.js     | 275 ++++++++++++++++++++++++
+ web/templates/index.html | 102 ++++++---
+ 8 files changed, 1199 insertions(+), 466 deletions(-)
+
+diff --git a/app/api/routes.py b/app/api/routes.py
+index bd4c345..62a429e 100644
+--- a/app/api/routes.py
++++ b/app/api/routes.py
+@@ -894,3 +894,106 @@ async def disable_schedule(current_user: dict = Depends(get_current_admin_user))
+         return MessageResponse(message="Schedule disabled")
+     else:
+         raise HTTPException(status_code=500, detail="Failed to disable schedule")
++
++
++# ============================================================
++# UPSCALER DOWNLOAD ENDPOINTS
++# ============================================================
++
++@router.post("/upscalers/{key}/download")
++async def start_upscaler_download(
++    key: str,
++    background_tasks: BackgroundTasks,
++    current_user: dict = Depends(get_current_admin_user)
++):
++    """Start downloading an AI upscaler binary (admin only)."""
++    from app.upscaler import UPSCALERS, download_upscaler
++    if key not in UPSCALERS:
++        raise HTTPException(status_code=404, detail=f"Unknown upscaler: {key}")
++    state = download_upscaler(key)
++    return {"message": f"Download started for {UPSCALERS[key]['name']}", "state": state}
++
++
++@router.get("/upscalers/{key}/download/status")
++async def get_upscaler_download_status(
++    key: str,
++    current_user: dict = Depends(get_current_user)
++):
++    """Get download progress for an upscaler."""
++    from app.upscaler import UPSCALERS, get_download_status
++    if key not in UPSCALERS:
++        raise HTTPException(status_code=404, detail=f"Unknown upscaler: {key}")
++    return get_download_status(key)
++
++
++@router.post("/upscalers/check-updates")
++async def check_upscaler_updates(current_user: dict = Depends(get_current_user)):
++    """Check GitHub for newer versions of installed upscalers."""
++    from app.upscaler import check_for_updates
++    return check_for_updates()
++
++
++# ============================================================
++# QUEUE PRIORITIZATION
++# ============================================================
++
++@router.post("/queue/prioritize")
++async def prioritize_queue(
++    data: dict,
++    current_user: dict = Depends(get_current_user)
++):
++    """
++    Re-prioritize pending queue items by a given criterion.
++    sort_by: 'file_size' | 'estimated_savings' | 'filename' | 'default'
++    order: 'desc' | 'asc'  (default: desc = largest first)
++    """
++    sort_by = data.get("sort_by", "default")
++    order = data.get("order", "desc")
++    reverse = (order == "desc")
++
++    items = db.get_queue_items(status="pending")
++    if not items:
++        return {"message": "No pending items to prioritize", "count": 0}
++
++    # Sort by chosen criterion
++    if sort_by == "file_size":
++        items.sort(key=lambda i: i.get("file_size_bytes", 0), reverse=reverse)
++    elif sort_by == "estimated_savings":
++        items.sort(key=lambda i: i.get("estimated_savings_bytes", 0), reverse=reverse)
++    elif sort_by == "filename":
++        items.sort(key=lambda i: Path(i.get("file_path", "")).name.lower(), reverse=reverse)
++    # default: leave current order but we still write priorities below
++
++    # Assign priority values: highest item gets priority = len(items)*10, etc.
++    # This preserves relative order in DB ORDER BY priority DESC
++    total = len(items)
++    for rank, item in enumerate(items):
++        new_priority = (total - rank) * 10   # 1st item → highest priority
++        db.update_queue_item(item["id"], priority=new_priority)
++
++    return {
++        "message": f"Prioritized {total} pending items by {sort_by} ({order})",
++        "count": total,
++        "sort_by": sort_by,
++        "order": order,
++    }
++
++
++# ============================================================
++# WINDOWS ACTIVE HOURS
++# ============================================================
++
++@router.get("/schedule/windows-active-hours")
++async def get_windows_active_hours(current_user: dict = Depends(get_current_user)):
++    """
++    Read Windows Active Hours from the registry (Windows only).
++    Returns the detected rest window suitable for scheduled encoding.
++    """
++    from app.scheduler import schedule_manager
++    hours = schedule_manager.get_windows_active_hours()
++    if hours is None:
++        return {
++            "available": False,
++            "reason": "Windows Active Hours not available on this OS or registry key not found"
++        }
++    return {"available": True, **hours}
+diff --git a/app/main.py b/app/main.py
+index 496f64c..807a7d7 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -108,25 +108,15 @@ async def startup_event():
+     # Create default admin user
+     auth.create_default_admin()
+     
+-    # Create default profile if none exist
++    # Seed default profiles if none exist
+     profiles = db.get_profiles()
+     if not profiles:
+-        print("Creating default encoding profile...")
+-        db.create_profile(
+-            name="1080p AV1 Balanced (Movies)",
+-            resolution="1920x1080",
+-            framerate=24,
+-            codec="av1",
+-            encoder="svt_av1",
+-            quality=28,
+-            audio_codec="opus",
+-            container="mkv",
+-            preset="6",
+-            two_pass=False,
+-            custom_args=None,
+-            is_default=True
+-        )
+-        print("✓ Created default profile: 1080p AV1 Balanced (Movies)")
++        print("Seeding default encoding profiles…")
++        _seed_default_profiles()
++
++    # Start upscaler update checker background thread
++    from app.upscaler import start_update_checker
++    start_update_checker()
+     
+     # Initialize scheduler
+     initialize_scheduler()
+@@ -159,7 +149,71 @@ async def shutdown_event():
+     shutdown_scheduler()
+ 
+ 
+-def main():
++def _seed_default_profiles():
++    """Create a set of sensible default profiles covering the most common use cases."""
++    profiles = [
++        {
++            "name": "🎬 Movies — AV1 1080p High Quality",
++            "resolution": "", "framerate": None,
++            "codec": "av1", "encoder": "svt_av1", "quality": 28,
++            "audio_codec": "passthrough", "container": "mkv",
++            "audio_handling": "preserve_all", "subtitle_handling": "preserve_all",
++            "chapter_markers": True, "enable_filters": False,
++            "hw_accel_enabled": False, "preset": "6",
++            "two_pass": False, "custom_args": None, "is_default": True,
++        },
++        {
++            "name": "📺 TV Shows — AV1 1080p Balanced",
++            "resolution": "", "framerate": None,
++            "codec": "av1", "encoder": "svt_av1", "quality": 32,
++            "audio_codec": "aac", "container": "mkv",
++            "audio_handling": "keep_primary", "subtitle_handling": "keep_english",
++            "chapter_markers": False, "enable_filters": False,
++            "hw_accel_enabled": False, "preset": "8",
++            "two_pass": False, "custom_args": None, "is_default": False,
++        },
++        {
++            "name": "⚡ Fast H.265 — GPU Encode (NVENC)",
++            "resolution": "", "framerate": None,
++            "codec": "h265", "encoder": "nvenc_h265", "quality": 28,
++            "audio_codec": "aac", "container": "mkv",
++            "audio_handling": "preserve_all", "subtitle_handling": "none",
++            "chapter_markers": True, "enable_filters": False,
++            "hw_accel_enabled": True, "preset": None,
++            "two_pass": False, "custom_args": None, "is_default": False,
++        },
++        {
++            "name": "📦 Archive — HEVC 10-bit Near Lossless",
++            "resolution": "", "framerate": None,
++            "codec": "h265", "encoder": "x265", "quality": 18,
++            "audio_codec": "passthrough", "container": "mkv",
++            "audio_handling": "preserve_all", "subtitle_handling": "preserve_all",
++            "chapter_markers": True, "enable_filters": False,
++            "hw_accel_enabled": False, "preset": "slower",
++            "two_pass": False,
++            "custom_args": "--encoder-profile main10 --encoder-level 5.1",
++            "is_default": False,
++        },
++        {
++            "name": "📱 Mobile — H.264 720p Compatible",
++            "resolution": "1280x720", "framerate": 30,
++            "codec": "h264", "encoder": "x264", "quality": 23,
++            "audio_codec": "aac", "container": "mp4",
++            "audio_handling": "stereo_mixdown", "subtitle_handling": "none",
++            "chapter_markers": False, "enable_filters": True,
++            "hw_accel_enabled": False, "preset": "fast",
++            "two_pass": False, "custom_args": None, "is_default": False,
++        },
++    ]
++    for p in profiles:
++        try:
++            db.create_profile(**p)
++            print(f"  ✓ Created profile: {p['name']}")
++        except Exception as e:
++            print(f"  ⚠ Could not create profile '{p['name']}': {e}")
++
++
++
+     """Main entry point for running the application."""
+     uvicorn.run(
+         "app.main:app",
+diff --git a/app/scanner.py b/app/scanner.py
+index 131a708..5df8ebb 100644
+--- a/app/scanner.py
++++ b/app/scanner.py
+@@ -1,9 +1,12 @@
+ """
+ Media scanner module for Optimizarr.
+-Recursively scans directories for video files and analyzes them with HandBrakeCLI.
++Recursively scans directories for video files and analyzes them.
++Uses ffprobe as primary media info tool (faster, more reliable) with HandBrake fallback.
+ """
+ import json
+ import subprocess
++import shutil
++import re
+ from pathlib import Path
+ from typing import List, Dict, Optional, Tuple
+ import os
+@@ -14,337 +17,302 @@ from app.database import db
+ class MediaScanner:
+     """Scans directories for video files and analyzes their specifications."""
+     
+-    # Supported video file extensions
+     VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.m4v', '.ts', '.mpg', '.mpeg', '.wmv', '.flv', '.webm'}
+     
+     def __init__(self):
+-        self.handbrake_available = self._check_handbrake()
+-    
+-    def _check_handbrake(self) -> bool:
+-        """Check if HandBrakeCLI is available."""
++        self.handbrake_available = self._check_tool(['HandBrakeCLI', '--version'], "HandBrakeCLI")
++        self.ffprobe_available = self._check_tool(['ffprobe', '-version'], "ffprobe")
++
++    def _check_tool(self, cmd: List[str], name: str) -> bool:
++        binary = cmd[0]
++        if not shutil.which(binary):
++            print(f"⚠ {name} not found in PATH")
++            return False
+         try:
+-            result = subprocess.run(
+-                ['HandBrakeCLI', '--version'],
+-                capture_output=True,
+-                text=True,
+-                timeout=5
+-            )
+-            if result.returncode == 0:
+-                print("✓ HandBrakeCLI is available")
+-                return True
+-        except (subprocess.TimeoutExpired, FileNotFoundError):
+-            print("⚠ HandBrakeCLI not found - scanning will be limited")
+-        
+-        return False
++            subprocess.run(cmd, capture_output=True, text=True, timeout=5)
++            print(f"✓ {name} is available")
++            return True
++        except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
++            print(f"⚠ {name} not available")
++            return False
+     
+     def discover_video_files(self, root_path: str, recursive: bool = True) -> List[str]:
+-        """
+-        Discover video files in a directory.
+-        
+-        Args:
+-            root_path: Directory to scan
+-            recursive: Whether to scan subdirectories
+-            
+-        Returns:
+-            List of absolute file paths
+-        """
+         video_files = []
+         root = Path(root_path)
+-        
+         if not root.exists():
+             print(f"✗ Path does not exist: {root_path}")
+             return []
+-        
+         if not root.is_dir():
+             print(f"✗ Path is not a directory: {root_path}")
+             return []
+-        
+         try:
+-            if recursive:
+-                # Recursively find all video files
+-                for file_path in root.rglob('*'):
+-                    if file_path.is_file() and file_path.suffix.lower() in self.VIDEO_EXTENSIONS:
+-                        video_files.append(str(file_path.absolute()))
+-            else:
+-                # Only scan top-level directory
+-                for file_path in root.glob('*'):
+-                    if file_path.is_file() and file_path.suffix.lower() in self.VIDEO_EXTENSIONS:
+-                        video_files.append(str(file_path.absolute()))
++            pattern = root.rglob('*') if recursive else root.glob('*')
++            for file_path in pattern:
++                if file_path.is_file() and file_path.suffix.lower() in self.VIDEO_EXTENSIONS:
++                    video_files.append(str(file_path.absolute()))
+         except PermissionError as e:
+             print(f"✗ Permission denied scanning {root_path}: {e}")
+-        
+         return sorted(video_files)
+     
+     def analyze_file(self, file_path: str) -> Optional[Dict]:
+-        """
+-        Analyze a video file using HandBrakeCLI.
+-        
+-        Args:
+-            file_path: Path to video file
+-            
+-        Returns:
+-            Dictionary with video specs or None if analysis fails
+-        """
+-        if not self.handbrake_available:
+-            # Return basic info without HandBrake
+-            return self._get_basic_file_info(file_path)
+-        
++        """Analyze a video file. Uses ffprobe (primary) then HandBrake (fallback)."""
++        if self.ffprobe_available:
++            result = self._probe_with_ffprobe(file_path)
++            if result and result.get('codec', 'unknown') != 'unknown':
++                return result
++        if self.handbrake_available:
++            result = self._probe_with_handbrake(file_path)
++            if result:
++                return result
++        return self._get_basic_file_info(file_path)
++
++    def _probe_with_ffprobe(self, file_path: str) -> Optional[Dict]:
++        try:
++            result = subprocess.run(
++                ['ffprobe', '-v', 'quiet', '-print_format', 'json',
++                 '-show_streams', '-show_format', file_path],
++                capture_output=True, text=True, timeout=30
++            )
++            if result.returncode != 0 or not result.stdout.strip():
++                return None
++            return self._parse_ffprobe_json(json.loads(result.stdout))
++        except subprocess.TimeoutExpired:
++            print(f"⚠ ffprobe timeout: {Path(file_path).name}")
++        except Exception as e:
++            print(f"⚠ ffprobe failed for {Path(file_path).name}: {e}")
++        return None
++
++    def _parse_ffprobe_json(self, data: Dict) -> Dict:
++        specs = {'codec': 'unknown', 'resolution': 'unknown', 'framerate': 0,
++                 'audio_tracks': [], 'duration': 0, 'bit_rate': 0}
++        fmt = data.get('format', {})
++        try:
++            specs['duration'] = float(fmt.get('duration', 0))
++            specs['bit_rate'] = int(fmt.get('bit_rate', 0))
++        except (ValueError, TypeError):
++            pass
++        for stream in data.get('streams', []):
++            codec_type = stream.get('codec_type', '')
++            if codec_type == 'video':
++                specs['codec'] = self._normalise_codec(stream.get('codec_name', 'unknown'))
++                w, h = stream.get('width', 0), stream.get('height', 0)
++                if w and h:
++                    specs['resolution'] = f"{w}x{h}"
++                for fr_key in ('r_frame_rate', 'avg_frame_rate'):
++                    fr_str = stream.get(fr_key, '')
++                    if fr_str and fr_str not in ('0/0', '0', ''):
++                        try:
++                            if '/' in fr_str:
++                                num, den = fr_str.split('/')
++                                den_int = int(den)
++                                if den_int > 0:
++                                    fps = round(int(num) / den_int, 3)
++                                    if fps > 0:
++                                        specs['framerate'] = fps
++                                        break
++                            else:
++                                fps = float(fr_str)
++                                if fps > 0:
++                                    specs['framerate'] = fps
++                                    break
++                        except (ValueError, ZeroDivisionError):
++                            continue
++            elif codec_type == 'audio':
++                tags = stream.get('tags', {}) or {}
++                specs['audio_tracks'].append({
++                    'codec': stream.get('codec_name', 'unknown'),
++                    'language': tags.get('language', tags.get('lang', 'und')),
++                    'channels': stream.get('channels', 0),
++                    'sample_rate': stream.get('sample_rate', ''),
++                })
++        return specs
++
++    def _probe_with_handbrake(self, file_path: str) -> Optional[Dict]:
+         try:
+-            # Run HandBrakeCLI with --scan --json
+             result = subprocess.run(
+                 ['HandBrakeCLI', '--scan', '--json', '-i', file_path],
+-                capture_output=True,
+-                text=True,
+-                timeout=30
++                capture_output=True, text=True, timeout=60
+             )
+-            
+-            # HandBrake outputs JSON to stderr
+-            if result.stderr:
+-                # Find JSON in output
+-                lines = result.stderr.split('\n')
+-                json_str = None
+-                
+-                for i, line in enumerate(lines):
+-                    if '"JSON Title Set"' in line or line.strip().startswith('{'):
+-                        # Found JSON start, capture until end
+-                        json_lines = []
+-                        for j in range(i, len(lines)):
+-                            json_lines.append(lines[j])
+-                            if lines[j].strip() == '}':
+-                                break
+-                        json_str = '\n'.join(json_lines)
+-                        break
+-                
+-                if json_str:
+-                    try:
+-                        data = json.loads(json_str)
+-                        return self._parse_handbrake_json(data)
+-                    except json.JSONDecodeError:
+-                        pass
+-            
+-            # Fallback to basic info
+-            return self._get_basic_file_info(file_path)
+-            
++            stderr = result.stderr or ''
++            json_match = re.search(r'\{\s*"JSON Title Set"', stderr)
++            if not json_match:
++                return None
++            json_candidate = stderr[json_match.start():]
++            data = None
++            depth, in_string, escape_next = 0, False, False
++            for i, ch in enumerate(json_candidate):
++                if escape_next:
++                    escape_next = False
++                    continue
++                if ch == '\\' and in_string:
++                    escape_next = True
++                    continue
++                if ch == '"':
++                    in_string = not in_string
++                if not in_string:
++                    if ch == '{':
++                        depth += 1
++                    elif ch == '}':
++                        depth -= 1
++                        if depth == 0:
++                            try:
++                                data = json.loads(json_candidate[:i + 1])
++                            except json.JSONDecodeError:
++                                pass
++                            break
++            if data:
++                title_set = data.get('JSON Title Set', data)
++                return self._parse_handbrake_json(title_set)
+         except subprocess.TimeoutExpired:
+-            print(f"⚠ Timeout analyzing {file_path}")
+-            return self._get_basic_file_info(file_path)
++            print(f"⚠ HandBrake scan timeout: {Path(file_path).name}")
+         except Exception as e:
+-            print(f"✗ Error analyzing {file_path}: {e}")
+-            return None
+-    
++            print(f"⚠ HandBrake scan error: {e}")
++        return None
++
+     def _parse_handbrake_json(self, data: Dict) -> Dict:
+-        """Parse HandBrake JSON output to extract video specs."""
+-        specs = {
+-            'codec': 'unknown',
+-            'resolution': 'unknown',
+-            'framerate': 0,
+-            'audio_tracks': []
+-        }
+-        
++        specs = {'codec': 'unknown', 'resolution': 'unknown', 'framerate': 0, 'audio_tracks': []}
+         try:
+-            if 'TitleList' in data and len(data['TitleList']) > 0:
+-                title = data['TitleList'][0]
+-                
+-                # Video codec
+-                if 'VideoCodec' in title:
+-                    codec = title['VideoCodec'].lower()
+-                    if 'av1' in codec or 'av01' in codec:
+-                        specs['codec'] = 'av1'
+-                    elif 'hevc' in codec or 'h265' in codec or 'h.265' in codec:
+-                        specs['codec'] = 'h265'
+-                    elif 'avc' in codec or 'h264' in codec or 'h.264' in codec:
+-                        specs['codec'] = 'h264'
+-                    else:
+-                        specs['codec'] = codec
+-                
+-                # Resolution
+-                if 'Geometry' in title:
+-                    width = title['Geometry'].get('Width', 0)
+-                    height = title['Geometry'].get('Height', 0)
+-                    specs['resolution'] = f"{width}x{height}"
+-                
+-                # Framerate
+-                if 'FrameRate' in title:
+-                    specs['framerate'] = title['FrameRate']
+-                
+-                # Audio tracks
+-                if 'AudioList' in title:
+-                    for audio in title['AudioList']:
+-                        specs['audio_tracks'].append({
+-                            'codec': audio.get('CodecName', 'unknown'),
+-                            'language': audio.get('Language', 'unknown')
+-                        })
++            title_list = data.get('TitleList', [])
++            if not title_list:
++                return specs
++            title = title_list[0]
++            raw_codec = title.get('VideoCodec', '').lower()
++            if raw_codec:
++                specs['codec'] = self._normalise_codec(raw_codec)
++            geo = title.get('Geometry', {})
++            if geo:
++                w, h = geo.get('Width', 0), geo.get('Height', 0)
++                if w and h:
++                    specs['resolution'] = f"{w}x{h}"
++            fr = title.get('FrameRate', {})
++            if isinstance(fr, dict):
++                num, den = fr.get('Num', 0), fr.get('Den', 1)
++                if den and den > 0:
++                    specs['framerate'] = round(num / den, 3)
++            elif isinstance(fr, (int, float)):
++                specs['framerate'] = float(fr)
++            for audio in title.get('AudioList', []):
++                specs['audio_tracks'].append({
++                    'codec': audio.get('CodecName', 'unknown'),
++                    'language': audio.get('Language', 'und'),
++                })
+         except Exception as e:
+             print(f"⚠ Error parsing HandBrake JSON: {e}")
+-        
+         return specs
+-    
++
++    def _normalise_codec(self, raw: str) -> str:
++        raw = raw.lower()
++        if 'av1' in raw or 'av01' in raw:
++            return 'av1'
++        if 'hevc' in raw or 'h265' in raw or 'h.265' in raw or 'x265' in raw:
++            return 'h265'
++        if 'avc' in raw or 'h264' in raw or 'h.264' in raw or 'x264' in raw:
++            return 'h264'
++        if 'vp9' in raw or 'vp09' in raw:
++            return 'vp9'
++        if 'vp8' in raw:
++            return 'vp8'
++        if 'mpeg4' in raw or 'xvid' in raw or 'divx' in raw:
++            return 'mpeg4'
++        if 'mpeg2' in raw or 'mpeg-2' in raw:
++            return 'mpeg2'
++        if 'wmv' in raw:
++            return 'wmv'
++        return raw if raw else 'unknown'
++
+     def _get_basic_file_info(self, file_path: str) -> Dict:
+-        """Get basic file information without HandBrake."""
+         path = Path(file_path)
+-        
+         return {
+-            'codec': 'unknown',
+-            'resolution': 'unknown',
+-            'framerate': 0,
+-            'audio_tracks': [],
+-            'file_size': path.stat().st_size if path.exists() else 0
++            'codec': 'unknown', 'resolution': 'unknown', 'framerate': 0,
++            'audio_tracks': [], 'file_size': path.stat().st_size if path.exists() else 0
+         }
+     
+     def check_file_permissions(self, file_path: str) -> Tuple[str, str]:
+-        """
+-        Check if file can be read and written.
+-        
+-        Returns:
+-            Tuple of (status, message)
+-            status: 'ok', 'no_read', 'no_write', 'not_found'
+-        """
+         path = Path(file_path)
+-        
+         if not path.exists():
+             return 'not_found', f"File does not exist: {file_path}"
+-        
+         if not os.access(file_path, os.R_OK):
+             return 'no_read', f"No read permission: {file_path}"
+-        
+-        # Check write permission on parent directory
+         if not os.access(path.parent, os.W_OK):
+             return 'no_write', f"No write permission on directory: {path.parent}"
+-        
+         return 'ok', 'File permissions OK'
+     
+     def scan_root(self, root_id: int) -> int:
+-        """
+-        Scan a configured scan root and add files to queue.
+-        
+-        Args:
+-            root_id: ID of scan root to scan
+-            
+-        Returns:
+-            Number of files added to queue
+-        """
+         scan_roots = db.get_scan_roots()
+         scan_root = next((r for r in scan_roots if r['id'] == root_id), None)
+-        
+         if not scan_root:
+             print(f"✗ Scan root {root_id} not found")
+             return 0
+-        
+         if not scan_root['enabled']:
+             print(f"⚠ Scan root {root_id} is disabled")
+             return 0
+-        
+         print(f"Scanning: {scan_root['path']}")
+-        
+-        # Get profile
+         profile = db.get_profile(scan_root['profile_id'])
+         if not profile:
+             print(f"✗ Profile {scan_root['profile_id']} not found")
+             return 0
+-        
+-        # Discover video files
+-        video_files = self.discover_video_files(
+-            scan_root['path'],
+-            recursive=scan_root['recursive']
+-        )
+-        
++        video_files = self.discover_video_files(scan_root['path'], recursive=scan_root['recursive'])
+         print(f"Found {len(video_files)} video files")
+-        
+-        # Analyze and queue files
+         added_count = 0
+-        
+         for file_path in video_files:
+-            # Check if already in queue
+             existing = db.get_queue_items()
+             if any(item['file_path'] == file_path for item in existing):
+                 continue
+-            
+-            # Check permissions
+-            perm_status, perm_message = self.check_file_permissions(file_path)
+-            
+-            # Analyze file
++            perm_status, _ = self.check_file_permissions(file_path)
+             current_specs = self.analyze_file(file_path)
+-            
+             if not current_specs:
+                 continue
+-            
+-            # Build target specs from profile
+             target_specs = {
+                 'codec': profile['codec'],
+                 'resolution': profile['resolution'],
+                 'framerate': profile['framerate'],
+                 'audio_codec': profile['audio_codec']
+             }
+-            
+-            # Check if file needs encoding
+-            needs_encoding = self._needs_encoding(current_specs, target_specs)
+-            
+-            if not needs_encoding:
++            if not self._needs_encoding(current_specs, target_specs):
+                 print(f"  ⊙ Skipping (already optimized): {Path(file_path).name}")
+                 continue
+-            
+-            # Estimate savings (rough estimate: AV1 = 50% of H264, H265 = 60%)
+             file_size = Path(file_path).stat().st_size
+-            savings = 0
+-            
+-            if target_specs['codec'] == 'av1' and current_specs['codec'] != 'av1':
+-                savings = int(file_size * 0.5)
+-            elif target_specs['codec'] == 'h265' and current_specs['codec'] == 'h264':
+-                savings = int(file_size * 0.4)
+-            
+-            # Add to queue
++            savings = self._estimate_savings(file_size, current_specs.get('codec', 'unknown'), target_specs.get('codec', 'unknown'))
+             db.add_to_queue(
+-                file_path=file_path,
+-                root_id=root_id,
+-                profile_id=scan_root['profile_id'],
++                file_path=file_path, root_id=root_id, profile_id=scan_root['profile_id'],
+                 status='pending' if perm_status == 'ok' else 'permission_error',
+-                current_specs=current_specs,
+-                target_specs=target_specs,
+-                file_size_bytes=file_size,
+-                estimated_savings_bytes=savings
++                current_specs=current_specs, target_specs=target_specs,
++                file_size_bytes=file_size, estimated_savings_bytes=savings
+             )
+-            
+             added_count += 1
+-            print(f"  + Added to queue: {Path(file_path).name}")
+-        
++            print(f"  + Added: {Path(file_path).name} [{current_specs.get('codec','?')} {current_specs.get('resolution','?')}]")
+         print(f"✓ Added {added_count} files to queue")
+         return added_count
+-    
++
++    def _estimate_savings(self, file_size: int, current_codec: str, target_codec: str) -> int:
++        if target_codec == 'av1' and current_codec not in ('av1',):
++            return int(file_size * 0.50)
++        if target_codec == 'h265' and current_codec in ('h264', 'mpeg4', 'mpeg2', 'xvid', 'wmv'):
++            return int(file_size * 0.40)
++        if target_codec == 'h264' and current_codec in ('mpeg4', 'mpeg2', 'wmv'):
++            return int(file_size * 0.30)
++        return 0
++
+     def _needs_encoding(self, current_specs: Dict, target_specs: Dict) -> bool:
+-        """
+-        Determine if a file needs encoding based on current vs target specs.
+-        """
+-        # Check codec
+-        if current_specs.get('codec') != target_specs.get('codec'):
++        current_codec = current_specs.get('codec', 'unknown')
++        if current_codec == 'unknown':
+             return True
+-        
+-        # Check resolution if specified
+-        if target_specs.get('resolution') and current_specs.get('resolution') != target_specs.get('resolution'):
++        target_codec = target_specs.get('codec')
++        if target_codec and current_codec != target_codec:
+             return True
+-        
+-        # File matches target specs
++        target_res = target_specs.get('resolution')
++        if target_res and target_res not in ('', 'preserve', None):
++            current_res = current_specs.get('resolution', 'unknown')
++            if current_res != 'unknown' and current_res != target_res:
++                return True
+         return False
+     
+     def scan_all_roots(self) -> int:
+-        """
+-        Scan all enabled scan roots.
+-        
+-        Returns:
+-            Total number of files added to queue
+-        """
+         scan_roots = db.get_scan_roots(enabled_only=True)
+-        
+         if not scan_roots:
+             print("⚠ No enabled scan roots found")
+             return 0
+-        
+-        total_added = 0
+-        
+-        for root in scan_roots:
+-            added = self.scan_root(root['id'])
+-            total_added += added
+-        
+-        return total_added
++        return sum(self.scan_root(root['id']) for root in scan_roots)
+ 
+ 
+ # Global scanner instance
+diff --git a/app/scheduler.py b/app/scheduler.py
+index 5f1625d..881b725 100644
+--- a/app/scheduler.py
++++ b/app/scheduler.py
+@@ -1,12 +1,14 @@
+ """
+ Scheduler module for Optimizarr.
+-Manages scheduled encoding based on time windows and day-of-week settings.
++Manages scheduled encoding based on time windows, day-of-week settings,
++and optionally Windows Active Hours (rest hours).
+ """
+ from apscheduler.schedulers.background import BackgroundScheduler
+-from apscheduler.triggers.cron import CronTrigger
+ from datetime import datetime, time as dt_time
++import platform
++import threading
+ import time
+-from typing import Optional, Dict, List
++from typing import Optional, Dict
+ from app.database import db
+ 
+ 
+@@ -17,18 +19,16 @@ class ScheduleManager:
+         self.scheduler = BackgroundScheduler()
+         self.is_enabled = False
+         self.schedule_config = None
+-        self.manual_override = False  # Manual start/stop overrides schedule
++        self.manual_override = False
+         
+     def start(self):
+-        """Start the scheduler."""
+         if not self.scheduler.running:
+             self.scheduler.start()
+             print("✓ Scheduler started")
+     
+     def stop(self):
+-        """Stop the scheduler."""
+         if self.scheduler.running:
+-            self.scheduler.shutdown()
++            self.scheduler.shutdown(wait=False)
+             print("✓ Scheduler stopped")
+     
+     def load_schedule(self) -> Optional[Dict]:
+@@ -36,34 +36,47 @@ class ScheduleManager:
+         try:
+             with db.get_connection() as conn:
+                 cursor = conn.cursor()
++                cursor.execute("PRAGMA table_info(schedule)")
++                cols = {row[1] for row in cursor.fetchall()}
++                
++                # Ensure new columns exist (migration)
++                if 'timezone' not in cols:
++                    cursor.execute("ALTER TABLE schedule ADD COLUMN timezone TEXT DEFAULT 'local'")
++                if 'use_windows_rest_hours' not in cols:
++                    cursor.execute("ALTER TABLE schedule ADD COLUMN use_windows_rest_hours BOOLEAN DEFAULT 0")
++                if 'max_concurrent_jobs' not in cols:
++                    cursor.execute("ALTER TABLE schedule ADD COLUMN max_concurrent_jobs INTEGER DEFAULT 1")
++                conn.commit()
++
+                 cursor.execute("""
+-                    SELECT enabled, days_of_week, start_time, end_time, timezone
+-                    FROM schedule
+-                    LIMIT 1
++                    SELECT enabled, days_of_week, start_time, end_time,
++                           timezone, use_windows_rest_hours, max_concurrent_jobs
++                    FROM schedule LIMIT 1
+                 """)
+                 row = cursor.fetchone()
+                 
+                 if row:
+                     self.schedule_config = {
+                         'enabled': bool(row[0]),
+-                        'days_of_week': row[1],  # Comma-separated: "0,1,2,3,4,5,6"
+-                        'start_time': row[2],    # HH:MM format
+-                        'end_time': row[3],      # HH:MM format
+-                        'timezone': row[4] or 'UTC'
++                        'days_of_week': row[1] or '0,1,2,3,4,5,6',
++                        'start_time': row[2] or '22:00',
++                        'end_time': row[3] or '06:00',
++                        'timezone': row[4] or 'local',
++                        'use_windows_rest_hours': bool(row[5]),
++                        'max_concurrent_jobs': int(row[6] or 1),
+                     }
+                     self.is_enabled = self.schedule_config['enabled']
+                     return self.schedule_config
+                 else:
+-                    # Create default schedule (disabled)
+                     cursor.execute("""
+-                        INSERT INTO schedule (enabled, days_of_week, start_time, end_time, timezone)
+-                        VALUES (0, '0,1,2,3,4,5,6', '22:00', '06:00', 'UTC')
++                        INSERT INTO schedule (enabled, days_of_week, start_time, end_time,
++                                              timezone, use_windows_rest_hours, max_concurrent_jobs)
++                        VALUES (0, '0,1,2,3,4,5,6', '22:00', '06:00', 'local', 0, 1)
+                     """)
+                     conn.commit()
+                     return self.load_schedule()
+-                    
+         except Exception as e:
+-            print(f"⚠️ Error loading schedule: {e}")
++            print(f"⚠ Error loading schedule: {e}")
+             return None
+     
+     def save_schedule(self, config: Dict) -> bool:
+@@ -71,6 +84,16 @@ class ScheduleManager:
+         try:
+             with db.get_connection() as conn:
+                 cursor = conn.cursor()
++                # Ensure columns exist before writing
++                cursor.execute("PRAGMA table_info(schedule)")
++                cols = {row[1] for row in cursor.fetchall()}
++                if 'timezone' not in cols:
++                    cursor.execute("ALTER TABLE schedule ADD COLUMN timezone TEXT DEFAULT 'local'")
++                if 'use_windows_rest_hours' not in cols:
++                    cursor.execute("ALTER TABLE schedule ADD COLUMN use_windows_rest_hours BOOLEAN DEFAULT 0")
++                if 'max_concurrent_jobs' not in cols:
++                    cursor.execute("ALTER TABLE schedule ADD COLUMN max_concurrent_jobs INTEGER DEFAULT 1")
++
+                 cursor.execute("""
+                     UPDATE schedule SET
+                         enabled = ?,
+@@ -78,29 +101,65 @@ class ScheduleManager:
+                         start_time = ?,
+                         end_time = ?,
+                         timezone = ?,
+-                        updated_at = CURRENT_TIMESTAMP
++                        use_windows_rest_hours = ?,
++                        max_concurrent_jobs = ?
+                 """, (
+                     config.get('enabled', False),
+                     config.get('days_of_week', '0,1,2,3,4,5,6'),
+                     config.get('start_time', '22:00'),
+                     config.get('end_time', '06:00'),
+-                    config.get('timezone', 'UTC')
++                    config.get('timezone', 'local'),
++                    config.get('use_windows_rest_hours', False),
++                    config.get('max_concurrent_jobs', 1),
+                 ))
+                 conn.commit()
+-            
+-            # Reload configuration
+             self.load_schedule()
+-            
+-            # Restart scheduler if enabled
+             if self.is_enabled:
+                 self.setup_schedule_check()
+-            
+             return True
+-            
+         except Exception as e:
+             print(f"✗ Error saving schedule: {e}")
+             return False
+-    
++
++    # ------------------------------------------------------------------
++    # Windows Active Hours (rest hours)
++    # ------------------------------------------------------------------
++
++    @staticmethod
++    def get_windows_active_hours() -> Optional[Dict]:
++        """
++        Read Windows Active Hours from the registry.
++        Active Hours = the times the user is ACTIVE (not rest).
++        We invert them to get rest hours for encoding.
++        Returns None on non-Windows or if registry key missing.
++        """
++        if platform.system() != "Windows":
++            return None
++        try:
++            import winreg
++            key_path = r"SOFTWARE\Microsoft\WindowsUpdate\UX\Settings"
++            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key_path, 0,
++                                winreg.KEY_READ) as key:
++                active_start, _ = winreg.QueryValueEx(key, "ActiveHoursStart")
++                active_end, _ = winreg.QueryValueEx(key, "ActiveHoursEnd")
++            # Active hours: user is awake from active_start to active_end
++            # Rest hours (good for encoding): from active_end to active_start
++            return {
++                "active_start": int(active_start),   # e.g. 8  → 08:00
++                "active_end": int(active_end),         # e.g. 22 → 22:00
++                "rest_start": int(active_end),          # encoding starts at active_end
++                "rest_end": int(active_start),           # encoding ends at active_start
++                "rest_start_str": f"{int(active_end):02d}:00",
++                "rest_end_str": f"{int(active_start):02d}:00",
++            }
++        except Exception as e:
++            print(f"⚠ Could not read Windows Active Hours: {e}")
++            return None
++
++    # ------------------------------------------------------------------
++    # Schedule window check
++    # ------------------------------------------------------------------
++
+     def is_within_schedule(self) -> bool:
+         """Check if current time is within the scheduled encoding window."""
+         if not self.is_enabled or not self.schedule_config:
+@@ -108,91 +167,92 @@ class ScheduleManager:
+         
+         now = datetime.now()
+         current_day = now.weekday()  # 0=Monday, 6=Sunday
+-        current_time = now.time()
+-        
+-        # Check if today is a scheduled day
+-        scheduled_days = [int(d) for d in self.schedule_config['days_of_week'].split(',')]
++
++        # Day-of-week check
++        try:
++            scheduled_days = [int(d) for d in self.schedule_config['days_of_week'].split(',')]
++        except Exception:
++            scheduled_days = list(range(7))
+         if current_day not in scheduled_days:
+             return False
+-        
+-        # Parse start and end times
+-        start_time_str = self.schedule_config['start_time']
+-        end_time_str = self.schedule_config['end_time']
+-        
+-        start_hour, start_min = map(int, start_time_str.split(':'))
+-        end_hour, end_min = map(int, end_time_str.split(':'))
+-        
+-        start_time = dt_time(start_hour, start_min)
+-        end_time = dt_time(end_hour, end_min)
+-        
+-        # Handle overnight schedules (e.g., 22:00 to 06:00)
+-        if start_time <= end_time:
+-            # Same day schedule (e.g., 09:00 to 17:00)
+-            return start_time <= current_time <= end_time
++
++        # Determine effective time window
++        if self.schedule_config.get('use_windows_rest_hours'):
++            win_hours = self.get_windows_active_hours()
++            if win_hours:
++                start_str = win_hours['rest_start_str']
++                end_str = win_hours['rest_end_str']
++            else:
++                start_str = self.schedule_config.get('start_time', '22:00')
++                end_str = self.schedule_config.get('end_time', '06:00')
+         else:
+-            # Overnight schedule (e.g., 22:00 to 06:00)
+-            return current_time >= start_time or current_time <= end_time
++            start_str = self.schedule_config.get('start_time', '22:00')
++            end_str = self.schedule_config.get('end_time', '06:00')
++
++        try:
++            sh, sm = map(int, start_str.split(':'))
++            eh, em = map(int, end_str.split(':'))
++        except Exception:
++            return False
++
++        start_t = dt_time(sh, sm)
++        end_t = dt_time(eh, em)
++        current_t = now.time()
++
++        # Handle overnight schedules (22:00 → 06:00)
++        if start_t <= end_t:
++            return start_t <= current_t <= end_t
++        else:
++            return current_t >= start_t or current_t <= end_t
+     
+     def setup_schedule_check(self):
+         """Set up periodic schedule checking."""
+-        # Remove existing jobs
+         self.scheduler.remove_all_jobs()
+-        
+         if not self.is_enabled:
+             return
+-        
+-        # Add a job that runs every minute to check schedule
+         self.scheduler.add_job(
+             func=self.check_and_trigger,
+             trigger='cron',
+-            minute='*',  # Every minute
++            minute='*',
+             id='schedule_check',
+             replace_existing=True
+         )
+-        
+-        print(f"✓ Schedule check configured (runs every minute)")
++        print("✓ Schedule check configured (runs every minute)")
+     
+     def check_and_trigger(self):
+-        """Check schedule and trigger encoding if within window."""
++        """Check schedule and trigger/stop encoding accordingly."""
+         from app.encoder import encoder_pool
+-        
+-        # Skip if manual override is active
+         if self.manual_override:
+             return
+-        
+         is_scheduled = self.is_within_schedule()
+         is_running = encoder_pool.is_running
+-        
+         if is_scheduled and not is_running:
+-            print(f"⏰ Schedule active - Starting encoding")
+-            # Start encoding in a separate thread to avoid blocking scheduler
+-            import threading
+-            thread = threading.Thread(target=encoder_pool.process_queue)
+-            thread.daemon = True
+-            thread.start()
+-            
++            print("⏰ Schedule active — Starting encoding")
++            t = threading.Thread(target=encoder_pool.process_queue, daemon=True)
++            t.start()
+         elif not is_scheduled and is_running and not self.manual_override:
+-            print(f"⏰ Outside schedule window - Stopping encoding")
++            print("⏰ Outside schedule window — Stopping encoding")
+             encoder_pool.stop()
+     
+     def enable_manual_override(self):
+-        """Enable manual override (user started encoding manually)."""
+         self.manual_override = True
+-        print("✓ Manual override enabled - schedule will not stop encoding")
++        print("✓ Manual override enabled")
+     
+     def disable_manual_override(self):
+-        """Disable manual override (return to scheduled mode)."""
+         self.manual_override = False
+-        print("✓ Manual override disabled - schedule active")
++        print("✓ Manual override disabled")
+     
+     def get_status(self) -> Dict:
+-        """Get current schedule status."""
++        windows_hours = None
++        if self.schedule_config and self.schedule_config.get('use_windows_rest_hours'):
++            windows_hours = self.get_windows_active_hours()
+         return {
+             'enabled': self.is_enabled,
+             'manual_override': self.manual_override,
+             'within_schedule': self.is_within_schedule(),
+             'config': self.schedule_config,
+-            'scheduler_running': self.scheduler.running
++            'scheduler_running': self.scheduler.running,
++            'windows_active_hours': windows_hours,
+         }
+ 
+ 
+@@ -201,17 +261,14 @@ schedule_manager = ScheduleManager()
+ 
+ 
+ def initialize_scheduler():
+-    """Initialize the scheduler on application startup."""
+     schedule_manager.load_schedule()
+     schedule_manager.start()
+-    
+     if schedule_manager.is_enabled:
+         schedule_manager.setup_schedule_check()
+-        print(f"✓ Scheduler initialized and enabled")
++        print("✓ Scheduler initialized and enabled")
+     else:
+-        print(f"✓ Scheduler initialized (disabled)")
++        print("✓ Scheduler initialized (disabled)")
+ 
+ 
+ def shutdown_scheduler():
+-    """Shutdown the scheduler on application exit."""
+     schedule_manager.stop()
+diff --git a/app/upscaler.py b/app/upscaler.py
+index 2b8fc7c..fb74dde 100644
+--- a/app/upscaler.py
++++ b/app/upscaler.py
+@@ -1,109 +1,323 @@
+ """
+-AI Upscaler Framework for Optimizarr.
+-Detects installed AI upscalers and provides configuration.
+-Supports: Real-ESRGAN, Real-CUGAN, Anime4K, Waifu2x-NCNN-Vulkan
++AI Upscaler module for Optimizarr.
++Detects, downloads, and updates AI upscaler binaries.
++Supports: Real-ESRGAN, Real-CUGAN, Waifu2x-NCNN-Vulkan
+ """
+ import subprocess
+ import shutil
+ import platform
+-from typing import Dict, Optional, List
++import threading
++import zipfile
++import tarfile
++import requests
++import re
++import time
++from typing import Dict, Optional, List, Any
+ from pathlib import Path
++from datetime import datetime, timedelta
+ 
+ from app.logger import optimizarr_logger
+ 
++# ---------------------------------------------------------------------------
++# Upscaler definitions
++# ---------------------------------------------------------------------------
+ 
+-# Supported upscaler definitions
+ UPSCALERS = {
+     "realesrgan": {
+         "name": "Real-ESRGAN",
+         "description": "Best for real-world content (photos, live action, films)",
+         "icon": "🎬",
+-        "binary": "realesrgan-ncnn-vulkan",
++        "binary_linux": "realesrgan-ncnn-vulkan",
+         "binary_win": "realesrgan-ncnn-vulkan.exe",
+         "models": ["realesrgan-x4plus", "realesrgan-x4plus-anime", "realesr-animevideov3"],
+         "default_model": "realesrgan-x4plus",
+         "scale_options": [2, 3, 4],
+         "default_scale": 2,
++        "github_owner": "xinntao",
++        "github_repo": "Real-ESRGAN",
++        "asset_pattern_win": r"realesrgan-ncnn-vulkan.*windows.*\.zip",
++        "asset_pattern_linux": r"realesrgan-ncnn-vulkan.*linux.*\.zip",
++        "best_for": "Movies, TV Shows, Home Videos",
+         "url": "https://github.com/xinntao/Real-ESRGAN/releases",
+-        "best_for": "Movies, TV Shows, Home Videos"
+     },
+     "realcugan": {
+         "name": "Real-CUGAN",
+         "description": "Fast GPU upscaling, good balance of speed and quality",
+         "icon": "⚡",
+-        "binary": "realcugan-ncnn-vulkan",
++        "binary_linux": "realcugan-ncnn-vulkan",
+         "binary_win": "realcugan-ncnn-vulkan.exe",
+         "models": ["models-se", "models-pro", "models-nose"],
+         "default_model": "models-se",
+         "scale_options": [2, 3, 4],
+         "default_scale": 2,
++        "github_owner": "nihui",
++        "github_repo": "realcugan-ncnn-vulkan",
++        "asset_pattern_win": r"realcugan-ncnn-vulkan.*windows.*\.zip",
++        "asset_pattern_linux": r"realcugan-ncnn-vulkan.*ubuntu.*\.zip",
++        "best_for": "Anime, Cartoons",
+         "url": "https://github.com/nihui/realcugan-ncnn-vulkan/releases",
+-        "best_for": "Anime, Cartoons"
+     },
+     "waifu2x": {
+         "name": "Waifu2x NCNN Vulkan",
+         "description": "Classic anime upscaler, GPU-accelerated via Vulkan",
+         "icon": "🎌",
+-        "binary": "waifu2x-ncnn-vulkan",
++        "binary_linux": "waifu2x-ncnn-vulkan",
+         "binary_win": "waifu2x-ncnn-vulkan.exe",
+         "models": ["models-cunet", "models-upconv_7_anime_style_art_rgb"],
+         "default_model": "models-cunet",
+         "scale_options": [1, 2],
+         "default_scale": 2,
++        "github_owner": "nihui",
++        "github_repo": "waifu2x-ncnn-vulkan",
++        "asset_pattern_win": r"waifu2x-ncnn-vulkan.*windows.*\.zip",
++        "asset_pattern_linux": r"waifu2x-ncnn-vulkan.*ubuntu.*\.zip",
++        "best_for": "Anime, Illustrations",
+         "url": "https://github.com/nihui/waifu2x-ncnn-vulkan/releases",
+-        "best_for": "Anime, Illustrations"
+     },
+-    "anime4k": {
+-        "name": "Anime4K",
+-        "description": "Real-time anime upscaling (shader-based, very fast)",
+-        "icon": "🎮",
+-        "binary": None,  # Shader-based, used via mpv/ffmpeg
+-        "binary_win": None,
+-        "models": [],
+-        "default_model": None,
+-        "scale_options": [2],
+-        "default_scale": 2,
+-        "url": "https://github.com/bloc97/Anime4K/releases",
+-        "best_for": "Anime (real-time playback upscaling)"
+-    }
+ }
+ 
++# ---------------------------------------------------------------------------
++# In-memory download state (key → status dict)
++# ---------------------------------------------------------------------------
+ 
+-def detect_upscalers() -> Dict:
+-    """Detect which AI upscalers are installed and available."""
+-    is_windows = platform.system() == "Windows"
+-    results = {
+-        "available": [],
+-        "not_found": [],
+-        "details": {}
++_download_state: Dict[str, Dict] = {}
++_update_cache: Dict[str, Any] = {}   # cached GitHub release info
++_CACHE_TTL = 86400                   # 24 h update check interval
++
++
++def _upscaler_install_dir() -> Path:
++    """Return the directory where Optimizarr stores upscaler binaries."""
++    is_win = platform.system() == "Windows"
++    if is_win:
++        base = Path.home() / "AppData" / "Local" / "Optimizarr" / "upscalers"
++    else:
++        base = Path.home() / ".local" / "share" / "optimizarr" / "upscalers"
++    base.mkdir(parents=True, exist_ok=True)
++    return base
++
++
++def _binary_name(key: str) -> str:
++    upscaler = UPSCALERS[key]
++    is_win = platform.system() == "Windows"
++    return upscaler["binary_win"] if is_win else upscaler["binary_linux"]
++
++
++def _find_binary(key: str) -> Optional[str]:
++    """Return path to installed binary or None."""
++    binary = _binary_name(key)
++    # 1. System PATH
++    found = shutil.which(binary)
++    if found:
++        return found
++    # 2. Optimizarr install dir
++    local = _upscaler_install_dir() / binary
++    if local.exists():
++        return str(local)
++    return None
++
++
++def _get_binary_version(binary_path: str) -> str:
++    try:
++        result = subprocess.run(
++            [binary_path, "--help"],
++            capture_output=True, text=True, timeout=5
++        )
++        output = result.stdout + result.stderr
++        for line in output.split("\n")[:8]:
++            if re.search(r'v?\d+\.\d+', line, re.IGNORECASE):
++                return line.strip()
++        return "installed"
++    except Exception:
++        return "installed"
++
++
++# ---------------------------------------------------------------------------
++# GitHub release helpers
++# ---------------------------------------------------------------------------
++
++def _fetch_latest_release(owner: str, repo: str) -> Optional[Dict]:
++    """Fetch latest release info from GitHub API with simple caching."""
++    cache_key = f"{owner}/{repo}"
++    cached = _update_cache.get(cache_key)
++    if cached:
++        age = time.time() - cached.get("_fetched_at", 0)
++        if age < _CACHE_TTL:
++            return cached
++    try:
++        resp = requests.get(
++            f"https://api.github.com/repos/{owner}/{repo}/releases/latest",
++            headers={"Accept": "application/vnd.github.v3+json"},
++            timeout=10
++        )
++        if resp.status_code == 200:
++            data = resp.json()
++            data["_fetched_at"] = time.time()
++            _update_cache[cache_key] = data
++            return data
++    except Exception as e:
++        print(f"⚠ GitHub API error for {owner}/{repo}: {e}")
++    return None
++
++
++def _find_asset(assets: List[Dict], pattern: str) -> Optional[Dict]:
++    """Find the best matching release asset for the current OS."""
++    regex = re.compile(pattern, re.IGNORECASE)
++    for asset in assets:
++        if regex.search(asset.get("name", "")):
++            return asset
++    return None
++
++
++# ---------------------------------------------------------------------------
++# Download functionality
++# ---------------------------------------------------------------------------
++
++def download_upscaler(key: str) -> Dict:
++    """
++    Start downloading the upscaler binary in a background thread.
++    Returns immediately with the initial state dict.
++    """
++    if key not in UPSCALERS:
++        return {"error": f"Unknown upscaler: {key}"}
++
++    # If already downloading, return current state
++    state = _download_state.get(key, {})
++    if state.get("status") == "downloading":
++        return state
++
++    _download_state[key] = {
++        "status": "starting",
++        "progress": 0,
++        "message": "Fetching release info from GitHub…",
++        "error": None,
++        "version": None,
+     }
+-    
++
++    t = threading.Thread(target=_download_worker, args=(key,), daemon=True)
++    t.start()
++    return _download_state[key]
++
++
++def _download_worker(key: str):
++    upscaler = UPSCALERS[key]
++    state = _download_state[key]
++    is_win = platform.system() == "Windows"
++    install_dir = _upscaler_install_dir()
++
++    try:
++        # 1. Get latest release
++        state["status"] = "downloading"
++        state["message"] = "Fetching latest release info…"
++        release = _fetch_latest_release(upscaler["github_owner"], upscaler["github_repo"])
++        if not release:
++            raise RuntimeError("Could not fetch release info from GitHub")
++
++        tag = release.get("tag_name", "unknown")
++        assets = release.get("assets", [])
++        pattern = upscaler["asset_pattern_win"] if is_win else upscaler["asset_pattern_linux"]
++        asset = _find_asset(assets, pattern)
++
++        if not asset:
++            # Fallback: grab the first zip
++            asset = next((a for a in assets if a["name"].endswith(".zip")), None)
++        if not asset:
++            raise RuntimeError(f"No suitable release asset found for {upscaler['name']} on this OS")
++
++        download_url = asset["browser_download_url"]
++        asset_name = asset["name"]
++        total_size = asset.get("size", 0)
++
++        state["message"] = f"Downloading {asset_name} ({_format_size(total_size)})…"
++
++        # 2. Download the asset
++        archive_path = install_dir / asset_name
++        downloaded = 0
++        with requests.get(download_url, stream=True, timeout=120) as r:
++            r.raise_for_status()
++            with open(archive_path, "wb") as f:
++                for chunk in r.iter_content(chunk_size=65536):
++                    if chunk:
++                        f.write(chunk)
++                        downloaded += len(chunk)
++                        if total_size:
++                            state["progress"] = min(90, int(downloaded / total_size * 90))
++
++        state["progress"] = 90
++        state["message"] = "Extracting archive…"
++
++        # 3. Extract
++        binary_name = _binary_name(key)
++        if asset_name.endswith(".zip"):
++            with zipfile.ZipFile(archive_path, "r") as zf:
++                # Find the binary inside the zip
++                names = zf.namelist()
++                target = next((n for n in names if Path(n).name == binary_name), None)
++                if target is None:
++                    # Just extract everything
++                    zf.extractall(install_dir / key)
++                    # Try to find binary in extracted tree
++                    for p in (install_dir / key).rglob(binary_name):
++                        p.rename(install_dir / binary_name)
++                        break
++                else:
++                    data = zf.read(target)
++                    dest = install_dir / binary_name
++                    with open(dest, "wb") as bf:
++                        bf.write(data)
++        elif asset_name.endswith((".tar.gz", ".tgz")):
++            with tarfile.open(archive_path, "r:gz") as tf:
++                for member in tf.getmembers():
++                    if Path(member.name).name == binary_name:
++                        f_obj = tf.extractfile(member)
++                        if f_obj:
++                            dest = install_dir / binary_name
++                            with open(dest, "wb") as bf:
++                                bf.write(f_obj.read())
++                        break
++
++        # 4. Make binary executable on Linux/macOS
++        binary_path = install_dir / binary_name
++        if binary_path.exists() and not is_win:
++            binary_path.chmod(0o755)
++
++        # 5. Clean up archive
++        try:
++            archive_path.unlink()
++        except Exception:
++            pass
++
++        state["status"] = "installed"
++        state["progress"] = 100
++        state["version"] = tag
++        state["message"] = f"✓ {upscaler['name']} {tag} installed to {install_dir}"
++        optimizarr_logger.app_logger.info("Upscaler installed: %s %s", key, tag)
++
++    except Exception as e:
++        state["status"] = "error"
++        state["error"] = str(e)
++        state["message"] = f"Download failed: {e}"
++        optimizarr_logger.app_logger.error("Upscaler download failed: %s — %s", key, e)
++
++
++def _format_size(size_bytes: int) -> str:
++    for unit in ("B", "KB", "MB", "GB"):
++        if size_bytes < 1024:
++            return f"{size_bytes:.1f} {unit}"
++        size_bytes /= 1024
++    return f"{size_bytes:.1f} GB"
++
++
++# ---------------------------------------------------------------------------
++# Detection
++# ---------------------------------------------------------------------------
++
++def detect_upscalers() -> Dict:
++    """Detect which AI upscalers are installed."""
++    results: Dict = {"available": [], "not_found": [], "details": {}}
+     for key, upscaler in UPSCALERS.items():
+-        binary = upscaler.get("binary_win" if is_windows else "binary")
+-        
+-        if not binary:
+-            # Shader-based (Anime4K), skip binary check
+-            results["not_found"].append(key)
+-            results["details"][key] = {
+-                "name": upscaler["name"],
+-                "installed": False,
+-                "note": "Shader-based, requires manual setup"
+-            }
+-            continue
+-        
+-        # Check if binary is in PATH
+-        found_path = shutil.which(binary)
+-        
+-        if not found_path:
+-            # Also check common install locations
+-            common_paths = _get_common_paths(binary, is_windows)
+-            for cp in common_paths:
+-                if Path(cp).exists():
+-                    found_path = cp
+-                    break
+-        
++        found_path = _find_binary(key)
+         if found_path:
+-            version = _get_upscaler_version(found_path)
++            version = _get_binary_version(found_path)
+             results["available"].append(key)
+             results["details"][key] = {
+                 "name": upscaler["name"],
+@@ -111,58 +325,48 @@ def detect_upscalers() -> Dict:
+                 "path": found_path,
+                 "version": version,
+                 "models": upscaler["models"],
+-                "scale_options": upscaler["scale_options"]
++                "scale_options": upscaler["scale_options"],
++                "download_state": _download_state.get(key),
+             }
+-            optimizarr_logger.app_logger.info("Found upscaler: %s at %s", upscaler["name"], found_path)
+         else:
+             results["not_found"].append(key)
+             results["details"][key] = {
+                 "name": upscaler["name"],
+                 "installed": False,
+-                "download_url": upscaler["url"]
++                "download_url": upscaler["url"],
++                "download_state": _download_state.get(key),
+             }
+-    
+     return results
+ 
+ 
+-def _get_common_paths(binary: str, is_windows: bool) -> List[str]:
+-    """Get common installation paths for upscaler binaries."""
+-    paths = []
+-    
+-    if is_windows:
+-        home = Path.home()
+-        paths.extend([
+-            str(home / "Optimizarr" / "upscalers" / binary),
+-            str(home / "AppData" / "Local" / "Optimizarr" / "upscalers" / binary),
+-            f"C:\\Tools\\{binary}",
+-            f"C:\\Program Files\\{binary.replace('.exe', '')}\\{binary}",
+-        ])
+-    else:
+-        paths.extend([
+-            f"/usr/local/bin/{binary}",
+-            f"/opt/optimizarr/upscalers/{binary}",
+-            str(Path.home() / ".local" / "bin" / binary),
+-            str(Path.home() / "optimizarr" / "upscalers" / binary),
+-        ])
+-    
+-    return paths
+-
+-
+-def _get_upscaler_version(binary_path: str) -> Optional[str]:
+-    """Try to get the version string from an upscaler binary."""
+-    try:
+-        result = subprocess.run(
+-            [binary_path, "--help"],
+-            capture_output=True, text=True, timeout=5
+-        )
+-        # Most ncnn-vulkan tools print version in first few lines
+-        output = result.stdout + result.stderr
+-        for line in output.split('\n')[:5]:
+-            if 'version' in line.lower() or 'v0.' in line or 'v2' in line:
+-                return line.strip()
+-        return "installed"
+-    except Exception:
+-        return "installed"
++def check_for_updates() -> Dict:
++    """
++    Check GitHub for newer versions of all detected upscalers.
++    Returns a dict of key → {current, latest, update_available}.
++    """
++    results = {}
++    for key, upscaler in UPSCALERS.items():
++        found = _find_binary(key)
++        if not found:
++            continue
++        release = _fetch_latest_release(upscaler["github_owner"], upscaler["github_repo"])
++        if not release:
++            continue
++        latest_tag = release.get("tag_name", "")
++        current_ver = _get_binary_version(found)
++        results[key] = {
++            "name": upscaler["name"],
++            "current_version": current_ver,
++            "latest_version": latest_tag,
++            "update_available": latest_tag and latest_tag not in current_ver,
++            "release_url": release.get("html_url", upscaler["url"]),
++        }
++    return results
++
++
++def get_download_status(key: str) -> Dict:
++    """Return current download state for a specific upscaler."""
++    return _download_state.get(key, {"status": "idle", "progress": 0})
+ 
+ 
+ def get_upscaler_info() -> Dict:
+@@ -177,10 +381,35 @@ def get_upscaler_info() -> Dict:
+             "default_model": v["default_model"],
+             "scale_options": v["scale_options"],
+             "default_scale": v["default_scale"],
+-            "download_url": v["url"]
++            "download_url": v["url"],
+         } for k, v in UPSCALERS.items()},
+         "detection": detect_upscalers(),
+-        "workflow_note": "AI upscaling extracts frames, upscales each with AI, "
+-                         "then reassembles before HandBrake encoding. "
+-                         "This is VERY slow (~2-5 min/frame) and GPU-intensive."
++        "workflow_note": (
++            "AI upscaling extracts frames, upscales each with AI, then reassembles "
++            "before HandBrake encoding. This is VERY slow (~2-5 min/frame) and GPU-intensive."
++        ),
+     }
++
++
++# ---------------------------------------------------------------------------
++# Background update scheduler (called from main.py startup)
++# ---------------------------------------------------------------------------
++
++def start_update_checker():
++    """Start a background thread that checks for upscaler updates every 24 h."""
++    def _loop():
++        while True:
++            time.sleep(_CACHE_TTL)  # sleep first, then check
++            try:
++                updates = check_for_updates()
++                for key, info in updates.items():
++                    if info.get("update_available"):
++                        optimizarr_logger.app_logger.info(
++                            "Upscaler update available: %s → %s",
++                            key, info["latest_version"]
++                        )
++            except Exception:
++                pass
++
++    t = threading.Thread(target=_loop, daemon=True, name="upscaler-update-checker")
++    t.start()
+diff --git a/requirements.txt b/requirements.txt
+index 1a5aea5..537baee 100644
+--- a/requirements.txt
++++ b/requirements.txt
+@@ -21,3 +21,4 @@ pydantic-settings==2.6.1
+ 
+ # Utilities
+ python-dotenv==1.0.1
++requests>=2.31.0
+diff --git a/web/static/js/app.js b/web/static/js/app.js
+index 63d6870..ae0c604 100644
+--- a/web/static/js/app.js
++++ b/web/static/js/app.js
+@@ -2149,3 +2149,278 @@ async function importProfiles(event) {
+     // Reset file input
+     event.target.value = '';
+ }
++
++// ============================================================
++// QUEUE PRIORITIZATION
++// ============================================================
++
++async function applyQueuePriority() {
++    const sortBy = document.getElementById('queueSortBy').value;
++    // Map select value to API param + order
++    const sortMap = {
++        'default': { sort_by: 'default', order: 'desc' },
++        'file_size': { sort_by: 'file_size', order: 'desc' },
++        'estimated_savings': { sort_by: 'estimated_savings', order: 'desc' },
++        'filename': { sort_by: 'filename', order: 'asc' },
++    };
++    const params = sortMap[sortBy] || sortMap['default'];
++    const result = await apiRequest('/queue/prioritize', {
++        method: 'POST',
++        body: JSON.stringify(params)
++    });
++    if (result) {
++        showMessage(`✓ ${result.message}`, 'success');
++        loadQueue();
++    }
++}
++
++// ============================================================
++// UPSCALER DOWNLOAD + UPDATE CHECKER (replaces old loadUpscalers)
++// ============================================================
++
++// Track polling intervals per upscaler key
++const _upscalerPollers = {};
++
++async function loadUpscalers() {
++    try {
++        const info = await apiRequest('/upscalers');
++        if (!info) return;
++        renderUpscalerCards(info);
++    } catch (err) {
++        document.getElementById('upscalerStatus').innerHTML =
++            '<p class="text-gray-500">Failed to detect upscalers</p>';
++    }
++}
++
++function renderUpscalerCards(info) {
++    const container = document.getElementById('upscalerStatus');
++    if (!container) return;
++    const defs = info.definitions || {};
++    const det = (info.detection && info.detection.details) ? info.detection.details : {};
++
++    container.innerHTML = Object.entries(defs).map(([key, up]) => {
++        const d = det[key] || {};
++        const installed = d.installed;
++        const dl = d.download_state || {};
++        const dlStatus = dl.status || 'idle';
++        const dlProgress = dl.progress || 0;
++
++        let actionBtn = '';
++        if (dlStatus === 'downloading') {
++            actionBtn = `
++                <div class="mt-2">
++                    <div class="flex justify-between text-xs text-gray-400 mb-1">
++                        <span>${dl.message || 'Downloading…'}</span>
++                        <span>${dlProgress}%</span>
++                    </div>
++                    <div class="bg-gray-600 rounded-full h-1.5">
++                        <div class="bg-blue-500 h-1.5 rounded-full transition-all" style="width:${dlProgress}%"></div>
++                    </div>
++                </div>`;
++        } else if (dlStatus === 'installed' || installed) {
++            actionBtn = `
++                <div class="mt-2 flex items-center gap-2">
++                    <span class="text-xs text-green-400">✓ ${d.version || 'Installed'}</span>
++                    ${d.path ? `<span class="text-xs text-gray-500 truncate max-w-32" title="${d.path}">${d.path}</span>` : ''}
++                    <button onclick="startUpscalerDownload('${key}')" 
++                        class="text-xs text-blue-400 hover:text-blue-300 ml-auto">Update</button>
++                </div>`;
++        } else if (dlStatus === 'error') {
++            actionBtn = `
++                <div class="mt-2">
++                    <p class="text-xs text-red-400">${dl.error || 'Download failed'}</p>
++                    <button onclick="startUpscalerDownload('${key}')"
++                        class="mt-1 bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-xs">Retry</button>
++                </div>`;
++        } else {
++            actionBtn = `
++                <div class="mt-2">
++                    <button onclick="startUpscalerDownload('${key}')"
++                        class="bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded text-sm font-medium">
++                        ⬇ Download
++                    </button>
++                    <a href="${up.download_url}" target="_blank"
++                        class="ml-2 text-xs text-gray-400 hover:text-gray-300">Manual →</a>
++                </div>`;
++        }
++
++        const statusBadge = installed || dlStatus === 'installed'
++            ? '<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">Installed</span>'
++            : '<span class="px-2 py-0.5 bg-gray-600 text-gray-400 text-xs rounded">Not Installed</span>';
++
++        return `
++            <div class="p-4 bg-gray-700 rounded-lg" id="upscaler-card-${key}">
++                <div class="flex justify-between items-start">
++                    <div>
++                        <span class="text-lg">${up.icon}</span>
++                        <span class="font-bold ml-1">${up.name}</span>
++                        <span class="ml-2">${statusBadge}</span>
++                    </div>
++                </div>
++                <p class="text-xs text-gray-400 mt-1">${up.description}</p>
++                <p class="text-xs text-gray-500">Best for: ${up.best_for}</p>
++                ${actionBtn}
++            </div>`;
++    }).join('');
++}
++
++async function startUpscalerDownload(key) {
++    const result = await apiRequest(`/upscalers/${key}/download`, { method: 'POST' });
++    if (!result) return;
++    showMessage(`⬇ Downloading ${key}…`, 'info');
++    // Poll for progress
++    if (_upscalerPollers[key]) clearInterval(_upscalerPollers[key]);
++    _upscalerPollers[key] = setInterval(async () => {
++        const state = await apiRequest(`/upscalers/${key}/download/status`);
++        if (!state) return;
++        // Re-render just this card by refreshing all upscalers
++        const info = await apiRequest('/upscalers');
++        if (info) renderUpscalerCards(info);
++        if (state.status === 'installed' || state.status === 'error') {
++            clearInterval(_upscalerPollers[key]);
++            delete _upscalerPollers[key];
++            if (state.status === 'installed') {
++                showMessage(`✓ ${key} installed successfully!`, 'success');
++            }
++        }
++    }, 1500);
++}
++
++async function checkUpscalerUpdates() {
++    showMessage('Checking for upscaler updates…', 'info');
++    const updates = await apiRequest('/upscalers/check-updates', { method: 'POST' });
++    if (!updates) return;
++    const updateable = Object.entries(updates).filter(([, v]) => v.update_available);
++    if (updateable.length === 0) {
++        showMessage('All upscalers are up to date ✓', 'success');
++    } else {
++        const names = updateable.map(([k, v]) => `${v.name} → ${v.latest_version}`).join(', ');
++        showMessage(`Updates available: ${names}`, 'info');
++    }
++}
++
++// ============================================================
++// WINDOWS REST HOURS (Schedule tab)
++// ============================================================
++
++async function loadWindowsActiveHours() {
++    const avail = document.getElementById('windowsHoursAvailable');
++    const info = document.getElementById('windowsHoursInfo');
++    const toggle = document.getElementById('useWindowsRestHours');
++    if (!avail) return;
++
++    try {
++        const data = await apiRequest('/schedule/windows-active-hours');
++        if (!data || !data.available) {
++            avail.textContent = '(not available on this OS)';
++            if (toggle) toggle.disabled = true;
++            return;
++        }
++        avail.textContent = `(detected: active ${data.active_start}:00–${data.active_end}:00)`;
++        if (info) {
++            info.textContent = `Encoding will run from ${data.rest_start_str} to ${data.rest_end_str} (outside active hours)`;
++            info.classList.remove('hidden');
++        }
++    } catch (e) {
++        avail.textContent = '(not available)';
++        if (toggle) toggle.disabled = true;
++    }
++}
++
++function toggleWindowsHours() {
++    const useWin = document.getElementById('useWindowsRestHours');
++    const manualDiv = document.getElementById('manualTimeWindow');
++    if (!useWin || !manualDiv) return;
++    if (useWin.checked) {
++        manualDiv.style.opacity = '0.4';
++        manualDiv.style.pointerEvents = 'none';
++    } else {
++        manualDiv.style.opacity = '1';
++        manualDiv.style.pointerEvents = '';
++    }
++}
++
++// Override saveSchedule to include new fields
++const _originalSaveSchedule = typeof saveSchedule === 'function' ? saveSchedule : null;
++async function saveSchedule() {
++    const useWinEl = document.getElementById('useWindowsRestHours');
++    const config = {
++        enabled: document.getElementById('scheduleEnabled').checked,
++        days_of_week: Array.from(selectedDays).sort().join(','),
++        start_time: document.getElementById('startTime').value,
++        end_time: document.getElementById('endTime').value,
++        timezone: 'local',
++        use_windows_rest_hours: useWinEl ? useWinEl.checked : false,
++        max_concurrent_jobs: 1,
++    };
++    const result = await apiRequest('/schedule', {
++        method: 'POST',
++        body: JSON.stringify(config)
++    });
++    if (result) {
++        const msgEl = document.getElementById('scheduleMessage');
++        if (msgEl) {
++            msgEl.textContent = '✓ Schedule saved successfully';
++            msgEl.className = 'mt-4 p-3 bg-green-900/50 border border-green-700 rounded text-green-300';
++            msgEl.classList.remove('hidden');
++            setTimeout(() => msgEl.classList.add('hidden'), 3000);
++        }
++        loadSchedule();
++    }
++}
++
++// Override loadSchedule to include Windows hours fields
++const _origLoadSchedule = window._loadScheduleOriginal || null;
++async function loadSchedule() {
++    const schedule = await apiRequest('/schedule');
++    if (!schedule) return;
++    const config = schedule.config || {};
++
++    const enabledEl = document.getElementById('scheduleEnabled');
++    if (enabledEl) enabledEl.checked = config.enabled;
++
++    if (typeof selectedDays !== 'undefined') {
++        selectedDays = new Set((config.days_of_week || '0,1,2,3,4,5,6').split(',').map(Number));
++        if (typeof updateDayButtons === 'function') updateDayButtons();
++    }
++
++    const startEl = document.getElementById('startTime');
++    const endEl = document.getElementById('endTime');
++    if (startEl) startEl.value = config.start_time || '22:00';
++    if (endEl) endEl.value = config.end_time || '06:00';
++
++    const useWinEl = document.getElementById('useWindowsRestHours');
++    if (useWinEl) {
++        useWinEl.checked = config.use_windows_rest_hours || false;
++        toggleWindowsHours();
++    }
++
++    // Status indicators
++    const statusEl = document.getElementById('scheduleStatus');
++    if (statusEl) {
++        statusEl.textContent = config.enabled ? '✓ Enabled' : '✗ Disabled';
++        statusEl.className = config.enabled ? 'ml-2 font-medium text-green-400' : 'ml-2 font-medium text-gray-400';
++    }
++    const withinEl = document.getElementById('withinWindow');
++    if (withinEl) {
++        withinEl.textContent = schedule.within_schedule ? '✓ Yes' : '✗ No';
++        withinEl.className = schedule.within_schedule ? 'ml-2 font-medium text-green-400' : 'ml-2 font-medium text-gray-400';
++    }
++    const overrideEl = document.getElementById('manualOverride');
++    if (overrideEl) {
++        overrideEl.textContent = schedule.manual_override ? '✓ Active' : '✗ Inactive';
++        overrideEl.className = schedule.manual_override ? 'ml-2 font-medium text-yellow-400' : 'ml-2 font-medium text-gray-400';
++    }
++
++    // Load Windows hours info if on this tab
++    loadWindowsActiveHours();
++}
++
++// ============================================================
++// SHOW MESSAGE HELPER (if not already defined)
++// ============================================================
++if (typeof showMessage !== 'function') {
++    function showMessage(msg, type = 'info') {
++        console.log(`[${type.toUpperCase()}] ${msg}`);
++    }
++}
+diff --git a/web/templates/index.html b/web/templates/index.html
+index 713bcd9..d94e242 100644
+--- a/web/templates/index.html
++++ b/web/templates/index.html
+@@ -7,8 +7,8 @@
+     <script src="https://cdn.tailwindcss.com"></script>
+ </head>
+ <body class="bg-gray-900 text-gray-100">
+-    <!-- Navigation -->
+-    <nav class="bg-gray-800 border-b border-gray-700 px-6 py-4">
++    <!-- Navigation - Full width -->
++    <nav class="bg-gray-800 border-b border-gray-700 px-4 sm:px-6 lg:px-8 xl:px-10 py-4">
+         <div class="flex justify-between items-center">
+             <div>
+                 <h1 class="text-2xl font-bold text-blue-400">Optimizarr</h1>
+@@ -28,30 +28,30 @@
+         </div>
+     </nav>
+ 
+-    <!-- Main Content -->
+-    <div class="container mx-auto px-6 py-8">
+-        <!-- Stats Cards -->
+-        <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+-            <div class="bg-gray-800 p-6 rounded-lg">
+-                <h3 class="text-gray-400 text-sm mb-2">Space Saved</h3>
+-                <p id="spaceSaved" class="text-3xl font-bold text-green-400">0 GB</p>
++    <!-- Main Content - Fluid layout for ultra-wide displays -->
++    <div class="w-full px-4 sm:px-6 lg:px-8 xl:px-10 py-6">
++        <!-- Stats Cards - Adaptive grid -->
++        <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-4 2xl:grid-cols-8 gap-4 mb-6">
++            <div class="bg-gray-800 p-4 rounded-lg">
++                <h3 class="text-gray-400 text-xs mb-1">Space Saved</h3>
++                <p id="spaceSaved" class="text-2xl font-bold text-green-400">0 GB</p>
+             </div>
+-            <div class="bg-gray-800 p-6 rounded-lg">
+-                <h3 class="text-gray-400 text-sm mb-2">Files Processed</h3>
+-                <p id="filesProcessed" class="text-3xl font-bold text-blue-400">0</p>
++            <div class="bg-gray-800 p-4 rounded-lg">
++                <h3 class="text-gray-400 text-xs mb-1">Files Processed</h3>
++                <p id="filesProcessed" class="text-2xl font-bold text-blue-400">0</p>
+             </div>
+-            <div class="bg-gray-800 p-6 rounded-lg">
+-                <h3 class="text-gray-400 text-sm mb-2">Queue Pending</h3>
+-                <p id="queuePending" class="text-3xl font-bold text-yellow-400">0</p>
++            <div class="bg-gray-800 p-4 rounded-lg">
++                <h3 class="text-gray-400 text-xs mb-1">Queue Pending</h3>
++                <p id="queuePending" class="text-2xl font-bold text-yellow-400">0</p>
+             </div>
+-            <div class="bg-gray-800 p-6 rounded-lg">
+-                <h3 class="text-gray-400 text-sm mb-2">Active Jobs</h3>
+-                <p id="activeJobs" class="text-3xl font-bold text-purple-400">0</p>
++            <div class="bg-gray-800 p-4 rounded-lg">
++                <h3 class="text-gray-400 text-xs mb-1">Active Jobs</h3>
++                <p id="activeJobs" class="text-2xl font-bold text-purple-400">0</p>
+             </div>
+         </div>
+ 
+-        <!-- Resource Monitoring Cards -->
+-        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
++        <!-- Resource Monitoring Cards - Adaptive -->
++        <div class="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-3 gap-4 mb-6">
+             <div class="bg-gray-800 p-6 rounded-lg">
+                 <h3 class="text-gray-400 text-sm mb-2">CPU Usage</h3>
+                 <div class="flex items-end gap-2">
+@@ -119,9 +119,9 @@
+                     </div>
+                 </div>
+                 
+-                <!-- Filters -->
+-                <div class="mb-4 flex gap-4 items-center">
+-                    <div class="flex-1">
++                <!-- Filters & Sort Controls -->
++                <div class="mb-4 flex flex-wrap gap-3 items-center">
++                    <div class="flex-1 min-w-48">
+                         <input type="text" id="queueSearch" placeholder="🔍 Search by filename..." 
+                             onkeyup="filterQueue()"
+                             class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+@@ -137,10 +137,24 @@
+                             <option value="paused">⏸️ Paused</option>
+                         </select>
+                     </div>
++                    <!-- Sort & Prioritize -->
++                    <div class="flex items-center gap-2">
++                        <span class="text-sm text-gray-400 whitespace-nowrap">Prioritize by:</span>
++                        <select id="queueSortBy" class="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
++                            <option value="default">Default</option>
++                            <option value="file_size">File Size ↓</option>
++                            <option value="estimated_savings">Savings ↓</option>
++                            <option value="filename">Filename A→Z</option>
++                        </select>
++                        <button onclick="applyQueuePriority()" title="Apply priority to queue"
++                            class="bg-purple-600 hover:bg-purple-700 px-3 py-2 rounded text-sm whitespace-nowrap">
++                            ↑ Apply
++                        </button>
++                    </div>
+                     <div>
+                         <label class="flex items-center gap-2 text-sm">
+                             <input type="checkbox" id="autoRefreshQueue" checked onchange="toggleAutoRefresh()">
+-                            <span>Auto-refresh (5s)</span>
++                            <span>Auto-refresh</span>
+                         </label>
+                     </div>
+                 </div>
+@@ -863,10 +877,18 @@
+                 
+                 <!-- AI Upscaler Status -->
+                 <div class="bg-gray-800 rounded-lg p-6">
+-                    <h3 class="text-lg font-bold mb-4">🤖 AI Upscalers</h3>
+-                    <p class="text-sm text-gray-400 mb-4">Detected AI upscaler binaries for pre-encode upscaling (e.g., 480p→1080p)</p>
+-                    <div id="upscalerStatus" class="grid grid-cols-1 md:grid-cols-2 gap-4">
+-                        <p class="text-gray-500 text-sm">Loading...</p>
++                    <div class="flex justify-between items-center mb-2">
++                        <h3 class="text-lg font-bold">🤖 AI Upscalers</h3>
++                        <button onclick="checkUpscalerUpdates()" class="bg-gray-600 hover:bg-gray-500 px-3 py-1 rounded text-sm">
++                            🔄 Check Updates
++                        </button>
++                    </div>
++                    <p class="text-sm text-gray-400 mb-4">
++                        AI upscalers for pre-encode resolution enhancement (e.g. 480p→1080p).
++                        Click <strong>Download</strong> to install automatically.
++                    </p>
++                    <div id="upscalerStatus" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
++                        <p class="text-gray-500 text-sm">Loading…</p>
+                     </div>
+                 </div>
+             </div>
+@@ -903,6 +925,29 @@
+                         </div>
+                     </div>
+                     
++                    <!-- Windows Rest Hours (Windows only) -->
++                    <div id="windowsRestHoursSection" class="p-4 bg-gray-700 rounded-lg border border-blue-600/30">
++                        <div class="flex items-center justify-between">
++                            <div>
++                                <h3 class="font-semibold flex items-center gap-2">
++                                    🪟 Use Windows Active Hours
++                                    <span id="windowsHoursAvailable" class="text-xs text-gray-400 font-normal">(detecting…)</span>
++                                </h3>
++                                <p class="text-sm text-gray-400 mt-1">
++                                    Automatically schedule encoding during Windows' designated rest hours
++                                    (outside your Active Hours set in Windows Update settings).
++                                </p>
++                                <p id="windowsHoursInfo" class="text-xs text-blue-400 mt-1 hidden"></p>
++                            </div>
++                            <label class="relative inline-flex items-center cursor-pointer ml-4">
++                                <input type="checkbox" id="useWindowsRestHours" class="sr-only peer" onchange="toggleWindowsHours()">
++                                <div class="w-11 h-6 bg-gray-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
++                            </label>
++                        </div>
++                    </div>
++
++                    <!-- Time Window (hidden when Windows hours active) -->
++                    <div id="manualTimeWindow">
+                     <!-- Time Window -->
+                     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                         <div>
+@@ -927,6 +972,7 @@
+                             <p class="text-sm text-gray-400 mt-1">When to stop encoding</p>
+                         </div>
+                     </div>
++                    </div> <!-- end manualTimeWindow -->
+                     
+                     <!-- Current Status -->
+                     <div class="p-4 bg-gray-700 rounded-lg">
+-- 
+2.43.0
+
+
+From f4145b09ed31174ad6f035a433f3291016631d52 Mon Sep 17 00:00:00 2001
+From: Optimizarr Dev <optimizarr@dev.local>
+Date: Mon, 23 Feb 2026 16:09:40 +0000
+Subject: [PATCH 2/2] fix: restore def main(), modernize lifespan handler,
+ suppress pynvml FutureWarning
+
+- main.py: Replace deprecated @app.on_event with @asynccontextmanager lifespan
+  (fixes DeprecationWarning on every startup)
+- main.py: Fix missing 'def main():' that caused NameError on startup
+- resources.py: Wrap pynvml import in warnings.catch_warnings(FutureWarning)
+  so the deprecated pynvml package noise is silenced
+  (nvidia-ml-py is the replacement; once users install it the warning
+   goes away entirely, this handles the interim)
+---
+ app/main.py      | 171 ++++++++++++++++++++++-------------------------
+ app/resources.py |  44 +++++++-----
+ 2 files changed, 109 insertions(+), 106 deletions(-)
+
+diff --git a/app/main.py b/app/main.py
+index 807a7d7..3a347a5 100644
+--- a/app/main.py
++++ b/app/main.py
+@@ -2,6 +2,7 @@
+ Main FastAPI application for Optimizarr.
+ """
+ import uvicorn
++from contextlib import asynccontextmanager
+ from fastapi import FastAPI
+ from fastapi.staticfiles import StaticFiles
+ from fastapi.responses import HTMLResponse, FileResponse
+@@ -14,56 +15,108 @@ from app.auth import auth
+ from app.api import routes, auth_routes
+ from app.scheduler import initialize_scheduler, shutdown_scheduler
+ 
+-# Create FastAPI app
++
++# ============================================================
++# Lifespan (replaces deprecated @app.on_event)
++# ============================================================
++
++@asynccontextmanager
++async def lifespan(app: FastAPI):
++    """Startup and shutdown logic using modern lifespan handler."""
++    # ---- STARTUP ----
++    from app.logger import optimizarr_logger
++
++    print("=" * 60)
++    print("Optimizarr - Automated Media Optimization System")
++    print("=" * 60)
++
++    ensure_data_directories()
++    print(f"Database: {settings.db_path}")
++
++    auth.create_default_admin()
++
++    # Seed default profiles on first run
++    if not db.get_profiles():
++        print("Seeding default encoding profiles…")
++        _seed_default_profiles()
++
++    # Start upscaler update checker background thread
++    from app.upscaler import start_update_checker
++    start_update_checker()
++
++    initialize_scheduler()
++
++    from app.watcher import folder_watcher
++    watches = db.get_folder_watches(enabled_only=True)
++    if watches:
++        folder_watcher.start()
++        print(f"✓ Folder watcher started ({len(watches)} active watches)")
++    else:
++        print("  Folder watcher: no active watches configured")
++
++    optimizarr_logger.log_startup("2.1.0", settings.host, settings.port)
++
++    print("=" * 60)
++    print(f"Server starting on http://{settings.host}:{settings.port}")
++    print("=" * 60)
++
++    yield  # Application runs here
++
++    # ---- SHUTDOWN ----
++    from app.logger import optimizarr_logger as _log
++    from app.watcher import folder_watcher as _fw
++    _log.log_shutdown()
++    _fw.stop()
++    print("\nShutting down Optimizarr...")
++    shutdown_scheduler()
++
++
++# ============================================================
++# App instance
++# ============================================================
++
+ app = FastAPI(
+     title="Optimizarr",
+     description="Automated Media Optimization System",
+-    version="2.1.0"
++    version="2.1.0",
++    lifespan=lifespan,
+ )
+ 
+-# CORS middleware
+ app.add_middleware(
+     CORSMiddleware,
+-    allow_origins=["*"],  # In production, specify exact origins
++    allow_origins=["*"],
+     allow_credentials=True,
+     allow_methods=["*"],
+     allow_headers=["*"],
+ )
+ 
+-# Include routers
+ app.include_router(routes.router, prefix="/api", tags=["api"])
+ app.include_router(auth_routes.router, prefix="/api")
+ 
+-# Static files
+ web_dir = Path(__file__).parent.parent / "web"
+ if web_dir.exists():
+     app.mount("/static", StaticFiles(directory=str(web_dir / "static")), name="static")
+ 
+ 
++# ============================================================
++# Page routes
++# ============================================================
++
+ @app.get("/", response_class=HTMLResponse)
+ async def root():
+     """Serve the main web interface."""
+     index_file = web_dir / "templates" / "index.html"
+-    
+     if index_file.exists():
+         return FileResponse(index_file)
+-    
+-    # Fallback if template doesn't exist yet
+     return HTMLResponse("""
+-    <!DOCTYPE html>
+-    <html>
+-    <head>
+-        <title>Optimizarr</title>
+-    </head>
++    <!DOCTYPE html><html><head><title>Optimizarr</title></head>
+     <body>
+         <h1>Optimizarr API</h1>
+-        <p>Welcome to Optimizarr - Automated Media Optimization System</p>
+         <ul>
+             <li><a href="/docs">API Documentation</a></li>
+             <li><a href="/api/health">Health Check</a></li>
+         </ul>
+-    </body>
+-    </html>
++    </body></html>
+     """)
+ 
+ 
+@@ -71,86 +124,20 @@ async def root():
+ async def login_page():
+     """Serve the login page."""
+     login_file = web_dir / "templates" / "login.html"
+-    
+     if login_file.exists():
+         return FileResponse(login_file)
+-    
+-    # Fallback
+     return HTMLResponse("""
+-    <!DOCTYPE html>
+-    <html>
+-    <head>
+-        <title>Login - Optimizarr</title>
+-    </head>
+-    <body>
+-        <h1>Login</h1>
+-        <p>Please use the API at /api/auth/login</p>
+-    </body>
+-    </html>
++    <!DOCTYPE html><html><head><title>Login - Optimizarr</title></head>
++    <body><h1>Login</h1><p>Use the API at /api/auth/login</p></body></html>
+     """)
+ 
+ 
+-@app.on_event("startup")
+-async def startup_event():
+-    """Initialize application on startup."""
+-    from app.logger import optimizarr_logger
+-    
+-    print("=" * 60)
+-    print("Optimizarr - Automated Media Optimization System")
+-    print("=" * 60)
+-    
+-    # Ensure data directories exist
+-    ensure_data_directories()
+-    
+-    # Initialize database (already done in database.py, but explicit here)
+-    print(f"Database: {settings.db_path}")
+-    
+-    # Create default admin user
+-    auth.create_default_admin()
+-    
+-    # Seed default profiles if none exist
+-    profiles = db.get_profiles()
+-    if not profiles:
+-        print("Seeding default encoding profiles…")
+-        _seed_default_profiles()
+-
+-    # Start upscaler update checker background thread
+-    from app.upscaler import start_update_checker
+-    start_update_checker()
+-    
+-    # Initialize scheduler
+-    initialize_scheduler()
+-    
+-    # Start folder watcher
+-    from app.watcher import folder_watcher
+-    watches = db.get_folder_watches(enabled_only=True)
+-    if watches:
+-        folder_watcher.start()
+-        print(f"✓ Folder watcher started ({len(watches)} active watches)")
+-    else:
+-        print("  Folder watcher: no active watches configured")
+-    
+-    # Log startup
+-    optimizarr_logger.log_startup("2.1.0", settings.host, settings.port)
+-    
+-    print("=" * 60)
+-    print(f"Server starting on http://{settings.host}:{settings.port}")
+-    print("=" * 60)
+-
+-
+-@app.on_event("shutdown")
+-async def shutdown_event():
+-    """Cleanup on shutdown."""
+-    from app.logger import optimizarr_logger
+-    from app.watcher import folder_watcher
+-    optimizarr_logger.log_shutdown()
+-    folder_watcher.stop()
+-    print("\nShutting down Optimizarr...")
+-    shutdown_scheduler()
+-
++# ============================================================
++# Default profile seeder
++# ============================================================
+ 
+ def _seed_default_profiles():
+-    """Create a set of sensible default profiles covering the most common use cases."""
++    """Seed sensible default profiles on first run."""
+     profiles = [
+         {
+             "name": "🎬 Movies — AV1 1080p High Quality",
+@@ -213,13 +200,17 @@ def _seed_default_profiles():
+             print(f"  ⚠ Could not create profile '{p['name']}': {e}")
+ 
+ 
++# ============================================================
++# Entry point
++# ============================================================
+ 
++def main():
+     """Main entry point for running the application."""
+     uvicorn.run(
+         "app.main:app",
+         host=settings.host,
+         port=settings.port,
+-        reload=True,  # Enable auto-reload during development
++        reload=True,
+         log_level=settings.log_level.lower()
+     )
+ 
+diff --git a/app/resources.py b/app/resources.py
+index a617d07..922477e 100644
+--- a/app/resources.py
++++ b/app/resources.py
+@@ -21,22 +21,34 @@ class ResourceMonitor:
+ 
+     def _init_gpu_monitoring(self) -> bool:
+         """Initialize GPU monitoring if NVIDIA GPU is available."""
+-        # Try pynvml first
+-        try:
+-            import pynvml
+-            pynvml.nvmlInit()
+-            device_count = pynvml.nvmlDeviceGetCount()
+-            if device_count > 0:
+-                name = pynvml.nvmlDeviceGetName(pynvml.nvmlDeviceGetHandleByIndex(0))
+-                if isinstance(name, bytes):
+-                    name = name.decode('utf-8')
+-                print(f"GPU monitoring enabled (pynvml): {device_count} NVIDIA GPU(s) detected - {name}")
+-                self._gpu_method = 'pynvml'
+-                return True
+-        except ImportError:
+-            print("pynvml not installed, trying nvidia-smi fallback...")
+-        except Exception as e:
+-            print(f"pynvml init failed ({e}), trying nvidia-smi fallback...")
++        # Try nvidia-ml-py (the maintained replacement for pynvml) then pynvml as fallback
++        nvml = None
++        for pkg in ('nvidia_ml_py', 'pynvml'):
++            try:
++                import importlib
++                nvml = importlib.import_module(pkg if pkg == 'pynvml' else 'pynvml')
++                # nvidia-ml-py installs as 'pynvml' module, so just importing pynvml works
++                break
++            except ImportError:
++                continue
++
++        if nvml:
++            try:
++                import warnings
++                with warnings.catch_warnings():
++                    warnings.simplefilter("ignore", FutureWarning)
++                    import pynvml
++                    pynvml.nvmlInit()
++                device_count = pynvml.nvmlDeviceGetCount()
++                if device_count > 0:
++                    name = pynvml.nvmlDeviceGetName(pynvml.nvmlDeviceGetHandleByIndex(0))
++                    if isinstance(name, bytes):
++                        name = name.decode('utf-8')
++                    print(f"GPU monitoring enabled: {device_count} NVIDIA GPU(s) detected - {name}")
++                    self._gpu_method = 'pynvml'
++                    return True
++            except Exception as e:
++                print(f"nvml init failed ({e}), trying nvidia-smi fallback...")
+ 
+         # Fallback: try nvidia-smi
+         try:
+-- 
+2.43.0
+
