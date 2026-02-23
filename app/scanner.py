@@ -258,9 +258,12 @@ class MediaScanner:
         video_files = self.discover_video_files(scan_root['path'], recursive=scan_root['recursive'])
         print(f"Found {len(video_files)} video files")
         added_count = 0
+
+        # Build a set of already-queued paths ONCE — avoids O(n²) DB round-trips
+        existing_paths = {item['file_path'] for item in db.get_queue_items()}
+
         for file_path in video_files:
-            existing = db.get_queue_items()
-            if any(item['file_path'] == file_path for item in existing):
+            if file_path in existing_paths:
                 continue
             perm_status, _ = self.check_file_permissions(file_path)
             current_specs = self.analyze_file(file_path)

@@ -22,3 +22,6 @@ pydantic-settings==2.6.1
 # Utilities
 python-dotenv==1.0.1
 requests>=2.31.0
+
+# Encryption (API key storage for External Connections)
+cryptography>=42.0.0

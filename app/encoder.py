@@ -11,6 +11,7 @@ from typing import Optional, Dict, Callable
 import os
 import shutil
 import signal
+import platform
 
 from app.database import db
 from app.resources import resource_monitor, resource_throttler
@@ -423,15 +424,15 @@ class EncodingJob:
     def _finalize_encoding(self):
         """Replace original file with encoded version and update database."""
         from app.logger import optimizarr_logger
-        
+
         input_path = Path(self.queue_item['file_path'])
-        
+
         # Determine output extension based on container format
         container = self.profile.get('container', 'mkv')
         ext_map = {'mkv': '.mkv', 'mp4': '.mp4', 'webm': '.webm'}
         output_ext = ext_map.get(container, '.mkv')
         output_path = input_path.parent / f"{input_path.stem}_optimized{output_ext}"
-        
+
         if not output_path.exists():
             db.update_queue_item(
                 self.queue_item_id,
@@ -442,22 +443,31 @@ class EncodingJob:
                 str(input_path), 'Output file not found after encoding'
             )
             return
-        
+
         # Get file sizes
         original_size = input_path.stat().st_size
         new_size = output_path.stat().st_size
         savings = original_size - new_size
-        start_time = self.queue_item.get('started_at', '')
-        
+
+        # Calculate encoding duration
+        encoding_time = 0
+        started_at = self.queue_item.get('started_at')
+        if started_at:
+            try:
+                from datetime import datetime
+                start_dt = datetime.strptime(started_at, '%Y-%m-%d %H:%M:%S')
+                encoding_time = int((datetime.utcnow() - start_dt).total_seconds())
+            except (ValueError, TypeError):
+                encoding_time = 0
+
         try:
             # Remove original file
             input_path.unlink()
-            
-            # If container changed, the new file has a different extension
-            # Rename to same stem but with new extension
+
+            # Rename encoded file to original stem with (possibly new) extension
             final_path = input_path.parent / f"{input_path.stem}{output_ext}"
             output_path.rename(final_path)
-            
+
             # Update queue item
             db.update_queue_item(
                 self.queue_item_id,
@@ -465,31 +475,28 @@ class EncodingJob:
                 progress=100.0,
                 completed_at=time.strftime('%Y-%m-%d %H:%M:%S')
             )
-            
-            # Add to history
-            with db.get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    INSERT INTO history 
-                    (file_path, profile_name, original_size_bytes, new_size_bytes, savings_bytes)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (
-                    str(final_path),
-                    self.profile['name'],
-                    original_size,
-                    new_size,
-                    savings
-                ))
-            
+
+            # Add to history — use db.add_history so all fields are populated
+            db.add_history(
+                file_path=str(final_path),
+                profile_name=self.profile['name'],
+                original_size_bytes=original_size,
+                new_size_bytes=new_size,
+                savings_bytes=savings,
+                encoding_time_seconds=encoding_time,
+                codec=self.profile.get('codec'),
+                container=container,
+            )
+
             # Log completion
             savings_pct = (savings / original_size * 100) if original_size > 0 else 0
             optimizarr_logger.log_handbrake_complete(str(input_path), {
-                "original_size_mb": original_size / (1024**2),
-                "new_size_mb": new_size / (1024**2),
+                "original_size_mb": original_size / (1024 ** 2),
+                "new_size_mb": new_size / (1024 ** 2),
                 "savings_percent": savings_pct,
-                "duration_seconds": 0  # TODO: calculate from started_at
+                "duration_seconds": encoding_time,
             })
-            
+
         except Exception as e:
             optimizarr_logger.log_handbrake_error(str(input_path), str(e))
             db.update_queue_item(
@@ -499,37 +506,64 @@ class EncodingJob:
             )
     
     def pause(self, reason: str = None):
-        """Pause the encoding job."""
+        """Pause the encoding job.
+        
+        On Linux/macOS: uses SIGSTOP/SIGCONT for true process suspension.
+        On Windows: SIGSTOP is not available; we use psutil to suspend the
+        process tree instead (suspend all child processes too).
+        """
         if self.process and not self.is_paused:
             try:
-                self.process.send_signal(subprocess.signal.SIGSTOP)
+                if platform.system() == "Windows":
+                    # Windows: suspend via psutil process tree
+                    import psutil
+                    try:
+                        parent = psutil.Process(self.process.pid)
+                        for child in parent.children(recursive=True):
+                            child.suspend()
+                        parent.suspend()
+                    except psutil.NoSuchProcess:
+                        pass
+                else:
+                    # Linux/macOS: SIGSTOP
+                    self.process.send_signal(signal.SIGSTOP)
+
                 self.is_paused = True
                 self.paused_reason = reason
-                
+
                 db.update_queue_item(
                     self.queue_item_id,
                     status='paused',
                     paused_reason=reason
                 )
-                
                 print(f"⏸ Paused: {reason}")
             except Exception as e:
                 print(f"✗ Error pausing: {e}")
-    
+
     def resume(self):
         """Resume a paused encoding job."""
         if self.process and self.is_paused:
             try:
-                self.process.send_signal(subprocess.signal.SIGCONT)
+                if platform.system() == "Windows":
+                    import psutil
+                    try:
+                        parent = psutil.Process(self.process.pid)
+                        for child in parent.children(recursive=True):
+                            child.resume()
+                        parent.resume()
+                    except psutil.NoSuchProcess:
+                        pass
+                else:
+                    self.process.send_signal(signal.SIGCONT)
+
                 self.is_paused = False
                 self.paused_reason = None
-                
+
                 db.update_queue_item(
                     self.queue_item_id,
                     status='processing',
                     paused_reason=None
                 )
-                
                 print(f"▶ Resumed encoding")
             except Exception as e:
                 print(f"✗ Error resuming: {e}")
