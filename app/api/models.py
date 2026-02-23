@@ -191,6 +191,7 @@ class QueueItemResponse(BaseModel):
 class QueueUpdateRequest(BaseModel):
     priority: Optional[int] = Field(None, ge=0, le=100)
     status: Optional[str] = None
+    profile_id: Optional[int] = Field(None, gt=0)
 
 
 # ============================================================

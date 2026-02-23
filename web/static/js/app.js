@@ -3,6 +3,9 @@
 // API client
 const API_BASE = '/api';
 
+// Profiles cache — populated on first load, used by queue rows for name lookups
+let _profilesMap = {};
+
 // Get auth token
 function getToken() {
     return localStorage.getItem('token');
@@ -171,6 +174,11 @@ let queueSortDir = 'desc'; // 'asc' or 'desc'
 
 // Load queue from API → store → filter → display
 async function loadQueue() {
+    // Ensure profiles are cached so queue rows can render profile names
+    if (Object.keys(_profilesMap).length === 0) {
+        const profiles = await apiRequest('/profiles');
+        if (profiles) profiles.forEach(p => { _profilesMap[p.id] = p; });
+    }
     const items = await apiRequest('/queue');
     if (items) {
         allQueueItems = items;
@@ -426,6 +434,7 @@ function displayQueueItems(items) {
                     <th class="py-2 px-2 cursor-pointer hover:text-white select-none" onclick="toggleSort('priority')">
                         Priority ${sortArrow('priority')}
                     </th>
+                    <th class="py-2 px-2">Profile</th>
                     <th class="py-2 px-2">Actions</th>
                 </tr>
             </thead>
@@ -522,6 +531,9 @@ function displayQueueItems(items) {
                 <td class="py-2 px-2"><span class="${sc.color} text-xs">${sc.emoji} ${item.status}</span></td>
                 <td class="py-2 px-2">${progressBar}</td>
                 <td class="py-2 px-2 text-xs text-gray-400">${item.priority}</td>
+                <td class="py-2 px-2">
+                    ${buildProfileSelect(item)}
+                </td>
                 <td class="py-2 px-2">
                     <button onclick="deleteQueueItem(${item.id})"
                         class="text-red-400 hover:text-red-300 text-xs">Delete</button>
@@ -742,7 +754,13 @@ let currentProfileId = null;
 async function loadProfiles() {
     const profiles = await apiRequest('/profiles');
     const container = document.getElementById('profilesList');
-    
+
+    // Always keep the map fresh so queue rows can use it
+    if (profiles && profiles.length > 0) {
+        _profilesMap = {};
+        profiles.forEach(p => { _profilesMap[p.id] = p; });
+    }
+
     if (!profiles || profiles.length === 0) {
         container.innerHTML = '<p class="text-gray-400">No profiles yet. Create one to get started!</p>';
         return;
@@ -2468,5 +2486,71 @@ async function seedDefaultProfiles() {
         }
     } finally {
         if (btn) { btn.disabled = false; btn.textContent = origText; }
+    }
+}
+
+
+// ============================================================
+// QUEUE — INLINE PROFILE CHANGE
+// ============================================================
+
+/**
+ * Build a compact profile <select> for a queue row.
+ * Shows the current profile name; changing it fires an immediate PATCH.
+ * Disabled for processing/completed items.
+ */
+function buildProfileSelect(item) {
+    const profiles = Object.values(_profilesMap);
+
+    if (profiles.length === 0) {
+        // Map not yet populated — show raw ID as fallback
+        return `<span class="text-gray-500 text-xs">Profile #${item.profile_id || '?'}</span>`;
+    }
+
+    const isLocked = item.status === 'processing';
+    const currentId = item.profile_id || '';
+
+    // Find current profile name for the title tooltip
+    const currentProfile = _profilesMap[currentId];
+    const currentName = currentProfile
+        ? currentProfile.name.replace(/^[^\w]*\s*/, '')   // strip leading emoji for title
+        : `Profile #${currentId}`;
+
+    const options = profiles
+        .map(p => `<option value="${p.id}" ${p.id === currentId ? 'selected' : ''}>${p.name}</option>`)
+        .join('');
+
+    return `
+        <select
+            title="Profile: ${currentName}"
+            onchange="changeQueueProfile(${item.id}, parseInt(this.value))"
+            ${isLocked ? 'disabled' : ''}
+            class="bg-gray-700 border border-gray-600 rounded px-1 py-0.5 text-xs
+                   text-gray-200 max-w-[160px] truncate
+                   ${isLocked ? 'opacity-50 cursor-not-allowed' : 'hover:border-blue-500 cursor-pointer'}">
+            ${options}
+        </select>
+    `;
+}
+
+/**
+ * PATCH the queue item with a new profile_id.
+ * Updates _profilesMap lookup inline without a full queue reload.
+ */
+async function changeQueueProfile(itemId, profileId) {
+    const result = await apiRequest(`/queue/${itemId}`, {
+        method: 'PATCH',
+        body: JSON.stringify({ profile_id: profileId })
+    });
+
+    if (result) {
+        // Update local cache so re-render shows new value immediately
+        const item = allQueueItems.find(i => i.id === itemId);
+        if (item) item.profile_id = profileId;
+        const name = _profilesMap[profileId]?.name || `Profile #${profileId}`;
+        showMessage(`✓ Profile changed to "${name}"`, 'success');
+    } else {
+        // Revert visual state by re-rendering
+        filterQueue();
     }
 }
