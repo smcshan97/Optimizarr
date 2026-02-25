@@ -442,6 +442,38 @@
                     <p class="text-gray-500 text-sm">Loading…</p>
                 </div>
             </div>
+
+            <!-- Backup & Restore Section -->
+            <div class="bg-gray-800 rounded-lg p-6 mt-6">
+                <h2 class="text-xl font-bold mb-1">💾 Backup & Restore</h2>
+                <p class="text-sm text-gray-400 mb-6">Download a complete backup of your database (profiles, scan roots, queue, history) or restore from a previous backup.</p>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <!-- Backup -->
+                    <div class="bg-gray-700 rounded-lg p-5">
+                        <h3 class="font-semibold mb-1">📤 Download Backup</h3>
+                        <p class="text-xs text-gray-400 mb-4">Downloads the full SQLite database as a <code class="bg-gray-900 px-1 rounded">.db</code> file. Includes everything: profiles, scan roots, watch folders, history, and settings.</p>
+                        <button onclick="downloadBackup()"
+                            class="bg-blue-600 hover:bg-blue-700 px-5 py-2 rounded text-sm font-medium transition-colors">
+                            Download Backup
+                        </button>
+                    </div>
+
+                    <!-- Restore -->
+                    <div class="bg-gray-700 rounded-lg p-5">
+                        <h3 class="font-semibold mb-1">📥 Restore from Backup</h3>
+                        <p class="text-xs text-gray-400 mb-3">Upload a previously downloaded <code class="bg-gray-900 px-1 rounded">.db</code> file. <strong class="text-yellow-300">Overwrites your current database.</strong> Optimizarr must be restarted after restore.</p>
+                        <div class="flex items-center gap-3">
+                            <label class="bg-gray-600 hover:bg-gray-500 px-5 py-2 rounded text-sm font-medium cursor-pointer transition-colors">
+                                Choose File
+                                <input type="file" accept=".db" onchange="restoreBackup(event)" class="hidden">
+                            </label>
+                            <span id="restoreFileName" class="text-xs text-gray-400">No file chosen</span>
+                        </div>
+                        <div id="restoreStatus" class="mt-3 text-xs hidden"></div>
+                    </div>
+                </div>
+            </div>
         </div>
 
         <!-- External Connection Modal -->
@@ -1186,8 +1218,13 @@
                 
                 <!-- System Health -->
                 <div class="bg-gray-800 rounded-lg p-6">
-                    <h3 class="text-lg font-bold mb-4">System Health</h3>
-                    <div id="healthStatus" class="grid grid-cols-1 md:grid-cols-4 gap-4">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-lg font-bold">System Health</h3>
+                        <button onclick="loadHealth()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm transition-colors">
+                            🔄 Refresh
+                        </button>
+                    </div>
+                    <div id="healthStatus">
                         <p class="text-gray-500 text-sm">Loading...</p>
                     </div>
                 </div>

@@ -485,12 +485,33 @@ function displayQueueItems(items) {
                     <span class="text-red-400 font-mono text-xs w-14 text-right" title="${item.error_message || ''}">${progress > 0 ? progress.toFixed(1) + '%' : 'ERR'}</span>
                 </div>`;
         } else if (item.status === 'processing' || (item.status === 'paused' && progress > 0)) {
+            // Calculate elapsed and ETA from started_at
+            let etaStr = '';
+            if (item.started_at && item.status === 'processing' && progress > 0.5) {
+                try {
+                    const startMs  = new Date(item.started_at.replace(' ', 'T') + 'Z').getTime();
+                    const elapsedS = Math.max(0, (Date.now() - startMs) / 1000);
+                    const totalEstS = (elapsedS / (progress / 100));
+                    const remainS   = Math.max(0, totalEstS - elapsedS);
+
+                    const fmt = (s) => {
+                        s = Math.round(s);
+                        if (s < 60)   return s + 's';
+                        if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
+                        return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
+                    };
+                    etaStr = `<div class="text-xs text-gray-500 mt-0.5">${fmt(elapsedS)} elapsed · ~${fmt(remainS)} left</div>`;
+                } catch (_) {}
+            }
             progressBar = `
-                <div class="flex items-center gap-2">
-                    <div class="flex-1 bg-gray-600 rounded-full h-2.5 overflow-hidden">
-                        <div class="${sc.barColor} h-2.5 rounded-full transition-all duration-700" style="width: ${progress}%"></div>
+                <div>
+                    <div class="flex items-center gap-2">
+                        <div class="flex-1 bg-gray-600 rounded-full h-2.5 overflow-hidden">
+                            <div class="${sc.barColor} h-2.5 rounded-full transition-all duration-700" style="width: ${progress}%"></div>
+                        </div>
+                        <span class="${sc.color} font-mono text-xs font-bold w-14 text-right">${progress.toFixed(1)}%</span>
                     </div>
-                    <span class="${sc.color} font-mono text-xs font-bold w-14 text-right">${progress.toFixed(1)}%</span>
+                    ${etaStr}
                 </div>`;
         } else {
             // Pending — empty bar
@@ -2111,44 +2132,101 @@ function renderRecentHistory(recent) {
 }
 
 async function loadHealth() {
+    const container = document.getElementById('healthStatus');
     try {
-        const health = await apiRequest('/health');
-        if (!health) return;
-        
-        const container = document.getElementById('healthStatus');
-        container.innerHTML = `
-            <div class="p-3 bg-gray-700 rounded">
-                <div class="text-xs text-gray-400 mb-1">Service</div>
-                <div class="font-bold ${health.status === 'ok' ? 'text-green-400' : 'text-yellow-400'}">
-                    ${health.status === 'ok' ? '● Healthy' : '⚠ ' + health.status}
-                </div>
-                <div class="text-xs text-gray-500 mt-1">v${health.version}</div>
-            </div>
-            <div class="p-3 bg-gray-700 rounded">
-                <div class="text-xs text-gray-400 mb-1">HandBrakeCLI</div>
-                <div class="font-bold ${health.handbrake?.installed ? 'text-green-400' : 'text-red-400'}">
-                    ${health.handbrake?.installed ? '● Installed' : '✗ Not Found'}
-                </div>
-                <div class="text-xs text-gray-500 mt-1 truncate">${health.handbrake?.path || 'not in PATH'}</div>
-            </div>
-            <div class="p-3 bg-gray-700 rounded">
-                <div class="text-xs text-gray-400 mb-1">Database</div>
-                <div class="font-bold ${health.database?.status === 'ok' ? 'text-green-400' : 'text-red-400'}">
-                    ${health.database?.status === 'ok' ? '● OK' : '✗ Error'}
-                </div>
-                <div class="text-xs text-gray-500 mt-1">${health.database?.profiles || 0} profiles, ${health.database?.history_records || 0} history</div>
-            </div>
-            ${health.disk ? `
-            <div class="p-3 bg-gray-700 rounded">
-                <div class="text-xs text-gray-400 mb-1">Disk Space</div>
-                <div class="font-bold ${health.disk.percent_used > 90 ? 'text-red-400' : 'text-green-400'}">
-                    ${health.disk.free_gb} GB free
-                </div>
-                <div class="text-xs text-gray-500 mt-1">${health.disk.percent_used}% used of ${health.disk.total_gb} GB</div>
-            </div>` : ''}
-        `;
+        const h = await apiRequest('/health');
+        if (!h) return;
+
+        const ok  = (v) => `<span class="font-bold text-green-400">● ${v}</span>`;
+        const err = (v) => `<span class="font-bold text-red-400">✗ ${v}</span>`;
+        const warn= (v) => `<span class="font-bold text-yellow-400">⚠ ${v}</span>`;
+        const sub = (v) => `<div class="text-xs text-gray-500 mt-0.5 truncate">${v}</div>`;
+
+        const card = (title, body) => `
+            <div class="p-4 bg-gray-700 rounded-lg">
+                <div class="text-xs text-gray-400 font-medium uppercase tracking-wider mb-2">${title}</div>
+                ${body}
+            </div>`;
+
+        // Service card
+        const overall = h.status === 'ok' ? ok('Healthy') : h.status === 'warning' ? warn('Warning') : err('Degraded');
+        let cards = card('Service', `${overall}${sub('v' + (h.version || '?'))}`);
+
+        // HandBrakeCLI
+        cards += card('HandBrakeCLI',
+            (h.handbrake?.installed ? ok('Installed') : err('Not Found')) +
+            sub(h.handbrake?.path || 'not in PATH'));
+
+        // ffprobe
+        cards += card('FFprobe',
+            (h.ffprobe?.installed ? ok('Installed') : err('Not Found')) +
+            sub(h.ffprobe?.path || 'not in PATH'));
+
+        // ffmpeg
+        cards += card('FFmpeg',
+            (h.ffmpeg?.installed ? ok('Installed') : err('Not Found')) +
+            sub(h.ffmpeg?.path || 'not in PATH'));
+
+        // Database
+        cards += card('Database',
+            (h.database?.status === 'ok' ? ok('OK') : err('Error')) +
+            sub(`${h.database?.profiles||0} profiles · ${h.database?.queue_items||0} queued · ${h.database?.history_records||0} history`));
+
+        // Scheduler
+        if (h.scheduler) {
+            cards += card('Scheduler',
+                (h.scheduler.enabled ? (h.scheduler.running ? ok('Active') : warn('Enabled, not running')) : '<span class="text-gray-400">Disabled</span>') +
+                sub(h.scheduler.next_window || ''));
+        }
+
+        // Upscalers
+        if (h.upscalers && Object.keys(h.upscalers).length > 0) {
+            const upLines = Object.entries(h.upscalers).map(([k, v]) =>
+                `<div class="flex justify-between text-xs mt-1"><span class="text-gray-300">${k}</span>${v.installed ? ok('✓') : '<span class="text-gray-500">—</span>'}</div>`
+            ).join('');
+            cards += card('AI Upscalers', upLines);
+        }
+
+        // Queue summary
+        if (h.queue) {
+            const q = h.queue;
+            cards += card('Queue',
+                `<div class="text-xs space-y-0.5">
+                    ${q.processing ? `<div class="text-blue-400">⚙ Processing: ${q.processing}</div>` : ''}
+                    <div class="text-gray-300">Pending: ${q.pending}</div>
+                    <div class="text-green-400">Completed: ${q.completed}</div>
+                    ${q.failed ? `<div class="text-red-400">Failed: ${q.failed}</div>` : ''}
+                </div>`);
+        }
+
+        // Disk — global
+        if (h.disk) {
+            const pct = h.disk.percent_used;
+            cards += card('App Disk',
+                (pct > 90 ? err(`${h.disk.free_gb} GB free`) : ok(`${h.disk.free_gb} GB free`)) +
+                sub(`${pct}% used of ${h.disk.total_gb} GB`));
+        }
+
+        // Disk per scan root
+        if (h.scan_root_disk && h.scan_root_disk.length > 0) {
+            const rootLines = h.scan_root_disk.map(d => {
+                const name = d.path.split(/[/\\]/).pop() || d.path;
+                if (d.status === 'missing') return `<div class="flex justify-between text-xs mt-1"><span class="text-gray-400 truncate">${_esc(name)}</span>${err('Missing')}</div>`;
+                if (d.status === 'error')   return `<div class="flex justify-between text-xs mt-1"><span class="text-gray-400 truncate">${_esc(name)}</span>${err('Error')}</div>`;
+                const free = d.free_gb;
+                const pct  = d.percent_used;
+                return `<div class="flex justify-between text-xs mt-1" title="${_esc(d.path)}">
+                    <span class="text-gray-300 truncate max-w-[120px]">${_esc(name)}</span>
+                    <span class="${pct > 90 ? 'text-red-400' : 'text-green-400'}">${free} GB free</span>
+                </div>`;
+            }).join('');
+            cards += card('Library Disk', rootLines);
+        }
+
+        container.innerHTML = `<div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">${cards}</div>`;
+
     } catch (err) {
-        document.getElementById('healthStatus').innerHTML = '<p class="text-red-400">Failed to load health status</p>';
+        container.innerHTML = '<p class="text-red-400 text-sm">Failed to load health status</p>';
     }
 }
 
@@ -2207,9 +2285,73 @@ async function importProfiles(event) {
     event.target.value = '';
 }
 
-// ============================================================
-// QUEUE PRIORITIZATION
-// ============================================================
+async function downloadBackup() {
+    try {
+        // Use a direct link so the browser triggers a file download
+        const token = localStorage.getItem('auth_token');
+        const resp  = await fetch('/api/backup', {
+            headers: token ? { 'Authorization': 'Bearer ' + token } : {}
+        });
+        if (!resp.ok) {
+            const err = await resp.json().catch(() => ({}));
+            showMessage('Backup failed: ' + (err.detail || resp.statusText), 'error');
+            return;
+        }
+        const blob     = await resp.blob();
+        const cd       = resp.headers.get('Content-Disposition') || '';
+        const match    = cd.match(/filename="?([^"]+)"?/);
+        const filename = match ? match[1] : `optimizarr_backup_${new Date().toISOString().split('T')[0]}.db`;
+        const url = URL.createObjectURL(blob);
+        const a   = document.createElement('a');
+        a.href = url; a.download = filename;
+        document.body.appendChild(a); a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+        showMessage('Backup downloaded: ' + filename, 'success');
+    } catch (err) {
+        showMessage('Backup failed: ' + err.message, 'error');
+    }
+}
+
+async function restoreBackup(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const fileNameEl  = document.getElementById('restoreFileName');
+    const statusEl    = document.getElementById('restoreStatus');
+    if (fileNameEl) fileNameEl.textContent = file.name;
+
+    if (!confirm(`⚠️ This will OVERWRITE your current database with "${file.name}".\n\nYour current profiles, scan roots, history, and settings will be replaced.\n\nContinue?`)) {
+        event.target.value = '';
+        return;
+    }
+
+    if (statusEl) { statusEl.className = 'mt-3 text-xs text-yellow-400'; statusEl.textContent = '⏳ Uploading…'; }
+
+    try {
+        const token = localStorage.getItem('auth_token');
+        const form  = new FormData();
+        form.append('file', file);
+        const resp = await fetch('/api/restore-upload', {
+            method: 'POST',
+            headers: token ? { 'Authorization': 'Bearer ' + token } : {},
+            body: form,
+        });
+        const data = await resp.json().catch(() => ({}));
+        if (resp.ok) {
+            if (statusEl) { statusEl.className = 'mt-3 text-xs text-green-400'; statusEl.textContent = '✓ ' + (data.message || 'Restored successfully'); }
+            showMessage('Database restored. Please restart Optimizarr.', 'success');
+        } else {
+            if (statusEl) { statusEl.className = 'mt-3 text-xs text-red-400'; statusEl.textContent = '✗ ' + (data.detail || 'Restore failed'); }
+            showMessage('Restore failed: ' + (data.detail || 'Unknown error'), 'error');
+        }
+    } catch (err) {
+        if (statusEl) { statusEl.className = 'mt-3 text-xs text-red-400'; statusEl.textContent = '✗ ' + err.message; }
+        showMessage('Restore failed: ' + err.message, 'error');
+    }
+
+    event.target.value = '';
+}
 
 async function applyQueuePriority() {
     const sortBy = document.getElementById('queueSortBy').value;

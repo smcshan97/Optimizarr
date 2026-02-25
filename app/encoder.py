@@ -6,6 +6,7 @@ import subprocess
 import re
 import time
 import threading
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Callable
 import os
@@ -346,7 +347,7 @@ class EncodingJob:
         db.update_queue_item(
             self.queue_item_id,
             status='processing',
-            started_at=time.strftime('%Y-%m-%d %H:%M:%S')
+            started_at=datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
         )
 
         from app.logger import optimizarr_logger
@@ -513,7 +514,6 @@ class EncodingJob:
         started_at = self.queue_item.get('started_at')
         if started_at:
             try:
-                from datetime import datetime
                 start_dt = datetime.strptime(started_at, '%Y-%m-%d %H:%M:%S')
                 encoding_time = int((datetime.utcnow() - start_dt).total_seconds())
             except (ValueError, TypeError):
@@ -532,7 +532,7 @@ class EncodingJob:
                 self.queue_item_id,
                 status='completed',
                 progress=100.0,
-                completed_at=time.strftime('%Y-%m-%d %H:%M:%S')
+                completed_at=datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
             )
 
             # Add to history — use db.add_history so all fields are populated

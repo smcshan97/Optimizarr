@@ -1,7 +1,8 @@
 """
 Main API routes for Optimizarr.
 """
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query, UploadFile, File
+from fastapi.responses import FileResponse
 from typing import List, Optional
 from pathlib import Path
 from datetime import datetime
@@ -712,7 +713,151 @@ async def health_check():
     except Exception:
         health["folder_watcher"] = {"running": False}
     
+    # ffprobe / ffmpeg check
+    ffprobe_path = shutil.which("ffprobe")
+    ffmpeg_path  = shutil.which("ffmpeg")
+    health["ffprobe"] = {"installed": ffprobe_path is not None, "path": ffprobe_path or "not found"}
+    health["ffmpeg"]  = {"installed": ffmpeg_path  is not None, "path": ffmpeg_path  or "not found"}
+    if not ffprobe_path or not ffmpeg_path:
+        health["status"] = "degraded"
+
+    # Upscaler binaries
+    try:
+        from app.upscaler import detect_upscalers
+        upscaler_status = detect_upscalers()
+        health["upscalers"] = upscaler_status
+    except Exception:
+        health["upscalers"] = {}
+
+    # Disk space per enabled scan root
+    try:
+        roots = db.get_scan_roots()
+        root_disk = []
+        seen_mounts = set()
+        for root in roots:
+            if not root.get('enabled'):
+                continue
+            rpath = Path(root['path'])
+            if not rpath.exists():
+                root_disk.append({"path": root['path'], "status": "missing"})
+                continue
+            try:
+                usage = shutil.disk_usage(str(rpath))
+                mount_key = (usage.total, usage.used)   # deduplicate same mount
+                pct = round((usage.used / usage.total) * 100, 1)
+                entry = {
+                    "path": root['path'],
+                    "free_gb": round(usage.free / (1024**3), 1),
+                    "total_gb": round(usage.total / (1024**3), 1),
+                    "percent_used": pct,
+                }
+                if pct > 95:
+                    entry["warning"] = "Low disk space!"
+                    health["status"] = "warning"
+                if mount_key not in seen_mounts:
+                    root_disk.append(entry)
+                    seen_mounts.add(mount_key)
+            except Exception:
+                root_disk.append({"path": root['path'], "status": "error"})
+        health["scan_root_disk"] = root_disk
+    except Exception:
+        pass
+
+    # Scheduler status
+    try:
+        from app.scheduler import schedule_manager
+        sched = db.get_schedule()
+        health["scheduler"] = {
+            "enabled": sched.get("enabled", False),
+            "running": schedule_manager.running if schedule_manager else False,
+            "next_window": f"{sched.get('start_time','?')} – {sched.get('end_time','?')}",
+        }
+    except Exception:
+        health["scheduler"] = {"enabled": False, "running": False}
+
+    # Queue summary
+    try:
+        q_items = db.get_queue_items()
+        health["queue"] = {
+            "total": len(q_items),
+            "pending":    sum(1 for i in q_items if i["status"] == "pending"),
+            "processing": sum(1 for i in q_items if i["status"] == "processing"),
+            "completed":  sum(1 for i in q_items if i["status"] == "completed"),
+            "failed":     sum(1 for i in q_items if i["status"] == "failed"),
+        }
+    except Exception:
+        pass
+
     return health
+
+
+# ============================================================
+# CONFIG BACKUP / RESTORE
+# ============================================================
+
+@router.get("/backup")
+async def download_backup(current_user: dict = Depends(get_current_admin_user)):
+    """Download the full SQLite database as a backup file."""
+    import shutil as _shutil
+    from app.config import settings
+
+    db_path = Path(settings.db_path)
+    if not db_path.exists():
+        raise HTTPException(status_code=404, detail="Database file not found")
+
+    # Copy to a temp file so we don't stream a live write
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
+    tmp.close()
+    _shutil.copy2(str(db_path), tmp.name)
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"optimizarr_backup_{timestamp}.db"
+    return FileResponse(
+        path=tmp.name,
+        media_type="application/octet-stream",
+        filename=filename,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.post("/restore")
+async def restore_backup(
+    current_user: dict = Depends(get_current_admin_user),
+):
+    """Use POST /restore-upload with multipart/form-data instead."""
+    raise HTTPException(status_code=405, detail="Use POST /restore-upload with multipart/form-data, field 'file'")
+
+
+@router.post("/restore-upload")
+async def restore_backup_upload(
+    file: UploadFile = File(...),
+    current_user: dict = Depends(get_current_admin_user),
+):
+    """Restore a database backup. Upload .db file as multipart field 'file'. Restart required after."""
+    import shutil as _shutil
+    import tempfile
+    from app.config import settings
+
+    db_path = Path(settings.db_path)
+    contents = await file.read()
+
+    if len(contents) < 100 or not contents.startswith(b"SQLite format 3\x00"):
+        raise HTTPException(status_code=400, detail="File does not appear to be a valid SQLite database")
+
+    # Atomic replace via temp file on same filesystem
+    tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False, dir=db_path.parent)
+    try:
+        tmp.write(contents)
+        tmp.close()
+        _shutil.move(tmp.name, str(db_path))
+    except Exception as e:
+        import os
+        try: os.unlink(tmp.name)
+        except Exception: pass
+        raise HTTPException(status_code=500, detail=f"Restore failed: {e}")
+
+    return {"message": "Database restored successfully. Please restart Optimizarr for changes to take effect.", "size_bytes": len(contents)}
 
 
 # ============================================================
