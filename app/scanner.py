@@ -285,14 +285,40 @@ class MediaScanner:
                 target_specs.get('codec', 'unknown'),
                 current_specs=current_specs
             )
+
+            # ── Upscale plan ─────────────────────────────────────────────────
+            import json as _json
+            upscale_plan = None
+            if scan_root.get('upscale_enabled'):
+                src_height = current_specs.get('height', 0) or 0
+                trigger_below  = scan_root.get('upscale_trigger_below', 720)
+                target_height  = scan_root.get('upscale_target_height', 1080)
+                upscale_model  = scan_root.get('upscale_model', 'realesrgan-x4plus')
+                upscale_factor = scan_root.get('upscale_factor', 2)
+                upscale_key    = scan_root.get('upscale_key', 'realesrgan')
+
+                # Only flag for upscale if source is meaningfully below trigger
+                # and the result would actually reach (or approach) target_height
+                if src_height > 0 and src_height < trigger_below and src_height < (target_height * 0.85):
+                    upscale_plan = _json.dumps({
+                        "enabled":      True,
+                        "upscaler_key": upscale_key,
+                        "model":        upscale_model,
+                        "factor":       upscale_factor,
+                        "source_height": src_height,
+                        "target_height": target_height,
+                    })
+
             db.add_to_queue(
                 file_path=file_path, root_id=root_id, profile_id=scan_root['profile_id'],
                 status='pending' if perm_status == 'ok' else 'permission_error',
                 current_specs=current_specs, target_specs=target_specs,
-                file_size_bytes=file_size, estimated_savings_bytes=savings
+                file_size_bytes=file_size, estimated_savings_bytes=savings,
+                upscale_plan=upscale_plan,
             )
+            upscale_tag = " 🔼upscale" if upscale_plan else ""
             added_count += 1
-            print(f"  + Added: {Path(file_path).name} [{current_specs.get('codec','?')} {current_specs.get('resolution','?')}]")
+            print(f"  + Added: {Path(file_path).name} [{current_specs.get('codec','?')} {current_specs.get('resolution','?')}]{upscale_tag}")
         print(f"✓ Added {added_count} files to queue")
         return added_count
 

@@ -831,6 +831,89 @@
                             </div>
                         </label>
                     </div>
+
+                    <!-- AI Upscale Settings (collapsible) -->
+                    <div class="border border-gray-700 rounded-lg overflow-hidden">
+                        <button type="button" onclick="toggleUpscaleSection()"
+                            class="w-full flex items-center justify-between px-4 py-3 bg-gray-750 hover:bg-gray-700 transition-colors text-left">
+                            <div class="flex items-center gap-2">
+                                <span id="upscaleSectionToggleIcon" class="text-gray-400 text-xs">▶</span>
+                                <span class="text-sm font-medium">🤖 AI Upscaling</span>
+                                <span id="upscaleEnabledBadge" class="hidden text-xs bg-blue-600 text-white px-2 py-0.5 rounded">Enabled</span>
+                            </div>
+                            <span class="text-xs text-gray-500">Upscale low-res files before encoding</span>
+                        </button>
+                        <div id="upscaleSection" class="hidden px-4 py-4 space-y-4 bg-gray-900 border-t border-gray-700">
+
+                            <!-- Enable toggle -->
+                            <div class="flex items-start gap-3">
+                                <input type="checkbox" id="scanRootUpscaleEnabled" class="mt-0.5 w-4 h-4"
+                                    onchange="handleUpscaleToggle()">
+                                <div>
+                                    <label for="scanRootUpscaleEnabled" class="text-sm font-medium cursor-pointer">Enable AI Upscaling for this library</label>
+                                    <p class="text-xs text-gray-400 mt-0.5">Files below the trigger threshold will be upscaled with AI before HandBrake encodes them. This is GPU-intensive and slow — ideal for overnight batch jobs.</p>
+                                </div>
+                            </div>
+
+                            <div id="upscaleSettingsFields" class="space-y-4 opacity-50 pointer-events-none">
+
+                                <!-- Upscaler selection -->
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-300 mb-2">Upscaler</label>
+                                    <select id="scanRootUpscaleKey" onchange="handleUpscalerKeyChange()"
+                                        class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <option value="realesrgan">🎬 Real-ESRGAN — best for live action / films</option>
+                                        <option value="realcugan">⚡ Real-CUGAN — fast, good for anime</option>
+                                        <option value="waifu2x">🎌 Waifu2x NCNN — classic anime upscaler</option>
+                                    </select>
+                                </div>
+
+                                <!-- Model -->
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-300 mb-2">Model</label>
+                                    <select id="scanRootUpscaleModel"
+                                        class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <!-- populated by handleUpscalerKeyChange() -->
+                                    </select>
+                                </div>
+
+                                <!-- Trigger + Target in two columns -->
+                                <div class="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-300 mb-2">Trigger Below (height px)</label>
+                                        <input type="number" id="scanRootUpscaleTrigger" value="720" min="240" max="2160" step="1"
+                                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <p class="text-xs text-gray-500 mt-1">Files shorter than this are candidates</p>
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-300 mb-2">Target Height (px)</label>
+                                        <input type="number" id="scanRootUpscaleTarget" value="1080" min="480" max="4320" step="1"
+                                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <p class="text-xs text-gray-500 mt-1">Desired output height</p>
+                                    </div>
+                                </div>
+
+                                <!-- Scale factor -->
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-300 mb-2">Scale Factor</label>
+                                    <select id="scanRootUpscaleFactor"
+                                        class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <option value="2">2× — doubles resolution (480p → 960p)</option>
+                                        <option value="3">3× — triples resolution (480p → 1440p)</option>
+                                        <option value="4">4× — quadruples resolution (480p → 1920p)</option>
+                                    </select>
+                                </div>
+
+                                <!-- Disk space warning -->
+                                <div class="bg-yellow-900 border border-yellow-700 rounded px-4 py-3 text-xs text-yellow-200">
+                                    ⚠️ <strong>Disk space note:</strong> Upscaling extracts every frame as a PNG image before processing.
+                                    A 30-minute 480p file at ×2 requires ~20–50 GB of free temp space.
+                                    Make sure your system drive has enough room.
+                                </div>
+
+                            </div><!-- /upscaleSettingsFields -->
+                        </div><!-- /upscaleSection -->
+                    </div><!-- /collapsible wrapper -->
                     
                     <div class="flex justify-end gap-3 pt-4">
                         <button type="button" onclick="closeScanRootModal()" 

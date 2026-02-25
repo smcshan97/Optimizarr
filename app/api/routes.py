@@ -150,13 +150,16 @@ async def create_scan_root(
             library_type=scan_root.library_type,
             enabled=scan_root.enabled,
             recursive=scan_root.recursive,
-            show_in_stats=scan_root.show_in_stats
+            show_in_stats=scan_root.show_in_stats,
+            upscale_enabled=scan_root.upscale_enabled,
+            upscale_trigger_below=scan_root.upscale_trigger_below,
+            upscale_target_height=scan_root.upscale_target_height,
+            upscale_model=scan_root.upscale_model,
+            upscale_factor=scan_root.upscale_factor,
+            upscale_key=scan_root.upscale_key,
         )
-        
-        # Get created scan root
         roots = db.get_scan_roots()
         created_root = next((r for r in roots if r['id'] == root_id), None)
-        
         return created_root
     except Exception as e:
         raise HTTPException(
@@ -222,7 +225,13 @@ async def update_scan_root(
         library_type=root_data.library_type,
         recursive=root_data.recursive,
         enabled=root_data.enabled,
-        show_in_stats=root_data.show_in_stats
+        show_in_stats=root_data.show_in_stats,
+        upscale_enabled=root_data.upscale_enabled,
+        upscale_trigger_below=root_data.upscale_trigger_below,
+        upscale_target_height=root_data.upscale_target_height,
+        upscale_model=root_data.upscale_model,
+        upscale_factor=root_data.upscale_factor,
+        upscale_key=root_data.upscale_key,
     )
     
     if success:

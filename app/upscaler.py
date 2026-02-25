@@ -471,3 +471,289 @@ def start_update_checker():
 
     t = threading.Thread(target=_loop, daemon=True, name="upscaler-update-checker")
     t.start()
+
+
+# ---------------------------------------------------------------------------
+# Upscale pipeline — called by encoder.py before HandBrake
+# ---------------------------------------------------------------------------
+
+def _check_disk_space(path: str, required_bytes: int) -> bool:
+    """Return True if the filesystem holding *path* has at least required_bytes free."""
+    import shutil as _shutil
+    try:
+        free = _shutil.disk_usage(path).free
+        return free >= required_bytes
+    except Exception:
+        return True  # if we can't check, proceed and let ffmpeg fail naturally
+
+
+def _get_video_info(input_path: str) -> Dict:
+    """Use ffprobe to get width, height, fps, duration of a video."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_streams", "-select_streams", "v:0", input_path,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        import json as _json
+        data = _json.loads(result.stdout)
+        stream = data.get("streams", [{}])[0]
+        width  = int(stream.get("width",  0))
+        height = int(stream.get("height", 0))
+        # fps: "24000/1001" or "24" or "30/1"
+        fps_raw = stream.get("r_frame_rate", "24/1")
+        try:
+            num, den = fps_raw.split("/")
+            fps = float(num) / float(den)
+        except Exception:
+            fps = 24.0
+        duration = float(stream.get("duration", 0))
+        return {"width": width, "height": height, "fps": fps, "duration": duration}
+    except Exception as e:
+        optimizarr_logger.app_logger.warning("ffprobe failed: %s", e)
+        return {"width": 0, "height": 0, "fps": 24.0, "duration": 0}
+
+
+def run_upscale_pipeline(
+    input_path: str,
+    upscaler_key: str,
+    model: str,
+    factor: int,
+    progress_callback=None,
+) -> Optional[str]:
+    """
+    Run the full AI upscale pipeline on *input_path*.
+
+    Stages:
+      1. Probe source video (ffprobe)
+      2. Disk-space guard
+      3. Extract frames (ffmpeg → PNG)
+      4. Upscale frames (upscaler binary, batch mode)
+      5. Reassemble: upscaled frames + original audio → temp MKV
+      6. Return path to the temp MKV (caller must delete it)
+
+    Returns the path to the upscaled video file on success, or None on failure.
+
+    Progress callback receives values 0–100 across the whole pipeline:
+      0-10%  : extraction
+      10-90% : upscaling (per-frame progress from upscaler stderr)
+      90-100%: reassembly
+    """
+    import tempfile
+    import shutil as _shutil
+    import json as _json
+
+    if upscaler_key not in UPSCALERS:
+        optimizarr_logger.app_logger.error("Unknown upscaler key: %s", upscaler_key)
+        return None
+
+    binary_path = _find_binary(upscaler_key)
+    if not binary_path:
+        optimizarr_logger.app_logger.error(
+            "Upscaler binary not found for '%s'. "
+            "Go to Settings → AI Upscalers and click Download.", upscaler_key
+        )
+        return None
+
+    def _progress(pct: float):
+        if progress_callback:
+            try:
+                progress_callback(min(100.0, max(0.0, pct)))
+            except Exception:
+                pass
+
+    input_p = Path(input_path)
+    if not input_p.exists():
+        optimizarr_logger.app_logger.error("Upscale input not found: %s", input_path)
+        return None
+
+    # ── Stage 1: probe ─────────────────────────────────────────────────────
+    info = _get_video_info(input_path)
+    src_w, src_h, fps, duration = info["width"], info["height"], info["fps"], info["duration"]
+    fps_str = f"{fps:.6g}"
+    if src_w == 0 or src_h == 0:
+        optimizarr_logger.app_logger.error("Could not determine video dimensions: %s", input_path)
+        return None
+
+    out_w = src_w * factor
+    out_h = src_h * factor
+
+    # Estimate frame count and disk requirement
+    # PNG at out_h resolution: rough estimate ~3 bytes/pixel (pre-compression, but
+    # PNG tends to compress well; we use a conservative 1.5 bytes/pixel for estimate)
+    frame_count_approx = int(fps * duration) if duration > 0 else 2000
+    bytes_per_frame_approx = int(out_w * out_h * 1.5)
+    # Source + output frames + reassembly buffer
+    required_bytes = (frame_count_approx * bytes_per_frame_approx * 2) + (500 * 1024 * 1024)
+
+    _progress(2)
+    optimizarr_logger.app_logger.info(
+        "Upscale pipeline: %s — %dx%d → %dx%d (×%d, ~%d frames, ~%s needed)",
+        input_p.name, src_w, src_h, out_w, out_h, factor,
+        frame_count_approx, _format_size(required_bytes),
+    )
+
+    # ── Stage 2: disk space guard ───────────────────────────────────────────
+    tmp_base = Path(tempfile.gettempdir())
+    if not _check_disk_space(str(tmp_base), required_bytes):
+        free = _shutil.disk_usage(str(tmp_base)).free
+        optimizarr_logger.app_logger.error(
+            "Upscale aborted: insufficient disk space. "
+            "Need %s, have %s free in %s",
+            _format_size(required_bytes), _format_size(free), tmp_base,
+        )
+        return None
+
+    # Work directory — unique per job
+    work_dir = tmp_base / f"optimizarr_upscale_{input_p.stem}_{int(time.time())}"
+    frames_in  = work_dir / "frames_in"
+    frames_out = work_dir / "frames_out"
+    frames_in.mkdir(parents=True)
+    frames_out.mkdir(parents=True)
+    output_path = work_dir / f"{input_p.stem}_upscaled.mkv"
+
+    try:
+        # ── Stage 3: extract frames ─────────────────────────────────────────
+        _progress(3)
+        optimizarr_logger.app_logger.info("Extracting frames from %s…", input_p.name)
+        extract_cmd = [
+            "ffmpeg", "-i", input_path,
+            "-vf", "fps=fps=source_fps",   # extract all frames at native fps
+            "-q:v", "1",                   # maximum PNG quality
+            str(frames_in / "%08d.png"),
+            "-y",
+        ]
+        # Use actual fps value rather than the literal placeholder
+        extract_cmd = [
+            "ffmpeg", "-i", input_path,
+            "-vsync", "0",
+            str(frames_in / "%08d.png"),
+            "-y",
+        ]
+        result = subprocess.run(
+            extract_cmd, capture_output=True, text=True, timeout=3600
+        )
+        if result.returncode != 0:
+            optimizarr_logger.app_logger.error(
+                "ffmpeg frame extraction failed: %s", result.stderr[-500:]
+            )
+            return None
+
+        actual_frames = sorted(frames_in.glob("*.png"))
+        if not actual_frames:
+            optimizarr_logger.app_logger.error("No frames extracted from %s", input_path)
+            return None
+
+        total_frames = len(actual_frames)
+        optimizarr_logger.app_logger.info("Extracted %d frames", total_frames)
+        _progress(10)
+
+        # ── Stage 4: upscale frames ─────────────────────────────────────────
+        upscale_cmd = [
+            binary_path,
+            "-i", str(frames_in),
+            "-o", str(frames_out),
+            "-n", model,
+            "-s", str(factor),
+            "-f", "png",
+        ]
+        optimizarr_logger.app_logger.info(
+            "Upscaling %d frames with %s (model=%s ×%d)…",
+            total_frames, upscaler_key, model, factor,
+        )
+
+        upscale_proc = subprocess.Popen(
+            upscale_cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+
+        # Parse per-frame progress from upscaler output
+        # Real-ESRGAN / CUGAN print lines like:  "1/43200"
+        frame_re = re.compile(r'(\d+)/(\d+)')
+        for line in upscale_proc.stdout:
+            m = frame_re.search(line)
+            if m:
+                done  = int(m.group(1))
+                total = int(m.group(2))
+                if total > 0:
+                    # Map frame progress to 10-90% range
+                    _progress(10 + (done / total) * 80)
+
+        upscale_proc.wait()
+        if upscale_proc.returncode != 0:
+            optimizarr_logger.app_logger.error(
+                "Upscaler exited with code %d", upscale_proc.returncode
+            )
+            return None
+
+        upscaled_frames = sorted(frames_out.glob("*.png"))
+        if not upscaled_frames:
+            optimizarr_logger.app_logger.error("No upscaled frames produced")
+            return None
+
+        _progress(90)
+
+        # ── Stage 5: reassemble video with original audio ───────────────────
+        optimizarr_logger.app_logger.info("Reassembling video with original audio…")
+        reassemble_cmd = [
+            "ffmpeg",
+            "-framerate", fps_str,
+            "-i", str(frames_out / "%08d.png"),
+            "-i", input_path,            # original (for audio streams)
+            "-map", "0:v:0",             # upscaled video
+            "-map", "1:a?",              # all audio from original (? = optional)
+            "-map", "1:s?",              # subtitle streams (? = optional)
+            "-c:v", "ffv1",              # lossless intermediate — HandBrake re-encodes
+            "-c:a", "copy",
+            "-c:s", "copy",
+            "-shortest",
+            str(output_path),
+            "-y",
+        ]
+        result = subprocess.run(
+            reassemble_cmd, capture_output=True, text=True, timeout=3600
+        )
+        if result.returncode != 0:
+            optimizarr_logger.app_logger.error(
+                "ffmpeg reassembly failed: %s", result.stderr[-500:]
+            )
+            return None
+
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            optimizarr_logger.app_logger.error("Reassembled file is missing or empty")
+            return None
+
+        _progress(100)
+        optimizarr_logger.app_logger.info(
+            "Upscale pipeline complete → %s (%s)",
+            output_path.name, _format_size(output_path.stat().st_size)
+        )
+        return str(output_path)
+
+    except Exception as e:
+        optimizarr_logger.app_logger.error("Upscale pipeline error: %s", e)
+        return None
+
+    finally:
+        # Always clean up source frames immediately (output frames cleaned by caller)
+        try:
+            _shutil.rmtree(frames_in, ignore_errors=True)
+            _shutil.rmtree(frames_out, ignore_errors=True)
+        except Exception:
+            pass
+
+
+def cleanup_upscale_workdir(upscaled_path: str):
+    """Remove the upscale work directory after encoding is complete."""
+    import shutil as _shutil
+    try:
+        work_dir = Path(upscaled_path).parent
+        if work_dir.name.startswith("optimizarr_upscale_"):
+            _shutil.rmtree(work_dir, ignore_errors=True)
+    except Exception:
+        pass

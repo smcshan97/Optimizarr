@@ -46,10 +46,16 @@ class EncodingJob:
         if not self.queue_item:
             raise ValueError(f"Queue item {queue_item_id} not found")
     
-    def build_command(self) -> list:
-        """Build HandBrakeCLI command from profile settings."""
-        input_file = self.queue_item['file_path']
+    def build_command(self, input_override: str = None) -> list:
+        """Build HandBrakeCLI command from profile settings.
         
+        Args:
+            input_override: If provided, use this path as the input instead of
+                            the queue item's file_path (used for upscaled temp files).
+        """
+        input_file = input_override if input_override else self.queue_item['file_path']
+        original_file = self.queue_item['file_path']
+
         # Determine container format and output extension
         container = self.profile.get('container', 'mkv')
         container_map = {
@@ -58,15 +64,15 @@ class EncodingJob:
             'webm': {'ext': '.webm', 'format': 'av_webm'},
         }
         container_info = container_map.get(container, container_map['mkv'])
-        
-        # Create output path with correct extension
-        input_path = Path(input_file)
+
+        # Output always goes next to the ORIGINAL file, not the temp upscale file
+        original_path = Path(original_file)
         output_ext = container_info['ext']
-        output_file = str(input_path.parent / f"{input_path.stem}_optimized{output_ext}")
-        
+        output_file = str(original_path.parent / f"{original_path.stem}_optimized{output_ext}")
+
         # Base command
         cmd = ['HandBrakeCLI', '-i', input_file, '-o', output_file]
-        
+
         # Container format
         cmd.extend(['--format', container_info['format']])
         
@@ -328,80 +334,127 @@ class EncodingJob:
     def start(self, progress_callback: Optional[Callable[[float], None]] = None):
         """
         Start the encoding job.
-        
+
+        If the queue item has an upscale_plan, runs the AI upscale pipeline
+        first (progress 0-50%), then HandBrake (50-100%).
+
         Args:
             progress_callback: Function to call with progress updates (0.0-100.0)
         """
-        # Update queue item status
+        import json as _json
+
         db.update_queue_item(
             self.queue_item_id,
             status='processing',
             started_at=time.strftime('%Y-%m-%d %H:%M:%S')
         )
-        
-        # Build command
-        cmd = self.build_command()
-        
-        # Log the encoding start
+
         from app.logger import optimizarr_logger
-        optimizarr_logger.log_handbrake_start(self.queue_item['file_path'], cmd)
-        
+
+        # ── Determine input file (may be replaced by upscaled version) ──────
+        original_input = self.queue_item['file_path']
+        encode_input   = original_input       # may be overridden below
+        upscale_temp   = None                 # path to clean up after encode
+
+        # ── Upscale phase (0–50%) ────────────────────────────────────────────
+        upscale_plan_raw = self.queue_item.get('upscale_plan')
+        if upscale_plan_raw:
+            try:
+                plan = _json.loads(upscale_plan_raw) if isinstance(upscale_plan_raw, str) else upscale_plan_raw
+            except Exception:
+                plan = {}
+        else:
+            plan = {}
+
+        if plan.get('enabled'):
+            from app.upscaler import run_upscale_pipeline, cleanup_upscale_workdir
+
+            upscaler_key = plan.get('upscaler_key', 'realesrgan')
+            model        = plan.get('model', 'realesrgan-x4plus')
+            factor       = plan.get('factor', 2)
+
+            optimizarr_logger.app_logger.info(
+                "Upscale phase: %s (×%d, model=%s)", original_input, factor, model
+            )
+
+            def _upscale_progress(pct: float):
+                # Map 0-100 → 0-50 so HandBrake fills the second half
+                mapped = pct / 2.0
+                self.progress = mapped
+                db.update_queue_item(self.queue_item_id, progress=mapped)
+                if progress_callback:
+                    progress_callback(mapped)
+
+            upscaled_path = run_upscale_pipeline(
+                input_path=original_input,
+                upscaler_key=upscaler_key,
+                model=model,
+                factor=factor,
+                progress_callback=_upscale_progress,
+            )
+
+            if upscaled_path:
+                encode_input  = upscaled_path
+                upscale_temp  = upscaled_path
+                optimizarr_logger.app_logger.info(
+                    "Upscale complete — encoding from temp: %s", upscaled_path
+                )
+            else:
+                # Upscale failed — fall back to encoding the original
+                optimizarr_logger.app_logger.warning(
+                    "Upscale failed for %s — encoding original file instead", original_input
+                )
+
+        # ── Build HandBrake command (encode_input may be upscaled temp) ──────
+        cmd = self.build_command(input_override=encode_input)
+        optimizarr_logger.log_handbrake_start(original_input, cmd)
+
+        # Decide progress range for HandBrake
+        hb_start = 50.0 if (upscale_temp is not None) else 0.0
+        hb_range = 50.0 if (upscale_temp is not None) else 100.0
+
         try:
-            # Start HandBrakeCLI process
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
-                bufsize=1
+                bufsize=1,
             )
-            
-            # Set process priority (nice level)
+
             if self.resource_limits.get('nice_level'):
                 resource_throttler.set_process_priority(
                     self.process.pid,
                     self.resource_limits['nice_level']
                 )
-            
-            # Start resource monitoring thread
+
             if self.resource_limits.get('enable_throttling'):
                 self.monitoring_thread = threading.Thread(
-                    target=self._monitor_resources,
-                    daemon=True
+                    target=self._monitor_resources, daemon=True
                 )
                 self.monitoring_thread.start()
-            
-            # Monitor progress
+
             progress_pattern = re.compile(r'Encoding: task \d+ of \d+, ([\d.]+) %')
-            
+
             for line in self.process.stdout:
-                # Parse progress
                 match = progress_pattern.search(line)
                 if match:
-                    self.progress = float(match.group(1))
-                    
-                    # Update database
-                    db.update_queue_item(
-                        self.queue_item_id,
-                        progress=self.progress
-                    )
-                    
-                    # Call progress callback
+                    hb_pct = float(match.group(1))
+                    # Remap HandBrake 0-100 → hb_start to hb_start+hb_range
+                    self.progress = hb_start + (hb_pct / 100.0) * hb_range
+                    db.update_queue_item(self.queue_item_id, progress=self.progress)
                     if progress_callback:
                         progress_callback(self.progress)
-                    
                     print(f"  Progress: {self.progress:.1f}%", end='\r')
-            
-            # Wait for process to complete
+
             return_code = self.process.wait()
-            
+
             if return_code == 0:
                 self._finalize_encoding()
                 return True
             else:
-                from app.logger import optimizarr_logger
                 optimizarr_logger.log_handbrake_error(
-                    self.queue_item['file_path'],
+                    original_input,
                     f"HandBrakeCLI exited with code {return_code}"
                 )
                 db.update_queue_item(
@@ -410,15 +463,21 @@ class EncodingJob:
                     error_message=f"HandBrakeCLI exited with code {return_code}"
                 )
                 return False
-                
+
         except Exception as e:
-            from app.logger import optimizarr_logger
-            optimizarr_logger.log_handbrake_error(self.queue_item['file_path'], str(e))
+            optimizarr_logger.log_handbrake_error(original_input, str(e))
             db.update_queue_item(
                 self.queue_item_id,
                 status='failed',
                 error_message=str(e)
             )
+            return False
+
+        finally:
+            # Clean up upscale temp file/directory
+            if upscale_temp:
+                from app.upscaler import cleanup_upscale_workdir
+                cleanup_upscale_workdir(upscale_temp)
             return False
     
     def _finalize_encoding(self):

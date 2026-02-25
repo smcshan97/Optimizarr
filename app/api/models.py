@@ -149,6 +149,13 @@ class ScanRootCreate(BaseModel):
     enabled: bool = True
     recursive: bool = True
     show_in_stats: bool = True
+    # AI upscale settings
+    upscale_enabled: bool = False
+    upscale_trigger_below: int = 720
+    upscale_target_height: int = 1080
+    upscale_model: str = "realesrgan-x4plus"
+    upscale_factor: int = 2
+    upscale_key: str = "realesrgan"
 
 
 class ScanRootResponse(BaseModel):
@@ -159,6 +166,13 @@ class ScanRootResponse(BaseModel):
     enabled: bool
     recursive: bool
     show_in_stats: Optional[bool] = True
+    # AI upscale settings
+    upscale_enabled: Optional[bool] = False
+    upscale_trigger_below: Optional[int] = 720
+    upscale_target_height: Optional[int] = 1080
+    upscale_model: Optional[str] = "realesrgan-x4plus"
+    upscale_factor: Optional[int] = 2
+    upscale_key: Optional[str] = "realesrgan"
 
 
 # ============================================================

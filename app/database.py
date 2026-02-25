@@ -280,6 +280,31 @@ class Database:
                 )
                 print("  ↳ Migrated: added 'external_connection_id' to scan_roots")
 
+            # scan_roots: AI upscale settings per library
+            cursor.execute("PRAGMA table_info(scan_roots)")
+            root_cols = [col[1] for col in cursor.fetchall()]
+            upscale_migrations = [
+                ("upscale_enabled",       "BOOLEAN DEFAULT 0"),
+                ("upscale_trigger_below", "INTEGER DEFAULT 720"),
+                ("upscale_target_height", "INTEGER DEFAULT 1080"),
+                ("upscale_model",         "TEXT DEFAULT 'realesrgan-x4plus'"),
+                ("upscale_factor",        "INTEGER DEFAULT 2"),
+                ("upscale_key",           "TEXT DEFAULT 'realesrgan'"),
+            ]
+            for col_name, col_def in upscale_migrations:
+                if col_name not in root_cols:
+                    cursor.execute(
+                        f"ALTER TABLE scan_roots ADD COLUMN {col_name} {col_def}"
+                    )
+                    print(f"  ↳ Migrated: added '{col_name}' to scan_roots")
+
+            # queue: upscale_plan stores the per-item upscale JSON
+            cursor.execute("PRAGMA table_info(queue)")
+            queue_cols = [col[1] for col in cursor.fetchall()]
+            if 'upscale_plan' not in queue_cols:
+                cursor.execute("ALTER TABLE queue ADD COLUMN upscale_plan TEXT")
+                print("  ↳ Migrated: added 'upscale_plan' to queue")
+
             # Enforce single default profile — keep only the lowest-id one
             cursor.execute("SELECT id FROM profiles WHERE is_default = 1 ORDER BY id")
             default_rows = cursor.fetchall()
@@ -381,14 +406,22 @@ class Database:
     
     # Scan Root CRUD
     def create_scan_root(self, path: str, profile_id: int, library_type: str = "custom",
-                        enabled: bool = True, recursive: bool = True, show_in_stats: bool = True) -> int:
+                        enabled: bool = True, recursive: bool = True, show_in_stats: bool = True,
+                        upscale_enabled: bool = False, upscale_trigger_below: int = 720,
+                        upscale_target_height: int = 1080, upscale_model: str = "realesrgan-x4plus",
+                        upscale_factor: int = 2, upscale_key: str = "realesrgan") -> int:
         """Create a new scan root."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO scan_roots (path, profile_id, library_type, enabled, recursive, show_in_stats)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (path, profile_id, library_type, enabled, recursive, show_in_stats))
+                INSERT INTO scan_roots
+                    (path, profile_id, library_type, enabled, recursive, show_in_stats,
+                     upscale_enabled, upscale_trigger_below, upscale_target_height,
+                     upscale_model, upscale_factor, upscale_key)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (path, profile_id, library_type, enabled, recursive, show_in_stats,
+                  upscale_enabled, upscale_trigger_below, upscale_target_height,
+                  upscale_model, upscale_factor, upscale_key))
             return cursor.lastrowid
     
     def get_scan_roots(self, enabled_only: bool = False) -> List[Dict]:
@@ -411,40 +444,42 @@ class Database:
     
     def update_scan_root(self, root_id: int, path: str = None, profile_id: int = None,
                         library_type: str = None, enabled: bool = None, recursive: bool = None,
-                        show_in_stats: bool = None) -> bool:
+                        show_in_stats: bool = None, upscale_enabled: bool = None,
+                        upscale_trigger_below: int = None, upscale_target_height: int = None,
+                        upscale_model: str = None, upscale_factor: int = None,
+                        upscale_key: str = None) -> bool:
         """Update a scan root."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            
-            # Build update query dynamically
             updates = []
             values = []
-            
-            if path is not None:
-                updates.append("path = ?")
-                values.append(path)
-            if profile_id is not None:
-                updates.append("profile_id = ?")
-                values.append(profile_id)
-            if library_type is not None:
-                updates.append("library_type = ?")
-                values.append(library_type)
-            if enabled is not None:
-                updates.append("enabled = ?")
-                values.append(enabled)
-            if recursive is not None:
-                updates.append("recursive = ?")
-                values.append(recursive)
-            if show_in_stats is not None:
-                updates.append("show_in_stats = ?")
-                values.append(show_in_stats)
-            
+
+            field_map = {
+                "path":                   path,
+                "profile_id":             profile_id,
+                "library_type":           library_type,
+                "enabled":                enabled,
+                "recursive":              recursive,
+                "show_in_stats":          show_in_stats,
+                "upscale_enabled":        upscale_enabled,
+                "upscale_trigger_below":  upscale_trigger_below,
+                "upscale_target_height":  upscale_target_height,
+                "upscale_model":          upscale_model,
+                "upscale_factor":         upscale_factor,
+                "upscale_key":            upscale_key,
+            }
+            for col, val in field_map.items():
+                if val is not None:
+                    updates.append(f"{col} = ?")
+                    values.append(val)
+
             if not updates:
                 return False
-            
+
             values.append(root_id)
-            query = f"UPDATE scan_roots SET {', '.join(updates)} WHERE id = ?"
-            cursor.execute(query, values)
+            cursor.execute(
+                f"UPDATE scan_roots SET {', '.join(updates)} WHERE id = ?", values
+            )
             return cursor.rowcount > 0
     
     def delete_scan_root(self, root_id: int) -> bool:
@@ -462,8 +497,8 @@ class Database:
             cursor.execute("""
                 INSERT INTO queue 
                 (file_path, root_id, profile_id, status, priority, current_specs, 
-                 target_specs, file_size_bytes, estimated_savings_bytes)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 target_specs, file_size_bytes, estimated_savings_bytes, upscale_plan)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 kwargs.get('file_path'),
                 kwargs.get('root_id'),
@@ -473,7 +508,8 @@ class Database:
                 json.dumps(kwargs.get('current_specs', {})),
                 json.dumps(kwargs.get('target_specs', {})),
                 kwargs.get('file_size_bytes', 0),
-                kwargs.get('estimated_savings_bytes', 0)
+                kwargs.get('estimated_savings_bytes', 0),
+                kwargs.get('upscale_plan'),
             ))
             return cursor.lastrowid
     

@@ -522,7 +522,7 @@ function displayQueueItems(items) {
                         onchange="toggleRowSelect(this, ${item.id})">
                 </td>
                 <td class="py-2 px-2 max-w-[220px] truncate" title="${tooltip}">
-                    <span class="text-gray-100">${fileName}</span>
+                    <span class="text-gray-100">${fileName}</span>${item.upscale_plan ? ' <span class="text-blue-400 text-xs" title="AI upscaling queued">🔼</span>' : ''}
                 </td>
                 <td class="py-2 px-2"><span class="${codecColor} text-xs font-medium">${codec.toUpperCase()}</span></td>
                 <td class="py-2 px-2 text-xs text-gray-300">${resolution}${fps !== '-' ? ` <span class="text-gray-500">@ ${fps}fps</span>` : ''}</td>
@@ -998,14 +998,28 @@ async function showCreateScanRootForm() {
     document.getElementById('scanRootShowInStats').checked = true;
     document.getElementById('scanRootLibraryType').value = 'custom';
     document.getElementById('libraryTypeRecommendation').classList.add('hidden');
-    
+
+    // Reset upscale fields to defaults
+    _fillUpscaleFields({
+        upscale_enabled: false, upscale_trigger_below: 720,
+        upscale_target_height: 1080, upscale_key: 'realesrgan',
+        upscale_model: 'realesrgan-x4plus', upscale_factor: 2,
+    });
+    // Collapse the upscale section on new roots
+    const section = document.getElementById('upscaleSection');
+    const icon    = document.getElementById('upscaleSectionToggleIcon');
+    if (section && !section.classList.contains('hidden')) {
+        section.classList.add('hidden');
+        if (icon) icon.textContent = '▶';
+    }
+
     // Load profiles for dropdown
     const profiles = await apiRequest('/profiles');
     const select = document.getElementById('scanRootProfile');
-    select.innerHTML = profiles.map(p => 
+    select.innerHTML = profiles.map(p =>
         `<option value="${p.id}">${p.name}</option>`
     ).join('');
-    
+
     document.getElementById('scanRootModal').classList.remove('hidden');
 }
 
@@ -1030,6 +1044,7 @@ async function editScanRoot(id) {
     document.getElementById('scanRootRecursive').checked = root.recursive;
     document.getElementById('scanRootEnabled').checked = root.enabled;
     document.getElementById('scanRootShowInStats').checked = root.show_in_stats !== false;
+    _fillUpscaleFields(root);
     
     document.getElementById('scanRootModal').classList.remove('hidden');
 }
@@ -2874,4 +2889,127 @@ function _timeAgo(isoString) {
     if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
     return `${Math.floor(diff / 86400)}d ago`;
+}
+
+
+// ============================================================
+// AI UPSCALE SETTINGS — Scan Root Modal
+// ============================================================
+
+const _UPSCALER_MODELS = {
+    realesrgan: ['realesrgan-x4plus', 'realesrgan-x4plus-anime', 'realesr-animevideov3'],
+    realcugan:  ['models-se', 'models-pro', 'models-nose'],
+    waifu2x:    ['models-cunet', 'models-upconv_7_anime_style_art_rgb'],
+};
+
+function toggleUpscaleSection() {
+    const section = document.getElementById('upscaleSection');
+    const icon    = document.getElementById('upscaleSectionToggleIcon');
+    const hidden  = section.classList.toggle('hidden');
+    icon.textContent = hidden ? '▶' : '▼';
+}
+
+function handleUpscaleToggle() {
+    const enabled = document.getElementById('scanRootUpscaleEnabled').checked;
+    const fields  = document.getElementById('upscaleSettingsFields');
+    const badge   = document.getElementById('upscaleEnabledBadge');
+    fields.classList.toggle('opacity-50',       !enabled);
+    fields.classList.toggle('pointer-events-none', !enabled);
+    badge.classList.toggle('hidden', !enabled);
+}
+
+function handleUpscalerKeyChange() {
+    const key     = document.getElementById('scanRootUpscaleKey').value;
+    const models  = _UPSCALER_MODELS[key] || [];
+    const sel     = document.getElementById('scanRootUpscaleModel');
+    sel.innerHTML = models.map((m, i) => `<option value="${m}" ${i === 0 ? 'selected' : ''}>${m}</option>`).join('');
+}
+
+// Call once on page load to set initial model list
+handleUpscalerKeyChange();
+
+// ── Patch saveScanRoot to include upscale fields ──────────────────────────
+// We wrap the existing submission in the form's submit handler.
+// The original saveScanRoot call is on the form submit; we intercept
+// by overriding the body-building step after the original fields.
+
+const _origSaveScanRoot = window.saveScanRoot;
+window.saveScanRoot = async function(event) {
+    // Let the existing logic build its payload, but add our fields
+    // The form submit triggers this — we re-implement to add upscale fields.
+    // (The original function is defined further up in app.js.)
+    const id       = document.getElementById('scanRootId').value;
+    const path     = document.getElementById('scanRootPath').value;
+    const profileId = parseInt(document.getElementById('scanRootProfile').value);
+    const libraryType = document.getElementById('scanRootLibraryType').value;
+    const recursive   = document.getElementById('scanRootRecursive').checked;
+    const enabled     = document.getElementById('scanRootEnabled').checked;
+    const showInStats = document.getElementById('scanRootShowInStats').checked;
+
+    // Upscale fields
+    const upscaleEnabled = document.getElementById('scanRootUpscaleEnabled')?.checked ?? false;
+    const upscaleTrigger = parseInt(document.getElementById('scanRootUpscaleTrigger')?.value || '720');
+    const upscaleTarget  = parseInt(document.getElementById('scanRootUpscaleTarget')?.value  || '1080');
+    const upscaleKey     = document.getElementById('scanRootUpscaleKey')?.value    || 'realesrgan';
+    const upscaleModel   = document.getElementById('scanRootUpscaleModel')?.value  || 'realesrgan-x4plus';
+    const upscaleFactor  = parseInt(document.getElementById('scanRootUpscaleFactor')?.value || '2');
+
+    if (!path || !profileId) {
+        showMessage('Path and profile are required', 'error');
+        return;
+    }
+
+    const payload = {
+        path, profile_id: profileId, library_type: libraryType,
+        recursive, enabled, show_in_stats: showInStats,
+        upscale_enabled: upscaleEnabled,
+        upscale_trigger_below: upscaleTrigger,
+        upscale_target_height: upscaleTarget,
+        upscale_key: upscaleKey,
+        upscale_model: upscaleModel,
+        upscale_factor: upscaleFactor,
+    };
+
+    let result;
+    if (id) {
+        result = await apiRequest(`/scan-roots/${id}`, {
+            method: 'PUT', body: JSON.stringify(payload)
+        });
+    } else {
+        result = await apiRequest('/scan-roots', {
+            method: 'POST', body: JSON.stringify(payload)
+        });
+    }
+
+    if (result) {
+        closeScanRootModal();
+        loadScanRoots();
+        showMessage(id ? '✓ Scan root updated' : '✓ Scan root added', 'success');
+    }
+};
+
+// ── Patch openEditScanRootModal to populate upscale fields ─────────────────
+const _origLoadScanRootForEdit = window.openEditScanRootModal;
+function _fillUpscaleFields(root) {
+    const ue = document.getElementById('scanRootUpscaleEnabled');
+    if (!ue) return;
+    ue.checked = !!root.upscale_enabled;
+
+    const triggerEl = document.getElementById('scanRootUpscaleTrigger');
+    const targetEl  = document.getElementById('scanRootUpscaleTarget');
+    const keyEl     = document.getElementById('scanRootUpscaleKey');
+    const factorEl  = document.getElementById('scanRootUpscaleFactor');
+
+    if (triggerEl) triggerEl.value = root.upscale_trigger_below ?? 720;
+    if (targetEl)  targetEl.value  = root.upscale_target_height  ?? 1080;
+    if (keyEl)     keyEl.value     = root.upscale_key            ?? 'realesrgan';
+    if (factorEl)  factorEl.value  = root.upscale_factor         ?? 2;
+
+    // Populate model dropdown for the selected key then set saved model
+    handleUpscalerKeyChange();
+    const modelEl = document.getElementById('scanRootUpscaleModel');
+    if (modelEl && root.upscale_model) modelEl.value = root.upscale_model;
+
+    // Keep fields enabled/disabled in sync
+    handleUpscaleToggle();
 }
