@@ -693,15 +693,17 @@ class Database:
             
             # Overall totals
             cursor.execute("""
-                SELECT COUNT(*) as total, 
+                SELECT COUNT(*) as total,
                        COALESCE(SUM(original_size_bytes), 0) as total_original,
                        COALESCE(SUM(new_size_bytes), 0) as total_new,
                        COALESCE(SUM(savings_bytes), 0) as total_saved,
                        COALESCE(SUM(encoding_time_seconds), 0) as total_time,
-                       COALESCE(AVG(CASE WHEN original_size_bytes > 0 
-                           THEN (savings_bytes * 100.0 / original_size_bytes) ELSE 0 END), 0) as avg_savings_pct
+                       COALESCE(AVG(CASE WHEN original_size_bytes > 0
+                           THEN (savings_bytes * 100.0 / original_size_bytes) ELSE 0 END), 0) as avg_savings_pct,
+                       COALESCE(AVG(encoding_time_seconds), 0) as avg_encode_seconds
                 FROM history
-            """)
+                WHERE completed_at >= datetime('now', ?)
+            """, (f'-{days} days',))
             totals = dict(cursor.fetchone())
             
             # Daily breakdown (last N days)
@@ -717,13 +719,15 @@ class Database:
             """, (f'-{days} days',))
             daily = [dict(row) for row in cursor.fetchall()]
             
-            # Codec breakdown
+            # Codec breakdown (within selected period)
             cursor.execute("""
-                SELECT COALESCE(codec, 'unknown') as codec, 
+                SELECT COALESCE(codec, 'unknown') as codec,
                        COUNT(*) as count,
                        COALESCE(SUM(savings_bytes), 0) as saved
-                FROM history GROUP BY codec ORDER BY count DESC
-            """)
+                FROM history
+                WHERE completed_at >= datetime('now', ?)
+                GROUP BY codec ORDER BY count DESC
+            """, (f'-{days} days',))
             codecs = [dict(row) for row in cursor.fetchall()]
             
             # Recent history (last 20)

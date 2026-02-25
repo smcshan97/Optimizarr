@@ -1950,33 +1950,41 @@ async function forceWatchCheck() {
 
 async function loadStatistics() {
     const days = document.getElementById('statsDays').value;
-    
+
     try {
         const data = await apiRequest(`/stats/dashboard?days=${days}`);
         if (!data) return;
-        
-        // Summary cards
+
         const t = data.totals;
-        document.getElementById('statTotalFiles').textContent = t.total.toLocaleString();
-        document.getElementById('statOriginalSize').textContent = formatSize(t.total_original);
-        document.getElementById('statNewSize').textContent = formatSize(t.total_new);
-        document.getElementById('statSaved').textContent = formatSize(t.total_saved);
-        document.getElementById('statAvgPct').textContent = t.avg_savings_pct.toFixed(1) + '%';
-        
-        // Daily chart
+        document.getElementById('statTotalFiles').textContent  = (t.total || 0).toLocaleString();
+        document.getElementById('statOriginalSize').textContent = formatSize(t.total_original || 0);
+        document.getElementById('statNewSize').textContent      = formatSize(t.total_new || 0);
+        document.getElementById('statSaved').textContent        = formatSize(t.total_saved || 0);
+        document.getElementById('statAvgPct').textContent       = (t.avg_savings_pct || 0).toFixed(1) + '%';
+
+        // Avg encode time
+        const avgSec = t.avg_encode_seconds || 0;
+        const avgTimeEl = document.getElementById('statAvgTime');
+        if (avgTimeEl) {
+            if (avgSec === 0) {
+                avgTimeEl.textContent = '—';
+            } else if (avgSec < 60) {
+                avgTimeEl.textContent = Math.round(avgSec) + 's';
+            } else if (avgSec < 3600) {
+                avgTimeEl.textContent = Math.round(avgSec / 60) + 'm';
+            } else {
+                avgTimeEl.textContent = (avgSec / 3600).toFixed(1) + 'h';
+            }
+        }
+
         renderDailyChart(data.daily);
-        
-        // Codec breakdown
         renderCodecBreakdown(data.codecs, t.total);
-        
-        // Recent history
         renderRecentHistory(data.recent);
-        
+
     } catch (err) {
         console.error('Failed to load statistics:', err);
     }
-    
-    // Also load health and upscalers
+
     loadHealth();
     loadUpscalers();
 }
@@ -2036,30 +2044,45 @@ function renderCodecBreakdown(codecs, total) {
 
 function renderRecentHistory(recent) {
     const container = document.getElementById('recentHistory');
-    
+
     if (!recent || recent.length === 0) {
-        container.innerHTML = '<p class="text-gray-500 text-sm">No encoding history yet</p>';
+        container.innerHTML = '<p class="text-gray-500 text-sm">No encoding history yet. Process some files to see activity.</p>';
         return;
     }
-    
+
     container.innerHTML = recent.map(h => {
         const filename = h.file_path.split(/[/\\]/).pop();
-        const savedPct = h.original_size_bytes > 0 
-            ? ((h.savings_bytes / h.original_size_bytes) * 100).toFixed(1) 
-            : 0;
-        const timeStr = h.encoding_time_seconds > 60 
-            ? `${Math.floor(h.encoding_time_seconds/60)}m ${h.encoding_time_seconds%60}s`
-            : `${h.encoding_time_seconds}s`;
-        
+        const savedPct = h.original_size_bytes > 0
+            ? ((h.savings_bytes / h.original_size_bytes) * 100).toFixed(1)
+            : '0.0';
+        const savings_positive = parseFloat(savedPct) > 0;
+
+        const secs = Math.round(h.encoding_time_seconds || 0);
+        let timeStr;
+        if (secs <= 0)       timeStr = '—';
+        else if (secs < 60)  timeStr = `${secs}s`;
+        else if (secs < 3600) timeStr = `${Math.floor(secs/60)}m ${secs%60}s`;
+        else                  timeStr = `${Math.floor(secs/3600)}h ${Math.floor((secs%3600)/60)}m`;
+
+        const codec     = (h.codec     || '—').toUpperCase();
+        const container_fmt = (h.container || '—').toUpperCase();
+        const dateStr   = h.completed_at ? h.completed_at.split('T')[0].replace(/-/g, '/').slice(2) : '—';
+
         return `
-            <div class="flex justify-between items-center p-2 bg-gray-700 rounded text-sm">
-                <div class="flex-1 truncate mr-3" title="${h.file_path}">
-                    ${filename}
+            <div class="p-3 bg-gray-700 rounded-lg hover:bg-gray-650 transition-colors">
+                <div class="flex justify-between items-start gap-2">
+                    <span class="text-sm text-gray-100 truncate flex-1" title="${_esc(h.file_path)}">${_esc(filename)}</span>
+                    <span class="text-xs ${savings_positive ? 'text-green-400' : 'text-gray-400'} flex-shrink-0 font-medium">
+                        ${savings_positive ? '↓' : ''}${savedPct}%
+                    </span>
                 </div>
-                <div class="flex gap-3 text-xs text-gray-400 flex-shrink-0">
-                    <span class="text-green-400">-${savedPct}%</span>
-                    <span>${formatSize(h.original_size_bytes)} → ${formatSize(h.new_size_bytes)}</span>
-                    <span>${timeStr}</span>
+                <div class="flex gap-3 mt-1 text-xs text-gray-500">
+                    <span>${formatSize(h.original_size_bytes || 0)} → ${formatSize(h.new_size_bytes || 0)}</span>
+                    <span class="text-gray-600">•</span>
+                    <span>${codec}${container_fmt !== '—' ? ' / ' + container_fmt : ''}</span>
+                    <span class="text-gray-600">•</span>
+                    <span>⏱ ${timeStr}</span>
+                    <span class="ml-auto">${dateStr}</span>
                 </div>
             </div>
         `;
