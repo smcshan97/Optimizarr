@@ -200,6 +200,7 @@ class QueueItemResponse(BaseModel):
     started_at: Optional[str]
     completed_at: Optional[str]
     created_at: Optional[str]
+    upscale_plan: Optional[str] = None
 
 
 class QueueUpdateRequest(BaseModel):

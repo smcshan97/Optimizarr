@@ -1056,24 +1056,31 @@ function closeScanRootModal() {
 
 document.getElementById('scanRootForm').addEventListener('submit', async (e) => {
     e.preventDefault();
-    
+
     const data = {
-        path: document.getElementById('scanRootPath').value,
-        profile_id: parseInt(document.getElementById('scanRootProfile').value),
-        library_type: document.getElementById('scanRootLibraryType').value,
-        recursive: document.getElementById('scanRootRecursive').checked,
-        enabled: document.getElementById('scanRootEnabled').checked,
+        path:          document.getElementById('scanRootPath').value,
+        profile_id:    parseInt(document.getElementById('scanRootProfile').value),
+        library_type:  document.getElementById('scanRootLibraryType').value,
+        recursive:     document.getElementById('scanRootRecursive').checked,
+        enabled:       document.getElementById('scanRootEnabled').checked,
         show_in_stats: document.getElementById('scanRootShowInStats').checked,
+        // AI upscale settings
+        upscale_enabled:        document.getElementById('scanRootUpscaleEnabled')?.checked ?? false,
+        upscale_trigger_below:  parseInt(document.getElementById('scanRootUpscaleTrigger')?.value || '720'),
+        upscale_target_height:  parseInt(document.getElementById('scanRootUpscaleTarget')?.value  || '1080'),
+        upscale_key:            document.getElementById('scanRootUpscaleKey')?.value    || 'realesrgan',
+        upscale_model:          document.getElementById('scanRootUpscaleModel')?.value  || 'realesrgan-x4plus',
+        upscale_factor:         parseInt(document.getElementById('scanRootUpscaleFactor')?.value || '2'),
     };
-    
+
     const method = currentScanRootId ? 'PUT' : 'POST';
-    const url = currentScanRootId ? `/scan-roots/${currentScanRootId}` : '/scan-roots';
-    
+    const url    = currentScanRootId ? `/scan-roots/${currentScanRootId}` : '/scan-roots';
+
     const result = await apiRequest(url, {
         method: method,
         body: JSON.stringify(data)
     });
-    
+
     if (result) {
         closeScanRootModal();
         loadScanRoots();
@@ -2927,66 +2934,6 @@ function handleUpscalerKeyChange() {
 
 // Call once on page load to set initial model list
 handleUpscalerKeyChange();
-
-// ── Patch saveScanRoot to include upscale fields ──────────────────────────
-// We wrap the existing submission in the form's submit handler.
-// The original saveScanRoot call is on the form submit; we intercept
-// by overriding the body-building step after the original fields.
-
-const _origSaveScanRoot = window.saveScanRoot;
-window.saveScanRoot = async function(event) {
-    // Let the existing logic build its payload, but add our fields
-    // The form submit triggers this — we re-implement to add upscale fields.
-    // (The original function is defined further up in app.js.)
-    const id       = document.getElementById('scanRootId').value;
-    const path     = document.getElementById('scanRootPath').value;
-    const profileId = parseInt(document.getElementById('scanRootProfile').value);
-    const libraryType = document.getElementById('scanRootLibraryType').value;
-    const recursive   = document.getElementById('scanRootRecursive').checked;
-    const enabled     = document.getElementById('scanRootEnabled').checked;
-    const showInStats = document.getElementById('scanRootShowInStats').checked;
-
-    // Upscale fields
-    const upscaleEnabled = document.getElementById('scanRootUpscaleEnabled')?.checked ?? false;
-    const upscaleTrigger = parseInt(document.getElementById('scanRootUpscaleTrigger')?.value || '720');
-    const upscaleTarget  = parseInt(document.getElementById('scanRootUpscaleTarget')?.value  || '1080');
-    const upscaleKey     = document.getElementById('scanRootUpscaleKey')?.value    || 'realesrgan';
-    const upscaleModel   = document.getElementById('scanRootUpscaleModel')?.value  || 'realesrgan-x4plus';
-    const upscaleFactor  = parseInt(document.getElementById('scanRootUpscaleFactor')?.value || '2');
-
-    if (!path || !profileId) {
-        showMessage('Path and profile are required', 'error');
-        return;
-    }
-
-    const payload = {
-        path, profile_id: profileId, library_type: libraryType,
-        recursive, enabled, show_in_stats: showInStats,
-        upscale_enabled: upscaleEnabled,
-        upscale_trigger_below: upscaleTrigger,
-        upscale_target_height: upscaleTarget,
-        upscale_key: upscaleKey,
-        upscale_model: upscaleModel,
-        upscale_factor: upscaleFactor,
-    };
-
-    let result;
-    if (id) {
-        result = await apiRequest(`/scan-roots/${id}`, {
-            method: 'PUT', body: JSON.stringify(payload)
-        });
-    } else {
-        result = await apiRequest('/scan-roots', {
-            method: 'POST', body: JSON.stringify(payload)
-        });
-    }
-
-    if (result) {
-        closeScanRootModal();
-        loadScanRoots();
-        showMessage(id ? '✓ Scan root updated' : '✓ Scan root added', 'success');
-    }
-};
 
 // ── Patch openEditScanRootModal to populate upscale fields ─────────────────
 const _origLoadScanRootForEdit = window.openEditScanRootModal;
