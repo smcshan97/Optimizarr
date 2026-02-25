@@ -741,6 +741,81 @@
                             class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2"
                             placeholder="Additional HandBrakeCLI arguments">
                     </div>
+
+                    <!-- AI Upscaling — collapsible -->
+                    <div class="border border-gray-700 rounded-lg overflow-hidden">
+                        <button type="button" onclick="toggleProfileUpscaleSection()"
+                            class="w-full flex items-center justify-between px-4 py-3 bg-gray-750 hover:bg-gray-700 transition-colors text-left">
+                            <div class="flex items-center gap-2">
+                                <span id="profileUpscaleToggleIcon" class="text-gray-400 text-xs">▶</span>
+                                <span class="text-sm font-medium">🤖 AI Upscaling</span>
+                                <span id="profileUpscaleEnabledBadge" class="hidden text-xs bg-blue-600 text-white px-2 py-0.5 rounded-full">Enabled</span>
+                            </div>
+                            <span class="text-xs text-gray-500">Upscale low-res files before encoding</span>
+                        </button>
+
+                        <div id="profileUpscaleSection" class="hidden px-4 py-4 space-y-4 bg-gray-900 border-t border-gray-700">
+
+                            <div class="flex items-start gap-3">
+                                <input type="checkbox" id="profileUpscaleEnabled" class="mt-0.5 w-4 h-4 flex-shrink-0"
+                                    onchange="handleProfileUpscaleToggle()">
+                                <div>
+                                    <label for="profileUpscaleEnabled" class="text-sm font-medium cursor-pointer">Enable AI Upscaling for this profile</label>
+                                    <p class="text-xs text-gray-400 mt-0.5">Files assigned this profile will be upscaled before encoding when below the trigger threshold. Per-library scan root settings take priority over this.</p>
+                                </div>
+                            </div>
+
+                            <div id="profileUpscaleFields" class="space-y-4 opacity-50 pointer-events-none">
+
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-300 mb-2">Upscaler</label>
+                                    <select id="profileUpscaleKey" onchange="handleProfileUpscalerKeyChange()"
+                                        class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <option value="realesrgan">🎬 Real-ESRGAN — best for live action / films</option>
+                                        <option value="realcugan">⚡ Real-CUGAN — fast, good for anime</option>
+                                        <option value="waifu2x">🎌 Waifu2x NCNN — classic anime upscaler</option>
+                                    </select>
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-300 mb-2">Model</label>
+                                    <select id="profileUpscaleModel"
+                                        class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <!-- populated by handleProfileUpscalerKeyChange() -->
+                                    </select>
+                                </div>
+
+                                <div class="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-300 mb-2">Trigger Below (height px)</label>
+                                        <input type="number" id="profileUpscaleTrigger" value="720" min="240" max="2160"
+                                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <p class="text-xs text-gray-500 mt-1">Files shorter than this are candidates</p>
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-300 mb-2">Target Height (px)</label>
+                                        <input type="number" id="profileUpscaleTarget" value="1080" min="480" max="4320"
+                                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <p class="text-xs text-gray-500 mt-1">Desired output height</p>
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-300 mb-2">Scale Factor</label>
+                                    <select id="profileUpscaleFactor"
+                                        class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <option value="2">2× — doubles resolution (e.g. 480p → 960p)</option>
+                                        <option value="3">3× — triples resolution (e.g. 480p → 1440p)</option>
+                                        <option value="4">4× — quadruples resolution (e.g. 480p → 1920p)</option>
+                                    </select>
+                                </div>
+
+                                <div class="bg-yellow-900 border border-yellow-700 rounded px-4 py-3 text-xs text-yellow-200">
+                                    ⚠️ <strong>Note:</strong> Profile-level upscaling applies to all libraries and watched folders using this profile. If a scan root has its own upscale settings enabled, those take priority over these profile settings.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                     
                     <div class="flex justify-end gap-3 pt-4">
                         <button type="button" onclick="closeProfileModal()" 

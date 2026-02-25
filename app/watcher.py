@@ -165,24 +165,30 @@ class FolderWatcher:
                     current_specs=current_specs,
                 )
 
-                # Check upscale eligibility via linked scan root
+                # Upscale eligibility: scan root settings > profile settings
                 import json as _json
-                upscale_plan = None
+                upscale_plan   = None
+                upscale_source = None
                 for root in db.get_scan_roots():
                     if root.get('enabled') and root.get('profile_id') == watch['profile_id'] and root.get('upscale_enabled'):
-                        src_h = current_specs.get('height', 0) or 0
-                        trigger = root.get('upscale_trigger_below', 720)
-                        t_h     = root.get('upscale_target_height', 1080)
-                        if src_h > 0 and src_h < trigger and src_h < (t_h * 0.85):
-                            upscale_plan = _json.dumps({
-                                'enabled':       True,
-                                'upscaler_key':  root.get('upscale_key', 'realesrgan'),
-                                'model':         root.get('upscale_model', 'realesrgan-x4plus'),
-                                'factor':        root.get('upscale_factor', 2),
-                                'source_height': src_h,
-                                'target_height': t_h,
-                            })
+                        upscale_source = root
                         break
+                if upscale_source is None and profile.get('upscale_enabled'):
+                    upscale_source = profile
+
+                if upscale_source:
+                    src_h   = current_specs.get('height', 0) or 0
+                    trigger = upscale_source.get('upscale_trigger_below', 720)
+                    t_h     = upscale_source.get('upscale_target_height', 1080)
+                    if src_h > 0 and src_h < trigger and src_h < (t_h * 0.85):
+                        upscale_plan = _json.dumps({
+                            'enabled':       True,
+                            'upscaler_key':  upscale_source.get('upscale_key', 'realesrgan'),
+                            'model':         upscale_source.get('upscale_model', 'realesrgan-x4plus'),
+                            'factor':        upscale_source.get('upscale_factor', 2),
+                            'source_height': src_h,
+                            'target_height': t_h,
+                        })
 
                 db.add_to_queue(
                     file_path=file_path,

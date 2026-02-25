@@ -305,6 +305,22 @@ class Database:
                 cursor.execute("ALTER TABLE queue ADD COLUMN upscale_plan TEXT")
                 print("  ↳ Migrated: added 'upscale_plan' to queue")
 
+            # profiles: AI upscale settings per profile
+            cursor.execute("PRAGMA table_info(profiles)")
+            profile_cols = [col[1] for col in cursor.fetchall()]
+            profile_upscale_migrations = [
+                ("upscale_enabled",       "BOOLEAN DEFAULT 0"),
+                ("upscale_trigger_below", "INTEGER DEFAULT 720"),
+                ("upscale_target_height", "INTEGER DEFAULT 1080"),
+                ("upscale_model",         "TEXT DEFAULT 'realesrgan-x4plus'"),
+                ("upscale_factor",        "INTEGER DEFAULT 2"),
+                ("upscale_key",           "TEXT DEFAULT 'realesrgan'"),
+            ]
+            for col_name, col_def in profile_upscale_migrations:
+                if col_name not in profile_cols:
+                    cursor.execute(f"ALTER TABLE profiles ADD COLUMN {col_name} {col_def}")
+                    print(f"  ↳ Migrated: added '{col_name}' to profiles")
+
             # Enforce single default profile — keep only the lowest-id one
             cursor.execute("SELECT id FROM profiles WHERE is_default = 1 ORDER BY id")
             default_rows = cursor.fetchall()
@@ -327,8 +343,10 @@ class Database:
                 INSERT INTO profiles 
                 (name, resolution, framerate, codec, encoder, quality, audio_codec, 
                  container, audio_handling, subtitle_handling, enable_filters,
-                 chapter_markers, hw_accel_enabled, preset, two_pass, custom_args, is_default)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 chapter_markers, hw_accel_enabled, preset, two_pass, custom_args, is_default,
+                 upscale_enabled, upscale_trigger_below, upscale_target_height,
+                 upscale_model, upscale_factor, upscale_key)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 kwargs.get('name'),
                 kwargs.get('resolution'),
@@ -346,7 +364,13 @@ class Database:
                 kwargs.get('preset'),
                 kwargs.get('two_pass', False),
                 kwargs.get('custom_args'),
-                kwargs.get('is_default', False)
+                kwargs.get('is_default', False),
+                kwargs.get('upscale_enabled', False),
+                kwargs.get('upscale_trigger_below', 720),
+                kwargs.get('upscale_target_height', 1080),
+                kwargs.get('upscale_model', 'realesrgan-x4plus'),
+                kwargs.get('upscale_factor', 2),
+                kwargs.get('upscale_key', 'realesrgan'),
             ))
             return cursor.lastrowid
     
@@ -366,7 +390,9 @@ class Database:
                 'name', 'resolution', 'framerate', 'codec', 'encoder',
                 'quality', 'audio_codec', 'container', 'audio_handling',
                 'subtitle_handling', 'enable_filters', 'chapter_markers',
-                'hw_accel_enabled', 'preset', 'two_pass', 'custom_args', 'is_default'
+                'hw_accel_enabled', 'preset', 'two_pass', 'custom_args', 'is_default',
+                'upscale_enabled', 'upscale_trigger_below', 'upscale_target_height',
+                'upscale_model', 'upscale_factor', 'upscale_key',
             ]
             
             for field in allowed_fields:

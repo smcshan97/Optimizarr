@@ -100,7 +100,13 @@ async def update_profile(
         preset=profile.preset,
         two_pass=profile.two_pass,
         custom_args=profile.custom_args,
-        is_default=profile.is_default
+        is_default=profile.is_default,
+        upscale_enabled=profile.upscale_enabled,
+        upscale_trigger_below=profile.upscale_trigger_below,
+        upscale_target_height=profile.upscale_target_height,
+        upscale_model=profile.upscale_model,
+        upscale_factor=profile.upscale_factor,
+        upscale_key=profile.upscale_key,
     )
     
     if success:

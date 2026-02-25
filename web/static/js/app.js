@@ -785,11 +785,12 @@ async function loadProfiles() {
                         ${p.resolution ? `<div><span class="text-gray-400">Resolution:</span> ${p.resolution}</div>` : ''}
                         ${p.preset ? `<div><span class="text-gray-400">Preset:</span> ${p.preset}</div>` : ''}
                     </div>
-                    <div class="flex gap-2 mt-2">
+                    <div class="flex gap-2 mt-2 flex-wrap">
                         ${p.enable_filters ? '<span class="px-2 py-0.5 bg-purple-900 text-purple-300 text-xs rounded">Filters</span>' : ''}
                         ${p.chapter_markers ? '<span class="px-2 py-0.5 bg-gray-600 text-gray-300 text-xs rounded">Chapters</span>' : ''}
                         ${p.hw_accel_enabled ? '<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">GPU</span>' : ''}
                         ${p.two_pass ? '<span class="px-2 py-0.5 bg-yellow-900 text-yellow-300 text-xs rounded">2-Pass</span>' : ''}
+                        ${p.upscale_enabled ? `<span class="px-2 py-0.5 bg-blue-900 text-blue-300 text-xs rounded" title="AI Upscale: ${p.upscale_key || 'realesrgan'} ×${p.upscale_factor || 2}, trigger below ${p.upscale_trigger_below || 720}px">🤖 Upscale ×${p.upscale_factor || 2}</span>` : ''}
                     </div>
                 </div>
                 <div class="flex gap-2">
@@ -813,7 +814,7 @@ function showCreateProfileForm() {
     document.getElementById('profileForm').reset();
     document.getElementById('profileId').value = '';
     document.getElementById('profileFramerateCustom').classList.add('hidden');
-    
+
     // Reset Phase 2 fields to defaults
     document.getElementById('profileAudioHandling').value = 'preserve_all';
     document.getElementById('profileSubtitleHandling').value = 'none';
@@ -821,10 +822,20 @@ function showCreateProfileForm() {
     document.getElementById('profileChapterMarkers').checked = true;
     document.getElementById('profileHwAccel').checked = false;
     document.getElementById('profileContainer').value = 'mkv';
-    
+
+    // Reset AI upscale section to defaults and collapse it
+    _fillProfileUpscaleFields({
+        upscale_enabled: false, upscale_trigger_below: 720, upscale_target_height: 1080,
+        upscale_key: 'realesrgan', upscale_model: 'realesrgan-x4plus', upscale_factor: 2,
+    });
+    const upSec  = document.getElementById('profileUpscaleSection');
+    const upIcon = document.getElementById('profileUpscaleToggleIcon');
+    if (upSec && !upSec.classList.contains('hidden')) upSec.classList.add('hidden');
+    if (upIcon) upIcon.textContent = '▶';
+
     // Initialize preset options for default encoder (svt_av1)
     updatePresetOptions();
-    
+
     document.getElementById('profileModal').classList.remove('hidden');
 }
 
@@ -866,10 +877,13 @@ async function editProfile(id) {
     document.getElementById('profileTwoPass').checked = profile.two_pass;
     document.getElementById('profileIsDefault').checked = profile.is_default;
     document.getElementById('profileCustomArgs').value = profile.custom_args || '';
-    
+
+    // Populate AI upscale fields
+    _fillProfileUpscaleFields(profile);
+
     // Update preset options based on encoder
     updatePresetOptions();
-    
+
     document.getElementById('profileModal').classList.remove('hidden');
 }
 
@@ -904,7 +918,14 @@ document.getElementById('profileForm').addEventListener('submit', async (e) => {
         hw_accel_enabled: document.getElementById('profileHwAccel').checked,
         two_pass: document.getElementById('profileTwoPass').checked,
         custom_args: document.getElementById('profileCustomArgs').value || null,
-        is_default: document.getElementById('profileIsDefault').checked
+        is_default: document.getElementById('profileIsDefault').checked,
+        // AI upscale settings
+        upscale_enabled:       document.getElementById('profileUpscaleEnabled')?.checked ?? false,
+        upscale_trigger_below: parseInt(document.getElementById('profileUpscaleTrigger')?.value) || 720,
+        upscale_target_height: parseInt(document.getElementById('profileUpscaleTarget')?.value)  || 1080,
+        upscale_key:           document.getElementById('profileUpscaleKey')?.value   || 'realesrgan',
+        upscale_model:         document.getElementById('profileUpscaleModel')?.value || 'realesrgan-x4plus',
+        upscale_factor:        parseInt(document.getElementById('profileUpscaleFactor')?.value)  || 2,
     };
     
     const method = currentProfileId ? 'PUT' : 'POST';
@@ -2982,4 +3003,59 @@ function _fillUpscaleFields(root) {
 
     // Keep fields enabled/disabled in sync
     handleUpscaleToggle();
+}
+
+// ============================================================
+// PROFILE UPSCALE FUNCTIONS
+// ============================================================
+
+function toggleProfileUpscaleSection() {
+    const section = document.getElementById('profileUpscaleSection');
+    const icon    = document.getElementById('profileUpscaleToggleIcon');
+    if (!section) return;
+    const hidden = section.classList.toggle('hidden');
+    if (icon) icon.textContent = hidden ? '▶' : '▼';
+}
+
+function handleProfileUpscaleToggle() {
+    const enabled = document.getElementById('profileUpscaleEnabled')?.checked;
+    const fields  = document.getElementById('profileUpscaleFields');
+    const badge   = document.getElementById('profileUpscaleEnabledBadge');
+    if (!fields) return;
+    fields.classList.toggle('opacity-50',          !enabled);
+    fields.classList.toggle('pointer-events-none', !enabled);
+    if (badge) badge.classList.toggle('hidden', !enabled);
+}
+
+function handleProfileUpscalerKeyChange() {
+    const key    = document.getElementById('profileUpscaleKey')?.value;
+    const models = _UPSCALER_MODELS[key] || [];
+    const sel    = document.getElementById('profileUpscaleModel');
+    if (!sel) return;
+    sel.innerHTML = models.map((m, i) =>
+        `<option value="${_esc(m)}" ${i === 0 ? 'selected' : ''}>${_esc(m)}</option>`
+    ).join('');
+}
+
+function _fillProfileUpscaleFields(profile) {
+    const ue = document.getElementById('profileUpscaleEnabled');
+    if (!ue) return;
+
+    ue.checked = !!profile.upscale_enabled;
+
+    const triggerEl = document.getElementById('profileUpscaleTrigger');
+    const targetEl  = document.getElementById('profileUpscaleTarget');
+    const keyEl     = document.getElementById('profileUpscaleKey');
+    const factorEl  = document.getElementById('profileUpscaleFactor');
+
+    if (triggerEl) triggerEl.value = profile.upscale_trigger_below ?? 720;
+    if (targetEl)  targetEl.value  = profile.upscale_target_height  ?? 1080;
+    if (keyEl)     keyEl.value     = profile.upscale_key            ?? 'realesrgan';
+    if (factorEl)  factorEl.value  = profile.upscale_factor         ?? 2;
+
+    handleProfileUpscalerKeyChange();
+    const modelEl = document.getElementById('profileUpscaleModel');
+    if (modelEl && profile.upscale_model) modelEl.value = profile.upscale_model;
+
+    handleProfileUpscaleToggle();
 }

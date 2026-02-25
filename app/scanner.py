@@ -288,23 +288,32 @@ class MediaScanner:
 
             # ── Upscale plan ─────────────────────────────────────────────────
             import json as _json
+            # ── Upscale plan ─────────────────────────────────────────────────
+            import json as _json
             upscale_plan = None
+            # Priority: scan_root upscale settings > profile upscale settings
             if scan_root.get('upscale_enabled'):
-                src_height = current_specs.get('height', 0) or 0
-                trigger_below  = scan_root.get('upscale_trigger_below', 720)
-                target_height  = scan_root.get('upscale_target_height', 1080)
-                upscale_model  = scan_root.get('upscale_model', 'realesrgan-x4plus')
-                upscale_factor = scan_root.get('upscale_factor', 2)
-                upscale_key    = scan_root.get('upscale_key', 'realesrgan')
+                upscale_source = scan_root
+            elif profile.get('upscale_enabled'):
+                upscale_source = profile
+            else:
+                upscale_source = None
 
-                # Only flag for upscale if source is meaningfully below trigger
-                # and the result would actually reach (or approach) target_height
+            if upscale_source:
+                src_height     = current_specs.get('height', 0) or 0
+                trigger_below  = upscale_source.get('upscale_trigger_below', 720)
+                target_height  = upscale_source.get('upscale_target_height', 1080)
+                upscale_model  = upscale_source.get('upscale_model', 'realesrgan-x4plus')
+                upscale_factor = upscale_source.get('upscale_factor', 2)
+                upscale_key    = upscale_source.get('upscale_key', 'realesrgan')
+
+                # Only flag if source is meaningfully below trigger and target
                 if src_height > 0 and src_height < trigger_below and src_height < (target_height * 0.85):
                     upscale_plan = _json.dumps({
-                        "enabled":      True,
-                        "upscaler_key": upscale_key,
-                        "model":        upscale_model,
-                        "factor":       upscale_factor,
+                        "enabled":       True,
+                        "upscaler_key":  upscale_key,
+                        "model":         upscale_model,
+                        "factor":        upscale_factor,
                         "source_height": src_height,
                         "target_height": target_height,
                     })
