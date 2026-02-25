@@ -423,6 +423,118 @@
                     <p class="text-gray-500 text-sm">Loading…</p>
                 </div>
             </div>
+
+            <!-- External Connections Section -->
+            <div class="bg-gray-800 rounded-lg p-6 mt-6">
+                <div class="flex justify-between items-center mb-2">
+                    <div>
+                        <h2 class="text-xl font-bold">🔌 External Connections</h2>
+                        <p class="text-sm text-gray-400 mt-1">
+                            Connect Sonarr or Radarr to import libraries and receive automatic download events.
+                        </p>
+                    </div>
+                    <button onclick="showAddConnectionModal()"
+                        class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded text-sm font-medium transition-colors">
+                        + Add Connection
+                    </button>
+                </div>
+                <div id="connectionsList" class="space-y-3 mt-4">
+                    <p class="text-gray-500 text-sm">Loading…</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- External Connection Modal -->
+        <div id="connectionModal" class="hidden fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
+            <div class="bg-gray-800 rounded-lg p-6 w-full max-w-lg">
+                <div class="flex justify-between items-center mb-5">
+                    <h3 class="text-xl font-bold" id="connectionModalTitle">Add Connection</h3>
+                    <button onclick="closeConnectionModal()" class="text-gray-400 hover:text-white text-xl">✕</button>
+                </div>
+
+                <form id="connectionForm" class="space-y-4" onsubmit="return false;">
+                    <input type="hidden" id="connectionId">
+
+                    <!-- App Type -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">App Type *</label>
+                        <select id="connectionAppType"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                            <option value="radarr">📽️ Radarr (Movies)</option>
+                            <option value="sonarr">📺 Sonarr (TV Shows)</option>
+                            <option value="stash" disabled class="text-gray-500">🔒 Stash (Coming Soon)</option>
+                        </select>
+                    </div>
+
+                    <!-- Name -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">Display Name *</label>
+                        <input type="text" id="connectionName"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
+                            placeholder="e.g. Radarr — 4K Movies">
+                    </div>
+
+                    <!-- Base URL -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">URL *</label>
+                        <input type="url" id="connectionUrl"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
+                            placeholder="http://localhost:7878">
+                        <p class="text-xs text-gray-500 mt-1">Radarr default: :7878 · Sonarr default: :8989</p>
+                    </div>
+
+                    <!-- API Key -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">API Key *</label>
+                        <div class="relative">
+                            <input type="password" id="connectionApiKey"
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white pr-16"
+                                placeholder="Paste your API key here">
+                            <button type="button" onclick="toggleConnectionKeyVisibility()"
+                                class="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-gray-400 hover:text-white px-2 py-1 bg-gray-600 rounded">
+                                Show
+                            </button>
+                        </div>
+                        <p class="text-xs text-gray-500 mt-1">Settings → General → API Key in Sonarr/Radarr</p>
+                    </div>
+
+                    <!-- Show in Stats -->
+                    <div class="flex items-center gap-3">
+                        <input type="checkbox" id="connectionShowInStats" checked
+                            class="w-4 h-4 bg-gray-700 border-gray-600 rounded">
+                        <label for="connectionShowInStats" class="text-sm text-gray-300 cursor-pointer">
+                            Show files from this connection in Statistics
+                        </label>
+                    </div>
+
+                    <!-- Link to Scan Root -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">Link to Scan Root <span class="text-gray-500 font-normal">(optional)</span></label>
+                        <select id="connectionScanRoot"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                            <option value="">— None (use default profile) —</option>
+                        </select>
+                        <p class="text-xs text-gray-500 mt-1">Files from this connection will use the linked scan root's profile</p>
+                    </div>
+
+                    <!-- Test result banner -->
+                    <div id="connectionTestResult" class="hidden rounded px-4 py-2 text-sm"></div>
+
+                    <div class="flex gap-3 pt-2">
+                        <button type="button" onclick="testConnectionForm()"
+                            class="bg-gray-600 hover:bg-gray-500 px-4 py-2 rounded text-sm transition-colors">
+                            🔌 Test Connection
+                        </button>
+                        <div class="flex-1"></div>
+                        <button type="button" onclick="closeConnectionModal()"
+                            class="bg-gray-600 hover:bg-gray-500 px-4 py-2 rounded text-sm">Cancel</button>
+                        <button type="button" id="connectionSaveBtn" onclick="saveConnection()"
+                            class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded text-sm font-medium transition-colors">
+                            Save
+                        </button>
+                    </div>
+                </form>
+            </div>
         </div>
 
         <!-- Profile Modal -->

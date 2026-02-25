@@ -255,6 +255,31 @@ class Database:
                 cursor.execute("ALTER TABLE history ADD COLUMN container TEXT")
                 print("  ↳ Migrated: added 'container' column to history")
             
+            # External connections table (Sonarr / Radarr / Stash)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS external_connections (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name            TEXT NOT NULL,
+                    app_type        TEXT NOT NULL,
+                    base_url        TEXT NOT NULL,
+                    api_key_encrypted TEXT NOT NULL,
+                    enabled         BOOLEAN DEFAULT 1,
+                    show_in_stats   BOOLEAN DEFAULT 1,
+                    last_tested     TIMESTAMP,
+                    last_synced     TIMESTAMP,
+                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+
+            # scan_roots: link to an external connection (optional)
+            cursor.execute("PRAGMA table_info(scan_roots)")
+            root_columns_check = [col[1] for col in cursor.fetchall()]
+            if 'external_connection_id' not in root_columns_check:
+                cursor.execute(
+                    "ALTER TABLE scan_roots ADD COLUMN external_connection_id INTEGER"
+                )
+                print("  ↳ Migrated: added 'external_connection_id' to scan_roots")
+
             # Enforce single default profile — keep only the lowest-id one
             cursor.execute("SELECT id FROM profiles WHERE is_default = 1 ORDER BY id")
             default_rows = cursor.fetchall()
@@ -706,6 +731,80 @@ class Database:
             except Exception as e:
                 errors.append(f"{p.get('name', '?')}: {str(e)}")
         return {'imported': imported, 'skipped': skipped, 'errors': errors}
+
+
+    # External Connection CRUD
+
+    def create_external_connection(self, **kwargs) -> int:
+        """Create a new external connection. API key must already be encrypted."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO external_connections
+                    (name, app_type, base_url, api_key_encrypted, enabled, show_in_stats)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, (
+                kwargs["name"],
+                kwargs["app_type"],
+                kwargs["base_url"].rstrip("/"),
+                kwargs["api_key_encrypted"],
+                kwargs.get("enabled", True),
+                kwargs.get("show_in_stats", True),
+            ))
+            return cursor.lastrowid
+
+    def get_external_connections(self) -> List[Dict]:
+        """Get all external connections."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM external_connections ORDER BY name")
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_external_connection(self, conn_id: int) -> Optional[Dict]:
+        """Get a single external connection by ID."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM external_connections WHERE id = ?", (conn_id,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def update_external_connection(self, conn_id: int, **kwargs) -> bool:
+        """Update an external connection."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            allowed = [
+                "name", "app_type", "base_url", "api_key_encrypted",
+                "enabled", "show_in_stats", "last_tested", "last_synced",
+            ]
+            updates, values = [], []
+            for field in allowed:
+                if field in kwargs:
+                    val = kwargs[field]
+                    if field == "base_url" and val:
+                        val = val.rstrip("/")
+                    updates.append(f"{field} = ?")
+                    values.append(val)
+            if not updates:
+                return False
+            values.append(conn_id)
+            cursor.execute(
+                f"UPDATE external_connections SET {', '.join(updates)} WHERE id = ?",
+                values,
+            )
+            return cursor.rowcount > 0
+
+    def delete_external_connection(self, conn_id: int) -> bool:
+        """Delete an external connection and unlink any scan roots pointing to it."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            # Unlink scan roots first
+            cursor.execute(
+                "UPDATE scan_roots SET external_connection_id = NULL "
+                "WHERE external_connection_id = ?",
+                (conn_id,),
+            )
+            cursor.execute("DELETE FROM external_connections WHERE id = ?", (conn_id,))
+            return cursor.rowcount > 0
 
 
 # Global database instance
