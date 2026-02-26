@@ -1325,11 +1325,10 @@ async def create_connection(
     )
 
     app_type = data.get("app_type", "").lower()
-    if app_type not in ("sonarr", "radarr"):
+    if app_type not in ("sonarr", "radarr", "stash"):
         raise HTTPException(
             status_code=400,
-            detail="Stash integration is planned for a future release. "
-                   "Only 'sonarr' and 'radarr' are supported right now.",
+            detail="Unsupported app_type. Supported values: 'sonarr', 'radarr', 'stash'.",
         )
 
     raw_key = data.get("api_key", "").strip()
@@ -1487,6 +1486,8 @@ def _sync_connection_task(conn_id: int):
             items = connection_manager.fetch_radarr_library(conn)
         elif app_type == "sonarr":
             items = connection_manager.fetch_sonarr_library(conn)
+        elif app_type == "stash":
+            items = connection_manager.fetch_stash_library(conn)
         else:
             return
     except Exception as e:
