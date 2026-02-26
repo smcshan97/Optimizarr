@@ -2800,7 +2800,13 @@ function renderConnections(connections) {
         const statusDot = c.enabled
             ? '<span class="w-2 h-2 rounded-full bg-green-500 inline-block mr-2"></span>'
             : '<span class="w-2 h-2 rounded-full bg-gray-500 inline-block mr-2"></span>';
-        const typeLabel = c.app_type === 'radarr' ? '📽️ Radarr' : '📺 Sonarr';
+        const typeLabel = c.app_type === 'radarr' ? '📽️ Radarr'
+                        : c.app_type === 'sonarr' ? '📺 Sonarr'
+                        : c.app_type === 'stash'  ? '🔒 Stash'
+                        : c.app_type;
+        const privacyBadge = c.app_type === 'stash'
+            ? '<span class="text-xs bg-yellow-900 text-yellow-300 px-2 py-0.5 rounded" title="Privacy mode — stats hidden by default">🔒 Private</span>'
+            : '';
         const testedAgo = c.last_tested
             ? _timeAgo(c.last_tested)
             : 'Never tested';
@@ -2818,6 +2824,7 @@ function renderConnections(connections) {
                     ${statusDot}
                     <span class="font-semibold truncate">${_esc(c.name)}</span>
                     <span class="text-xs bg-gray-700 text-gray-300 px-2 py-0.5 rounded">${typeLabel}</span>
+                    ${privacyBadge}
                 </div>
                 <p class="text-sm text-gray-400 truncate">${_esc(c.base_url)}</p>
                 <p class="text-xs text-gray-500 mt-0.5">
@@ -2860,6 +2867,7 @@ function showAddConnectionModal() {
     document.getElementById('connectionScanRoot').value = '';
     _hideConnectionTestResult();
     _populateConnectionScanRootDropdown();
+    handleConnectionTypeChange();   // set URL placeholder / hints for default type
     document.getElementById('connectionModal').classList.remove('hidden');
     document.getElementById('connectionName').focus();
 }
@@ -2879,6 +2887,7 @@ function editConnection(id) {
     document.getElementById('connectionShowInStats').checked = !!c.show_in_stats;
     _hideConnectionTestResult();
     _populateConnectionScanRootDropdown(c.linked_scan_root_id);
+    handleConnectionTypeChange();   // update URL hints / privacy note for this type
     document.getElementById('connectionModal').classList.remove('hidden');
 }
 
@@ -3200,4 +3209,51 @@ function _fillProfileUpscaleFields(profile) {
     if (modelEl && profile.upscale_model) modelEl.value = profile.upscale_model;
 
     handleProfileUpscaleToggle();
+}
+
+// ============================================================
+// CONNECTION TYPE CHANGE — update hints & privacy notice
+// ============================================================
+
+function handleConnectionTypeChange() {
+    const type       = document.getElementById('connectionAppType')?.value || 'radarr';
+    const urlInput   = document.getElementById('connectionUrl');
+    const urlHint    = document.getElementById('connectionUrlHint');
+    const keyHint    = document.getElementById('connectionKeyHint');
+    const privNote   = document.getElementById('connectionPrivacyNote');
+    const statsCheck = document.getElementById('connectionShowInStats');
+
+    const hints = {
+        radarr: {
+            placeholder: 'http://localhost:7878',
+            urlHint:     'Radarr default: :7878 · Sonarr default: :8989',
+            keyHint:     'Settings → General → API Key in Radarr',
+        },
+        sonarr: {
+            placeholder: 'http://localhost:8989',
+            urlHint:     'Sonarr default: :8989 · Radarr default: :7878',
+            keyHint:     'Settings → General → API Key in Sonarr',
+        },
+        stash: {
+            placeholder: 'http://localhost:9999',
+            urlHint:     'Stash default port: :9999',
+            keyHint:     'Stash → Settings → Security → API Key',
+        },
+    };
+
+    const h = hints[type] || hints.radarr;
+    if (urlInput)   urlInput.placeholder = h.placeholder;
+    if (urlHint)    urlHint.textContent  = h.urlHint;
+    if (keyHint)    keyHint.textContent  = h.keyHint;
+
+    // Show/hide Stash privacy notice
+    if (privNote) {
+        if (type === 'stash') {
+            privNote.classList.remove('hidden');
+            // Default: hide Stash from stats for privacy
+            if (statsCheck && !_connectionEditId) statsCheck.checked = false;
+        } else {
+            privNote.classList.add('hidden');
+        }
+    }
 }

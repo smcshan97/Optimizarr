@@ -490,12 +490,21 @@
                     <!-- App Type -->
                     <div>
                         <label class="block text-sm font-medium text-gray-300 mb-2">App Type *</label>
-                        <select id="connectionAppType"
+                        <select id="connectionAppType" onchange="handleConnectionTypeChange()"
                             class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
                             <option value="radarr">📽️ Radarr (Movies)</option>
                             <option value="sonarr">📺 Sonarr (TV Shows)</option>
-                            <option value="stash" disabled class="text-gray-500">🔒 Stash (Coming Soon)</option>
+                            <option value="stash">🔒 Stash (Adult Content Manager)</option>
                         </select>
+                    </div>
+
+                    <!-- Privacy notice — shown only for Stash -->
+                    <div id="connectionPrivacyNote" class="hidden bg-yellow-900 border border-yellow-700 rounded px-4 py-3">
+                        <p class="text-xs text-yellow-200">
+                            <strong>🔒 Privacy mode:</strong> Stash is treated as a private connection.
+                            Scene titles and file paths will not appear in logs.
+                            Statistics are hidden by default — you can enable them below.
+                        </p>
                     </div>
 
                     <!-- Name -->
@@ -512,7 +521,7 @@
                         <input type="url" id="connectionUrl"
                             class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
                             placeholder="http://localhost:7878">
-                        <p class="text-xs text-gray-500 mt-1">Radarr default: :7878 · Sonarr default: :8989</p>
+                        <p class="text-xs text-gray-500 mt-1" id="connectionUrlHint">Radarr default: :7878 · Sonarr default: :8989</p>
                     </div>
 
                     <!-- API Key -->
@@ -527,7 +536,7 @@
                                 Show
                             </button>
                         </div>
-                        <p class="text-xs text-gray-500 mt-1">Settings → General → API Key in Sonarr/Radarr</p>
+                        <p class="text-xs text-gray-500 mt-1" id="connectionKeyHint">Settings → General → API Key in Sonarr/Radarr</p>
                     </div>
 
                     <!-- Show in Stats -->
