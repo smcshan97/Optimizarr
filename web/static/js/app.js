@@ -56,25 +56,55 @@ async function apiRequest(endpoint, options = {}) {
     return response.json();
 }
 
-// Tab switching
+// Tab switching — sidebar nav + tab panels
 function switchTab(tabName) {
-    // Hide all tabs
-    document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
-    document.querySelectorAll('.tab-button').forEach(el => el.classList.remove('active'));
+    // Hide all tab panels
+    document.querySelectorAll('.tab-panel').forEach(el => {
+        el.classList.remove('active');
+    });
+    // Deactivate all nav items
+    document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
     
-    // Show selected tab
-    document.getElementById(`content-${tabName}`).classList.remove('hidden');
-    document.getElementById(`tab-${tabName}`).classList.add('active');
+    // Show selected tab panel
+    const panel = document.getElementById(`tab-${tabName}`);
+    if (panel) panel.classList.add('active');
+    
+    // Activate nav item
+    const navItem = document.querySelector(`.nav-item[data-tab="${tabName}"]`);
+    if (navItem) navItem.classList.add('active');
+    
+    // Close mobile sidebar if open
+    if (window.innerWidth < 769) {
+        document.getElementById('sidebar').classList.remove('open');
+        document.getElementById('mobileOverlay').classList.add('hidden');
+    }
     
     // Load tab data
     if (tabName === 'queue') loadQueue();
     if (tabName === 'profiles') loadProfiles();
-    if (tabName === 'scanroots') loadScanRoots();
+    if (tabName === 'scan-roots') loadScanRoots();
     if (tabName === 'settings') { loadSettings(); loadConnections(); }
     if (tabName === 'schedule') loadSchedule();
     if (tabName === 'logs') loadLogs();
     if (tabName === 'watches') loadWatches();
     if (tabName === 'statistics') loadStatistics();
+    if (tabName === 'connections') loadConnections();
+}
+
+// Mobile sidebar toggle
+function toggleSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    const overlay = document.getElementById('mobileOverlay');
+    sidebar.classList.toggle('open');
+    overlay.classList.toggle('hidden');
+}
+
+// Collapsible section toggle
+function toggleCollapse(sectionId, toggleBtn) {
+    const section = document.getElementById(sectionId);
+    if (!section) return;
+    section.classList.toggle('open');
+    if (toggleBtn) toggleBtn.classList.toggle('open');
 }
 
 // Load statistics
@@ -85,6 +115,14 @@ async function loadStats() {
         document.getElementById('filesProcessed').textContent = stats.total_files_processed;
         document.getElementById('queuePending').textContent = stats.queue_pending;
         document.getElementById('activeJobs').textContent = stats.queue_processing;
+        
+        // Update sidebar nav badge
+        const navBadge = document.getElementById('navQueueCount');
+        if (navBadge) {
+            const total = (stats.queue_pending || 0) + (stats.queue_processing || 0);
+            navBadge.textContent = total;
+            navBadge.style.display = total > 0 ? '' : 'none';
+        }
     }
 }
 
@@ -186,10 +224,21 @@ async function loadQueue() {
     }
 }
 
+// Debounce utility
+function debounce(fn, delay) {
+    let timer;
+    return function(...args) {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn.apply(this, args), delay);
+    };
+}
+
+const debouncedFilterQueue = debounce(() => filterQueue(), 300);
+
 // Filter queue by search and status, then sort and display
 function filterQueue() {
-    const searchTerm = (document.getElementById('queueSearch')?.value || '').toLowerCase();
-    const statusFilter = document.getElementById('queueStatusFilter')?.value || '';
+    const searchTerm = (document.getElementById('queueSearchInput')?.value || '').toLowerCase();
+    const statusFilter = document.getElementById('queueFilterStatus')?.value || '';
     
     let filtered = allQueueItems;
     
@@ -271,6 +320,8 @@ function toggleSort(field) {
     }
     filterQueue();
 }
+// Alias for HTML onclick references
+const sortQueue = toggleSort;
 
 // Get sort arrow indicator
 function sortArrow(field) {
@@ -298,10 +349,15 @@ function formatSize(bytes) {
 
 // Select All / Deselect All
 function toggleSelectAll(checkbox) {
+    // Handle being called from HTML without argument
+    if (!checkbox || !(checkbox instanceof HTMLInputElement)) {
+        checkbox = document.getElementById('queueHeaderCheck') || document.getElementById('selectAllQueue');
+    }
     const checkboxes = document.querySelectorAll('.queue-row-checkbox');
     selectedQueueIds.clear();
     
-    if (checkbox.checked) {
+    const isChecked = checkbox ? checkbox.checked : false;
+    if (isChecked) {
         checkboxes.forEach(cb => {
             cb.checked = true;
             selectedQueueIds.add(parseInt(cb.dataset.id));
@@ -319,21 +375,25 @@ function toggleRowSelect(checkbox, id) {
         selectedQueueIds.delete(id);
     }
     
-    // Update select-all checkbox state
+    // Update select-all checkbox state (both toolbar and table header)
     const allBoxes = document.querySelectorAll('.queue-row-checkbox');
-    const selectAllBox = document.getElementById('selectAllCheckbox');
-    if (selectAllBox) {
-        selectAllBox.checked = selectedQueueIds.size === allBoxes.length && allBoxes.length > 0;
-        selectAllBox.indeterminate = selectedQueueIds.size > 0 && selectedQueueIds.size < allBoxes.length;
-    }
+    ['queueHeaderCheck', 'selectAllQueue'].forEach(id => {
+        const box = document.getElementById(id);
+        if (box) {
+            box.checked = selectedQueueIds.size === allBoxes.length && allBoxes.length > 0;
+            box.indeterminate = selectedQueueIds.size > 0 && selectedQueueIds.size < allBoxes.length;
+        }
+    });
     updateBulkBar();
 }
 
 function deselectAll() {
     selectedQueueIds.clear();
     document.querySelectorAll('.queue-row-checkbox').forEach(cb => cb.checked = false);
-    const selectAllBox = document.getElementById('selectAllCheckbox');
-    if (selectAllBox) { selectAllBox.checked = false; selectAllBox.indeterminate = false; }
+    ['queueHeaderCheck', 'selectAllQueue'].forEach(id => {
+        const box = document.getElementById(id);
+        if (box) { box.checked = false; box.indeterminate = false; }
+    });
     updateBulkBar();
 }
 
@@ -341,12 +401,60 @@ function updateBulkBar() {
     const bar = document.getElementById('bulkActionsBar');
     const countEl = document.getElementById('bulkSelectedCount');
     
+    if (!bar) return;
+    
     if (selectedQueueIds.size > 0) {
         bar.classList.remove('hidden');
-        countEl.textContent = `${selectedQueueIds.size} item${selectedQueueIds.size > 1 ? 's' : ''} selected`;
+        bar.style.display = 'flex';
+        if (countEl) countEl.textContent = selectedQueueIds.size;
     } else {
         bar.classList.add('hidden');
+        bar.style.display = '';
     }
+}
+
+function clearSelection() {
+    selectedQueueIds.clear();
+    document.querySelectorAll('.queue-row-checkbox').forEach(cb => cb.checked = false);
+    const headerCheck = document.getElementById('queueHeaderCheck');
+    const selectAll = document.getElementById('selectAllQueue');
+    if (headerCheck) headerCheck.checked = false;
+    if (selectAll) selectAll.checked = false;
+    updateBulkBar();
+}
+
+async function bulkAction(action) {
+    if (selectedQueueIds.size === 0) {
+        showMessage('No items selected', 'warning');
+        return;
+    }
+    
+    if (action === 'delete') {
+        if (!confirm(`Delete ${selectedQueueIds.size} selected item(s)?`)) return;
+        let count = 0;
+        for (const id of selectedQueueIds) {
+            const result = await apiRequest(`/queue/${id}`, { method: 'DELETE' });
+            if (result) count++;
+        }
+        selectedQueueIds.clear();
+        showMessage(`Deleted ${count} item(s)`, 'success');
+    } else {
+        const statusMap = { retry: 'pending', pause: 'paused', resume: 'pending' };
+        const newStatus = statusMap[action];
+        if (!newStatus) { showMessage('Unknown action: ' + action, 'error'); return; }
+        
+        let count = 0;
+        for (const id of selectedQueueIds) {
+            const result = await apiRequest(`/queue/${id}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ status: newStatus })
+            });
+            if (result) count++;
+        }
+        showMessage(`${action === 'retry' ? 'Retried' : action === 'pause' ? 'Paused' : 'Resumed'} ${count} item(s)`, 'success');
+    }
+    deselectAll();
+    loadQueue();
 }
 
 async function bulkDeleteSelected() {
@@ -378,7 +486,8 @@ function displayQueueItems(items) {
 
     if (!items || items.length === 0) {
         container.innerHTML = '<p class="text-gray-400">No items in queue. Click "Scan All" to find media files.</p>';
-        document.getElementById('bulkActionsBar').classList.add('hidden');
+        const bar = document.getElementById('bulkActionsBar');
+        if (bar) bar.classList.add('hidden');
         return;
     }
 
@@ -566,13 +675,15 @@ function displayQueueItems(items) {
     html += '</tbody></table>';
     container.innerHTML = html;
     
-    // Restore selection state on select-all checkbox
-    const selectAllBox = document.getElementById('selectAllCheckbox');
-    if (selectAllBox) {
-        const allBoxes = document.querySelectorAll('.queue-row-checkbox');
-        selectAllBox.checked = selectedQueueIds.size === allBoxes.length && allBoxes.length > 0;
-        selectAllBox.indeterminate = selectedQueueIds.size > 0 && selectedQueueIds.size < allBoxes.length;
-    }
+    // Restore selection state on select-all checkboxes
+    ['queueHeaderCheck', 'selectAllQueue'].forEach(id => {
+        const box = document.getElementById(id);
+        if (box) {
+            const allBoxes = document.querySelectorAll('.queue-row-checkbox');
+            box.checked = selectedQueueIds.size === allBoxes.length && allBoxes.length > 0;
+            box.indeterminate = selectedQueueIds.size > 0 && selectedQueueIds.size < allBoxes.length;
+        }
+    });
     updateBulkBar();
 }
 
@@ -594,27 +705,32 @@ async function stopEncoding() {
 }
 
 // Initialize
+let _statsRefreshInterval = null;
 document.addEventListener('DOMContentLoaded', () => {
     // Check auth
     if (!checkAuth()) return;
     
-    // Set username
+    // Set username in sidebar
     const user = JSON.parse(localStorage.getItem('user') || '{}');
-    document.getElementById('username').textContent = user.username || '';
+    const sidebarUser = document.getElementById('sidebarUser');
+    if (sidebarUser) sidebarUser.textContent = user.username || 'admin';
     
     // Load initial data
     loadStats();
     loadResources();
     loadQueue();
     
-    // Auto-refresh every 5 seconds
-    setInterval(() => {
+    // Auto-refresh stats/resources every 5 seconds (pauses when tab hidden)
+    _statsRefreshInterval = setInterval(() => {
+        if (document.hidden) return; // Skip refresh when tab not visible
         loadStats();
         loadResources();
-        if (!document.getElementById('content-queue').classList.contains('hidden')) {
-            loadQueue();
-        }
     }, 5000);
+    
+    // Initialize queue auto-refresh from checkbox state
+    if (document.getElementById('autoRefreshQueue')?.checked) {
+        toggleAutoRefresh();
+    }
 });
 
 // Settings functions
@@ -625,21 +741,24 @@ async function loadSettings() {
     // Load resource settings
     const settings = await apiRequest('/settings/resources');
     if (settings) {
-        document.getElementById('cpuThreshold').value = parseFloat(settings.resource_cpu_threshold || '90');
-        document.getElementById('memoryThreshold').value = parseFloat(settings.resource_memory_threshold || '85');
-        document.getElementById('gpuThreshold').value = parseFloat(settings.resource_gpu_threshold || '90');
-        document.getElementById('niceLevel').value = parseInt(settings.resource_nice_level || '10');
-        document.getElementById('enableThrottling').checked = (settings.resource_enable_throttling || 'true') === 'true';
+        const el = (id) => document.getElementById(id);
+        if (el('cpuThreshold')) el('cpuThreshold').value = parseFloat(settings.resource_cpu_threshold || '90');
+        if (el('memoryThreshold')) el('memoryThreshold').value = parseFloat(settings.resource_memory_threshold || '85');
+        if (el('gpuThreshold')) el('gpuThreshold').value = parseFloat(settings.resource_gpu_threshold || '90');
+        if (el('niceLevel')) el('niceLevel').value = parseInt(settings.resource_nice_level || '10');
+        if (el('enableThrottling')) el('enableThrottling').checked = (settings.resource_enable_throttling || 'true') === 'true';
+        if (el('settingsThrottle')) el('settingsThrottle').checked = (settings.resource_enable_throttling || 'true') === 'true';
     }
 }
 
 async function saveResourceSettings() {
+    const el = (id) => document.getElementById(id);
     const settings = {
-        'resource_cpu_threshold': document.getElementById('cpuThreshold').value,
-        'resource_memory_threshold': document.getElementById('memoryThreshold').value,
-        'resource_gpu_threshold': document.getElementById('gpuThreshold').value,
-        'resource_nice_level': document.getElementById('niceLevel').value,
-        'resource_enable_throttling': document.getElementById('enableThrottling').checked ? 'true' : 'false'
+        'resource_cpu_threshold': el('cpuThreshold')?.value || '90',
+        'resource_memory_threshold': el('memoryThreshold')?.value || '85',
+        'resource_gpu_threshold': el('gpuThreshold')?.value || '90',
+        'resource_nice_level': el('niceLevel')?.value || '10',
+        'resource_enable_throttling': (el('enableThrottling')?.checked ?? el('settingsThrottle')?.checked ?? true) ? 'true' : 'false'
     };
     
     const result = await apiRequest('/settings/resources', {
@@ -648,12 +767,7 @@ async function saveResourceSettings() {
     });
     
     if (result) {
-        const msgEl = document.getElementById('settingsMessage');
-        msgEl.textContent = '✓ Settings saved successfully';
-        msgEl.className = 'mt-4 p-3 bg-green-900/50 border border-green-700 rounded text-green-300';
-        msgEl.classList.remove('hidden');
-        
-        setTimeout(() => msgEl.classList.add('hidden'), 3000);
+        showMessage('Settings saved successfully', 'success');
     }
 }
 
@@ -681,15 +795,15 @@ function applyPreset(preset) {
     
     const config = presets[preset];
     if (config) {
-        document.getElementById('cpuThreshold').value = config.cpu;
-        document.getElementById('memoryThreshold').value = config.memory;
-        document.getElementById('gpuThreshold').value = config.gpu;
-        document.getElementById('niceLevel').value = config.nice;
+        const el = (id) => document.getElementById(id);
+        if (el('cpuThreshold')) el('cpuThreshold').value = config.cpu;
+        if (el('memoryThreshold')) el('memoryThreshold').value = config.memory;
+        if (el('gpuThreshold')) el('gpuThreshold').value = config.gpu;
+        if (el('niceLevel')) el('niceLevel').value = config.nice;
     }
 }
 
 // Schedule management
-let selectedDays = new Set([0, 1, 2, 3, 4, 5, 6]); // All days selected by default
 
 async function loadSchedule() {
     const schedule = await apiRequest('/schedule');
@@ -699,52 +813,46 @@ async function loadSchedule() {
         // Set enabled state
         document.getElementById('scheduleEnabled').checked = config.enabled;
         
-        // Set days
-        selectedDays = new Set(config.days_of_week.split(',').map(d => parseInt(d)));
-        updateDayButtons();
+        // Set days - handle both numeric and string day formats
+        const daysStr = config.days_of_week || '';
+        const dayMap = { 'mon': 0, 'tue': 1, 'wed': 2, 'thu': 3, 'fri': 4, 'sat': 5, 'sun': 6 };
+        
+        // Update day checkboxes in HTML
+        const dayContainer = document.getElementById('scheduleDays');
+        if (dayContainer) {
+            const checkboxes = dayContainer.querySelectorAll('input[type="checkbox"]');
+            const activeDays = daysStr.split(',').map(d => d.trim().toLowerCase());
+            checkboxes.forEach(cb => {
+                cb.checked = activeDays.includes(cb.value);
+            });
+        }
         
         // Set times
-        document.getElementById('startTime').value = config.start_time;
-        document.getElementById('endTime').value = config.end_time;
+        const startEl = document.getElementById('scheduleStart');
+        const endEl = document.getElementById('scheduleEnd');
+        if (startEl) startEl.value = config.start_time || '22:00';
+        if (endEl) endEl.value = config.end_time || '06:00';
         
-        // Update status
-        document.getElementById('scheduleStatus').textContent = config.enabled ? '✓ Enabled' : '✗ Disabled';
-        document.getElementById('scheduleStatus').className = config.enabled ? 'ml-2 font-medium text-green-400' : 'ml-2 font-medium text-gray-400';
-        
-        document.getElementById('withinWindow').textContent = schedule.within_schedule ? '✓ Yes' : '✗ No';
-        document.getElementById('withinWindow').className = schedule.within_schedule ? 'ml-2 font-medium text-green-400' : 'ml-2 font-medium text-gray-400';
-        
-        document.getElementById('manualOverride').textContent = schedule.manual_override ? '✓ Active' : '✗ Inactive';
-        document.getElementById('manualOverride').className = schedule.manual_override ? 'ml-2 font-medium text-yellow-400' : 'ml-2 font-medium text-gray-400';
+        // Set Windows Active Hours
+        const activeHoursEl = document.getElementById('scheduleActiveHours');
+        if (activeHoursEl) activeHoursEl.checked = config.respect_active_hours || false;
     }
 }
 
-function toggleDay(day) {
-    if (selectedDays.has(day)) {
-        selectedDays.delete(day);
-    } else {
-        selectedDays.add(day);
-    }
-    updateDayButtons();
-}
-
-function updateDayButtons() {
-    for (let i = 0; i < 7; i++) {
-        const btn = document.getElementById(`day-${i}`);
-        if (selectedDays.has(i)) {
-            btn.className = 'day-button day-button-active';
-        } else {
-            btn.className = 'day-button';
-        }
-    }
-}
+// Day checkboxes are handled directly in HTML, no toggle/button code needed
 
 async function saveSchedule() {
+    // Gather selected days from checkboxes
+    const dayContainer = document.getElementById('scheduleDays');
+    const dayCheckboxes = dayContainer ? dayContainer.querySelectorAll('input[type="checkbox"]:checked') : [];
+    const daysStr = Array.from(dayCheckboxes).map(cb => cb.value).join(',');
+    
     const config = {
         enabled: document.getElementById('scheduleEnabled').checked,
-        days_of_week: Array.from(selectedDays).sort().join(','),
-        start_time: document.getElementById('startTime').value,
-        end_time: document.getElementById('endTime').value,
+        days_of_week: daysStr,
+        start_time: document.getElementById('scheduleStart').value,
+        end_time: document.getElementById('scheduleEnd').value,
+        respect_active_hours: document.getElementById('scheduleActiveHours')?.checked || false,
         timezone: 'UTC'
     };
     
@@ -754,14 +862,7 @@ async function saveSchedule() {
     });
     
     if (result) {
-        const msgEl = document.getElementById('scheduleMessage');
-        msgEl.textContent = '✓ Schedule saved successfully';
-        msgEl.className = 'mt-4 p-3 bg-green-900/50 border border-green-700 rounded text-green-300';
-        msgEl.classList.remove('hidden');
-        
-        setTimeout(() => msgEl.classList.add('hidden'), 3000);
-        
-        // Reload schedule to update status
+        showMessage('Schedule saved successfully', 'success');
         loadSchedule();
     }
 }
@@ -839,7 +940,8 @@ function showCreateProfileForm() {
     // Reset Phase 2 fields to defaults
     document.getElementById('profileAudioHandling').value = 'preserve_all';
     document.getElementById('profileSubtitleHandling').value = 'none';
-    document.getElementById('profileEnableFilters').checked = false;
+    const enableFiltersEl = document.getElementById('profileEnableFilters');
+    if (enableFiltersEl) enableFiltersEl.checked = false;
     document.getElementById('profileChapterMarkers').checked = true;
     document.getElementById('profileHwAccel').checked = false;
     document.getElementById('profileContainer').value = 'mkv';
@@ -892,12 +994,14 @@ async function editProfile(id) {
     document.getElementById('profileAudioCodec').value = profile.audio_codec;
     document.getElementById('profileAudioHandling').value = profile.audio_handling || 'preserve_all';
     document.getElementById('profileSubtitleHandling').value = profile.subtitle_handling || 'none';
-    document.getElementById('profileEnableFilters').checked = profile.enable_filters || false;
+    const enableFiltersEdit = document.getElementById('profileEnableFilters');
+    if (enableFiltersEdit) enableFiltersEdit.checked = profile.enable_filters || false;
     document.getElementById('profileChapterMarkers').checked = profile.chapter_markers !== false;
     document.getElementById('profileHwAccel').checked = profile.hw_accel_enabled || false;
     document.getElementById('profileTwoPass').checked = profile.two_pass;
     document.getElementById('profileIsDefault').checked = profile.is_default;
-    document.getElementById('profileCustomArgs').value = profile.custom_args || '';
+    const customArgsEl = document.getElementById('profileCustomArgs');
+    if (customArgsEl) customArgsEl.value = profile.custom_args || '';
 
     // Populate AI upscale fields
     _fillProfileUpscaleFields(profile);
@@ -934,11 +1038,11 @@ document.getElementById('profileForm').addEventListener('submit', async (e) => {
         container: document.getElementById('profileContainer').value,
         audio_handling: document.getElementById('profileAudioHandling').value,
         subtitle_handling: document.getElementById('profileSubtitleHandling').value,
-        enable_filters: document.getElementById('profileEnableFilters').checked,
+        enable_filters: document.getElementById('profileEnableFilters')?.checked ?? false,
         chapter_markers: document.getElementById('profileChapterMarkers').checked,
         hw_accel_enabled: document.getElementById('profileHwAccel').checked,
         two_pass: document.getElementById('profileTwoPass').checked,
-        custom_args: document.getElementById('profileCustomArgs').value || null,
+        custom_args: document.getElementById('profileCustomArgs')?.value || null,
         is_default: document.getElementById('profileIsDefault').checked,
         // AI upscale settings
         upscale_enabled:       document.getElementById('profileUpscaleEnabled')?.checked ?? false,
@@ -1012,7 +1116,7 @@ async function loadScanRoots() {
                     </div>
                 </div>
                 <div class="flex gap-2">
-                    <button onclick="scanSingleRoot(${r.id})" 
+                    <button onclick="scanSingleRoot(${r.id}, event)" 
                         class="bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm">
                         Scan Now
                     </button>
@@ -1035,20 +1139,24 @@ async function showCreateScanRootForm() {
     document.getElementById('scanRootModalTitle').textContent = 'Add Scan Root';
     document.getElementById('scanRootForm').reset();
     document.getElementById('scanRootId').value = '';
-    document.getElementById('scanRootRecursive').checked = true;
+    const recursiveEl = document.getElementById('scanRootRecursive');
+    if (recursiveEl) recursiveEl.checked = true;
     document.getElementById('scanRootEnabled').checked = true;
-    document.getElementById('scanRootShowInStats').checked = true;
+    const showInStatsEl = document.getElementById('scanRootShowInStats');
+    if (showInStatsEl) showInStatsEl.checked = true;
     document.getElementById('scanRootLibraryType').value = 'custom';
     document.getElementById('libraryTypeRecommendation').classList.add('hidden');
 
-    // Reset upscale fields to defaults
-    _fillUpscaleFields({
-        upscale_enabled: false, upscale_trigger_below: 720,
-        upscale_target_height: 1080, upscale_key: 'realesrgan',
-        upscale_model: 'realesrgan-x4plus', upscale_factor: 2,
-    });
+    // Reset upscale fields to defaults if they exist
+    if (typeof _fillUpscaleFields === 'function') {
+        _fillUpscaleFields({
+            upscale_enabled: false, upscale_trigger_below: 720,
+            upscale_target_height: 1080, upscale_key: 'realesrgan',
+            upscale_model: 'realesrgan-x4plus', upscale_factor: 2,
+        });
+    }
     // Collapse the upscale section on new roots
-    const section = document.getElementById('upscaleSection');
+    const section = document.getElementById('upscaleSettingsFields');
     const icon    = document.getElementById('upscaleSectionToggleIcon');
     if (section && !section.classList.contains('hidden')) {
         section.classList.add('hidden');
@@ -1083,10 +1191,12 @@ async function editScanRoot(id) {
     document.getElementById('scanRootPath').value = root.path;
     document.getElementById('scanRootProfile').value = root.profile_id;
     document.getElementById('scanRootLibraryType').value = root.library_type || 'custom';
-    document.getElementById('scanRootRecursive').checked = root.recursive;
+    const recursiveEditEl = document.getElementById('scanRootRecursive');
+    if (recursiveEditEl) recursiveEditEl.checked = root.recursive;
     document.getElementById('scanRootEnabled').checked = root.enabled;
-    document.getElementById('scanRootShowInStats').checked = root.show_in_stats !== false;
-    _fillUpscaleFields(root);
+    const showInStatsEditEl = document.getElementById('scanRootShowInStats');
+    if (showInStatsEditEl) showInStatsEditEl.checked = root.show_in_stats !== false;
+    if (typeof _fillUpscaleFields === 'function') _fillUpscaleFields(root);
     
     document.getElementById('scanRootModal').classList.remove('hidden');
 }
@@ -1103,9 +1213,9 @@ document.getElementById('scanRootForm').addEventListener('submit', async (e) => 
         path:          document.getElementById('scanRootPath').value,
         profile_id:    parseInt(document.getElementById('scanRootProfile').value),
         library_type:  document.getElementById('scanRootLibraryType').value,
-        recursive:     document.getElementById('scanRootRecursive').checked,
+        recursive:     document.getElementById('scanRootRecursive')?.checked ?? true,
         enabled:       document.getElementById('scanRootEnabled').checked,
-        show_in_stats: document.getElementById('scanRootShowInStats').checked,
+        show_in_stats: document.getElementById('scanRootShowInStats')?.checked ?? true,
         // AI upscale settings
         upscale_enabled:        document.getElementById('scanRootUpscaleEnabled')?.checked ?? false,
         upscale_trigger_below:  parseInt(document.getElementById('scanRootUpscaleTrigger')?.value || '720'),
@@ -1141,9 +1251,10 @@ async function deleteScanRoot(id, path) {
     }
 }
 
-async function scanSingleRoot(id) {
+async function scanSingleRoot(id, event) {
     // Find the scan button and disable it
-    const scanBtn = event.target;
+    const scanBtn = event ? event.target : document.querySelector(`button[onclick*="scanSingleRoot(${id})"]`);
+    if (!scanBtn) return;
     const originalText = scanBtn.textContent;
     scanBtn.disabled = true;
     scanBtn.classList.add('opacity-50', 'cursor-not-allowed');
@@ -1170,17 +1281,22 @@ async function scanSingleRoot(id) {
 // ============================================================
 
 function showMessage(text, type = 'info') {
-    // Create a toast notification
-    const toast = document.createElement('div');
-    toast.className = `fixed top-4 right-4 px-6 py-3 rounded shadow-lg z-50 ${
-        type === 'success' ? 'bg-green-900 border border-green-700 text-green-300' :
-        type === 'error' ? 'bg-red-900 border border-red-700 text-red-300' :
-        'bg-blue-900 border border-blue-700 text-blue-300'
-    }`;
-    toast.textContent = text;
-    document.body.appendChild(toast);
+    const container = document.getElementById('toastContainer');
+    if (!container) return;
     
-    setTimeout(() => toast.remove(), 3000);
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.innerHTML = `
+        <span>${escapeHtml(text)}</span>
+        <button class="toast-close" onclick="this.parentElement.remove()">&times;</button>
+    `;
+    container.appendChild(toast);
+    
+    // Auto-dismiss after 4 seconds
+    setTimeout(() => {
+        toast.classList.add('removing');
+        setTimeout(() => toast.remove(), 200);
+    }, 4000);
 }
 // ============================================================
 // PROFILE UI IMPROVEMENTS
@@ -1327,63 +1443,50 @@ function handleFramerateChange() {
 
 // Show codec guide modal
 function showCodecGuide() {
-    const guide = `
-╔══════════════════════════════════════════════════════════════╗
-║                    VIDEO CODEC GUIDE                         ║
-╚══════════════════════════════════════════════════════════════╝
-
-🎬 H.264 (AVC)
-   • Universal compatibility - plays on everything
-   • Largest file sizes
-   • Fast encoding
-   • Use for: Maximum compatibility, older devices
-
-📦 H.265 (HEVC)  
-   • 50% smaller than H.264 at same quality
-   • Wide device support (2016+)
-   • Moderate encoding speed
-   • Use for: Balance of size and compatibility
-
-⭐ AV1 (RECOMMENDED)
-   • 70% smaller than H.264 at same quality
-   • Best compression available
-   • Newer devices (2020+), all modern browsers
-   • Slower encoding
-   • Royalty-free and open source
-   • Use for: Maximum space savings, modern libraries
-
-🌐 VP9
-   • Google's codec, similar to H.265
-   • 50-60% smaller than H.264
-   • Great for web streaming (YouTube)
-   • Use for: YouTube uploads, web content
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-📊 FILE SIZE COMPARISON (2-hour 1080p movie):
-
-   H.264:  ~8 GB   ■■■■■■■■■■■■■■■■ 100%
-   H.265:  ~4 GB   ■■■■■■■■         50%  
-   AV1:    ~2.5 GB ■■■■■            30% ⭐
-   VP9:    ~3.5 GB ■■■■■■■          44%
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-💡 RECOMMENDATION: Use AV1 for best compression!
-`;
+    const content = document.getElementById('codecGuideContent');
+    if (!content) return;
     
-    alert(guide);
+    content.innerHTML = `
+        <div style="font-size:14px;line-height:1.7">
+            <div style="margin-bottom:20px">
+                <h4 style="color:var(--text-heading);margin:0 0 6px">🎬 H.264 (AVC)</h4>
+                <div style="color:var(--text-secondary);font-size:13px">Universal compatibility — plays on everything. Largest file sizes, fast encoding. Best for maximum compatibility and older devices.</div>
+            </div>
+            <div style="margin-bottom:20px">
+                <h4 style="color:var(--text-heading);margin:0 0 6px">📦 H.265 (HEVC)</h4>
+                <div style="color:var(--text-secondary);font-size:13px">50% smaller than H.264 at same quality. Wide device support (2016+). Good balance of size and compatibility.</div>
+            </div>
+            <div style="margin-bottom:20px">
+                <h4 style="color:var(--accent);margin:0 0 6px">⭐ AV1 (Recommended)</h4>
+                <div style="color:var(--text-secondary);font-size:13px">70% smaller than H.264. Best compression available. Newer devices (2020+), all modern browsers. Royalty-free. Use for maximum space savings.</div>
+            </div>
+            <div style="margin-bottom:20px">
+                <h4 style="color:var(--text-heading);margin:0 0 6px">🌐 VP9</h4>
+                <div style="color:var(--text-secondary);font-size:13px">Google's codec, similar to H.265. 50-60% smaller than H.264. Great for web streaming and YouTube uploads.</div>
+            </div>
+            <div style="border-top:1px solid var(--border-subtle);padding-top:16px;margin-top:16px">
+                <div style="color:var(--text-muted);font-size:12px;margin-bottom:8px">FILE SIZE COMPARISON (2-hour 1080p movie)</div>
+                <div style="display:grid;gap:6px;font-size:13px">
+                    <div style="display:flex;align-items:center;gap:10px"><span style="width:50px;color:var(--text-secondary)">H.264</span><div style="flex:1;height:6px;background:var(--border-subtle);border-radius:3px;overflow:hidden"><div style="width:100%;height:100%;background:var(--text-secondary);border-radius:3px"></div></div><span style="width:60px;text-align:right;color:var(--text-muted)">~8 GB</span></div>
+                    <div style="display:flex;align-items:center;gap:10px"><span style="width:50px;color:var(--text-secondary)">H.265</span><div style="flex:1;height:6px;background:var(--border-subtle);border-radius:3px;overflow:hidden"><div style="width:50%;height:100%;background:var(--info);border-radius:3px"></div></div><span style="width:60px;text-align:right;color:var(--text-muted)">~4 GB</span></div>
+                    <div style="display:flex;align-items:center;gap:10px"><span style="width:50px;color:var(--accent)">AV1 ⭐</span><div style="flex:1;height:6px;background:var(--border-subtle);border-radius:3px;overflow:hidden"><div style="width:30%;height:100%;background:var(--accent);border-radius:3px"></div></div><span style="width:60px;text-align:right;color:var(--accent)">~2.5 GB</span></div>
+                    <div style="display:flex;align-items:center;gap:10px"><span style="width:50px;color:var(--text-secondary)">VP9</span><div style="flex:1;height:6px;background:var(--border-subtle);border-radius:3px;overflow:hidden"><div style="width:44%;height:100%;background:var(--warning);border-radius:3px"></div></div><span style="width:60px;text-align:right;color:var(--text-muted)">~3.5 GB</span></div>
+                </div>
+            </div>
+        </div>
+    `;
+    document.getElementById('codecGuideModal').classList.remove('hidden');
 }
 
 // Initialize encoder change listener
-document.addEventListener('DOMContentLoaded', function() {
+// Encoder preset listener - initialized in main DOMContentLoaded
+(function initEncoderListener() {
     const encoderSelect = document.getElementById('profileEncoder');
     if (encoderSelect) {
         encoderSelect.addEventListener('change', updatePresetOptions);
-        // Initialize on load
         updatePresetOptions();
     }
-});
+})();
 
 
 // ============================================================
@@ -1598,24 +1701,24 @@ async function deleteQueueItem(id) {
 
 // Toggle auto-refresh
 function toggleAutoRefresh() {
-    const enabled = document.getElementById('autoRefreshQueue').checked;
+    const checkbox = document.getElementById('autoRefreshQueue');
+    const enabled = checkbox?.checked ?? false;
+    
+    // Always clear existing interval first to prevent stacking
+    if (queueRefreshInterval) {
+        clearInterval(queueRefreshInterval);
+        queueRefreshInterval = null;
+    }
     
     if (enabled) {
         queueRefreshInterval = setInterval(() => {
+            if (document.hidden) return; // Skip when tab not visible
             loadQueue();
         }, 5000);
-    } else {
-        if (queueRefreshInterval) {
-            clearInterval(queueRefreshInterval);
-            queueRefreshInterval = null;
-        }
     }
 }
 
-// Initialize auto-refresh on page load
-if (document.getElementById('autoRefreshQueue').checked) {
-    toggleAutoRefresh();
-}
+// Auto-refresh initialization handled in DOMContentLoaded above
 
 
 // ============================================================
@@ -1786,7 +1889,8 @@ function getSubtitleLabel(strategy) {
 }
 
 // Update help text when audio/subtitle strategy changes
-document.addEventListener('DOMContentLoaded', function() {
+// Audio/subtitle handling listeners - self-initializing
+(function initAudioSubListeners() {
     const audioSelect = document.getElementById('profileAudioHandling');
     if (audioSelect) {
         audioSelect.addEventListener('change', function() {
@@ -1802,7 +1906,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (help) help.textContent = SUBTITLE_HELP[this.value] || '';
         });
     }
-});
+})();
 
 // Hardware acceleration check
 async function checkHwAccel() {
@@ -1919,20 +2023,12 @@ async function showCreateWatchForm() {
 }
 
 function editWatch(watch) {
-    document.getElementById('watchModalTitle').textContent = 'Edit Folder Watch';
-    document.getElementById('watchId').value = watch.id;
-    document.getElementById('watchPath').value = watch.path;
-    document.getElementById('watchEnabled').checked = watch.enabled;
-    document.getElementById('watchRecursive').checked = watch.recursive;
-    document.getElementById('watchAutoQueue').checked = watch.auto_queue;
-    document.getElementById('watchExtensions').value = watch.extensions || '';
-    
-    // Populate and select profile
+    // First load profiles and show modal, then populate values
     showCreateWatchForm().then(() => {
-        document.getElementById('watchProfile').value = watch.profile_id;
         document.getElementById('watchModalTitle').textContent = 'Edit Folder Watch';
         document.getElementById('watchId').value = watch.id;
         document.getElementById('watchPath').value = watch.path;
+        document.getElementById('watchProfile').value = watch.profile_id;
         document.getElementById('watchEnabled').checked = watch.enabled;
         document.getElementById('watchRecursive').checked = watch.recursive;
         document.getElementById('watchAutoQueue').checked = watch.auto_queue;
@@ -2354,7 +2450,8 @@ async function restoreBackup(event) {
 }
 
 async function applyQueuePriority() {
-    const sortBy = document.getElementById('queueSortBy').value;
+    const sortByEl = document.getElementById('queueSortBy');
+    const sortBy = sortByEl?.value || 'default';
     const sortMap = {
         'default':            { sort_by: 'default',            order: 'desc' },
         'file_size':          { sort_by: 'file_size',          order: 'desc' },
@@ -2395,8 +2492,8 @@ async function loadUpscalers() {
         if (!info) return;
         renderUpscalerCards(info);
     } catch (err) {
-        document.getElementById('upscalerStatus').innerHTML =
-            '<p class="text-gray-500">Failed to detect upscalers</p>';
+        const el = document.getElementById('upscalerStatus');
+        if (el) el.innerHTML = '<p class="text-gray-500">Failed to detect upscalers</p>';
     }
 }
 
@@ -2508,130 +2605,8 @@ async function checkUpscalerUpdates() {
 }
 
 // ============================================================
-// WINDOWS REST HOURS (Schedule tab)
+// (Dead schedule override code removed — using primary definitions)
 // ============================================================
-
-async function loadWindowsActiveHours() {
-    const avail = document.getElementById('windowsHoursAvailable');
-    const info = document.getElementById('windowsHoursInfo');
-    const toggle = document.getElementById('useWindowsRestHours');
-    if (!avail) return;
-
-    try {
-        const data = await apiRequest('/schedule/windows-active-hours');
-        if (!data || !data.available) {
-            avail.textContent = '(not available on this OS)';
-            if (toggle) toggle.disabled = true;
-            return;
-        }
-        avail.textContent = `(detected: active ${data.active_start}:00–${data.active_end}:00)`;
-        if (info) {
-            info.textContent = `Encoding will run from ${data.rest_start_str} to ${data.rest_end_str} (outside active hours)`;
-            info.classList.remove('hidden');
-        }
-    } catch (e) {
-        avail.textContent = '(not available)';
-        if (toggle) toggle.disabled = true;
-    }
-}
-
-function toggleWindowsHours() {
-    const useWin = document.getElementById('useWindowsRestHours');
-    const manualDiv = document.getElementById('manualTimeWindow');
-    if (!useWin || !manualDiv) return;
-    if (useWin.checked) {
-        manualDiv.style.opacity = '0.4';
-        manualDiv.style.pointerEvents = 'none';
-    } else {
-        manualDiv.style.opacity = '1';
-        manualDiv.style.pointerEvents = '';
-    }
-}
-
-// Override saveSchedule to include new fields
-const _originalSaveSchedule = typeof saveSchedule === 'function' ? saveSchedule : null;
-async function saveSchedule() {
-    const useWinEl = document.getElementById('useWindowsRestHours');
-    const config = {
-        enabled: document.getElementById('scheduleEnabled').checked,
-        days_of_week: Array.from(selectedDays).sort().join(','),
-        start_time: document.getElementById('startTime').value,
-        end_time: document.getElementById('endTime').value,
-        timezone: 'local',
-        use_windows_rest_hours: useWinEl ? useWinEl.checked : false,
-        max_concurrent_jobs: 1,
-    };
-    const result = await apiRequest('/schedule', {
-        method: 'POST',
-        body: JSON.stringify(config)
-    });
-    if (result) {
-        const msgEl = document.getElementById('scheduleMessage');
-        if (msgEl) {
-            msgEl.textContent = '✓ Schedule saved successfully';
-            msgEl.className = 'mt-4 p-3 bg-green-900/50 border border-green-700 rounded text-green-300';
-            msgEl.classList.remove('hidden');
-            setTimeout(() => msgEl.classList.add('hidden'), 3000);
-        }
-        loadSchedule();
-    }
-}
-
-// Override loadSchedule to include Windows hours fields
-const _origLoadSchedule = window._loadScheduleOriginal || null;
-async function loadSchedule() {
-    const schedule = await apiRequest('/schedule');
-    if (!schedule) return;
-    const config = schedule.config || {};
-
-    const enabledEl = document.getElementById('scheduleEnabled');
-    if (enabledEl) enabledEl.checked = config.enabled;
-
-    if (typeof selectedDays !== 'undefined') {
-        selectedDays = new Set((config.days_of_week || '0,1,2,3,4,5,6').split(',').map(Number));
-        if (typeof updateDayButtons === 'function') updateDayButtons();
-    }
-
-    const startEl = document.getElementById('startTime');
-    const endEl = document.getElementById('endTime');
-    if (startEl) startEl.value = config.start_time || '22:00';
-    if (endEl) endEl.value = config.end_time || '06:00';
-
-    const useWinEl = document.getElementById('useWindowsRestHours');
-    if (useWinEl) {
-        useWinEl.checked = config.use_windows_rest_hours || false;
-        toggleWindowsHours();
-    }
-
-    // Status indicators
-    const statusEl = document.getElementById('scheduleStatus');
-    if (statusEl) {
-        statusEl.textContent = config.enabled ? '✓ Enabled' : '✗ Disabled';
-        statusEl.className = config.enabled ? 'ml-2 font-medium text-green-400' : 'ml-2 font-medium text-gray-400';
-    }
-    const withinEl = document.getElementById('withinWindow');
-    if (withinEl) {
-        withinEl.textContent = schedule.within_schedule ? '✓ Yes' : '✗ No';
-        withinEl.className = schedule.within_schedule ? 'ml-2 font-medium text-green-400' : 'ml-2 font-medium text-gray-400';
-    }
-    const overrideEl = document.getElementById('manualOverride');
-    if (overrideEl) {
-        overrideEl.textContent = schedule.manual_override ? '✓ Active' : '✗ Inactive';
-        overrideEl.className = schedule.manual_override ? 'ml-2 font-medium text-yellow-400' : 'ml-2 font-medium text-gray-400';
-    }
-
-    // Load Windows hours info if on this tab
-    loadWindowsActiveHours();
-}
-
-// ============================================================
-// SHOW MESSAGE HELPER (if not already defined)
-// ============================================================
-if (typeof showMessage !== 'function') {
-    function showMessage(msg, type = 'info') {
-        console.log(`[${type.toUpperCase()}] ${msg}`);
-    }
-}
 
 
 // ============================================================
@@ -3105,7 +3080,7 @@ const _UPSCALER_MODELS = {
 };
 
 function toggleUpscaleSection() {
-    const section = document.getElementById('upscaleSection');
+    const section = document.getElementById('upscaleSettingsFields');
     const icon    = document.getElementById('upscaleSectionToggleIcon');
     const hidden  = section.classList.toggle('hidden');
     icon.textContent = hidden ? '▶' : '▼';
@@ -3257,3 +3232,7 @@ function handleConnectionTypeChange() {
         }
     }
 }
+
+// Function aliases for HTML compatibility
+const showCreateRootForm = showCreateScanRootForm;
+const showCreateConnectionForm = showAddConnectionModal;
