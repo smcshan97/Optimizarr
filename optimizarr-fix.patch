@@ -1,0 +1,117 @@
+diff --git a/web/static/js/app.js b/web/static/js/app.js
+index 51199f4..8c06c55 100644
+--- a/web/static/js/app.js
++++ b/web/static/js/app.js
+@@ -1390,12 +1390,17 @@ document.addEventListener('DOMContentLoaded', function() {
+ // FOLDER BROWSER (Server-Side Directory Browser)
+ // ============================================================
+ 
+-async function browseFolderPath() {
+-    // Open the folder browser modal
++let _folderBrowserTarget = 'scanRootPath'; // default target field
++
++async function browseFolderPath(targetFieldId) {
++    _folderBrowserTarget = targetFieldId || 'scanRootPath';
+     document.getElementById('folderBrowserModal').classList.remove('hidden');
+     await loadDirectoryListing('');
+ }
+ 
++// Alias for watch form compatibility
++const openFolderBrowser = browseFolderPath;
++
+ function closeFolderBrowser() {
+     document.getElementById('folderBrowserModal').classList.add('hidden');
+ }
+@@ -1461,7 +1466,8 @@ function selectCurrentFolder() {
+ }
+ 
+ function selectBrowsedFolder(path) {
+-    document.getElementById('scanRootPath').value = path;
++    const target = document.getElementById(_folderBrowserTarget);
++    if (target) target.value = path;
+     closeFolderBrowser();
+     showMessage('Folder selected: ' + path, 'success');
+ }
+diff --git a/web/templates/index.html b/web/templates/index.html
+index ed6f812..895636e 100644
+--- a/web/templates/index.html
++++ b/web/templates/index.html
+@@ -5,6 +5,35 @@
+     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+     <title>Optimizarr - Dashboard</title>
+     <script src="https://cdn.tailwindcss.com"></script>
++    <style>
++        .tab-button {
++            padding: 1rem 0;
++            border-bottom: 2px solid transparent;
++            transition: all 0.2s;
++            color: #9ca3af;
++        }
++        .tab-button:hover { color: #fff; }
++        .tab-button.active {
++            color: #60a5fa;
++            border-bottom-color: #60a5fa;
++        }
++        .day-button {
++            padding: 0.75rem;
++            border-radius: 0.5rem;
++            background-color: #374151;
++            color: #9ca3af;
++            border: 2px solid transparent;
++            transition: all 0.2s;
++            cursor: pointer;
++            font-weight: 500;
++        }
++        .day-button:hover { background-color: #4b5563; }
++        .day-button-active {
++            background-color: #3b82f6;
++            color: white;
++            border-color: #60a5fa;
++        }
++    </style>
+ </head>
+ <body class="bg-gray-900 text-gray-100">
+     <!-- Navigation - Full width -->
+@@ -1408,42 +1437,3 @@
+     <script src="/static/js/app.js"></script>
+ </body>
+ </html>
+-
+-<style>
+-    .tab-button {
+-        padding: 1rem 0;
+-        border-bottom: 2px solid transparent;
+-        transition: all 0.2s;
+-        color: #9ca3af;
+-    }
+-    
+-    .tab-button:hover {
+-        color: #fff;
+-    }
+-    
+-    .tab-button.active {
+-        color: #60a5fa;
+-        border-bottom-color: #60a5fa;
+-    }
+-    
+-    .day-button {
+-        padding: 0.75rem;
+-        border-radius: 0.5rem;
+-        background-color: #374151;
+-        color: #9ca3af;
+-        border: 2px solid transparent;
+-        transition: all 0.2s;
+-        cursor: pointer;
+-        font-weight: 500;
+-    }
+-    
+-    .day-button:hover {
+-        background-color: #4b5563;
+-    }
+-    
+-    .day-button-active {
+-        background-color: #3b82f6;
+-        color: white;
+-        border-color: #60a5fa;
+-    }
+-</style>

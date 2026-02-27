@@ -3,593 +3,1434 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Optimizarr</title>
-    <link rel="stylesheet" href="/static/css/theme.css">
+    <title>Optimizarr - Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
-        /* Override Tailwind's body defaults with our theme */
-        body { background: var(--bg-base) !important; color: var(--text-primary) !important; font-family: var(--font-sans) !important; }
+        .tab-button {
+            padding: 1rem 0;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+            color: #9ca3af;
+        }
+        .tab-button:hover { color: #fff; }
+        .tab-button.active {
+            color: #60a5fa;
+            border-bottom-color: #60a5fa;
+        }
+        .day-button {
+            padding: 0.75rem;
+            border-radius: 0.5rem;
+            background-color: #374151;
+            color: #9ca3af;
+            border: 2px solid transparent;
+            transition: all 0.2s;
+            cursor: pointer;
+            font-weight: 500;
+        }
+        .day-button:hover { background-color: #4b5563; }
+        .day-button-active {
+            background-color: #3b82f6;
+            color: white;
+            border-color: #60a5fa;
+        }
     </style>
 </head>
-<body>
-    <!-- Toast Container -->
-    <div id="toastContainer" class="toast-container"></div>
-
-    <!-- Mobile Overlay -->
-    <div class="mobile-overlay hidden" id="mobileOverlay" onclick="toggleSidebar()"></div>
-
-    <div class="app-layout">
-        <!-- SIDEBAR NAVIGATION (Sonarr/Radarr-style) -->
-        <aside class="sidebar" id="sidebar">
-            <div class="sidebar-brand">
-                <h1>Optimizarr</h1>
-                <p>Media Optimization</p>
+<body class="bg-gray-900 text-gray-100">
+    <!-- Navigation - Full width -->
+    <nav class="bg-gray-800 border-b border-gray-700 px-4 sm:px-6 lg:px-8 xl:px-10 py-4">
+        <div class="flex justify-between items-center">
+            <div>
+                <h1 class="text-2xl font-bold text-blue-400">Optimizarr</h1>
+                <p class="text-sm text-gray-400">Automated Media Optimization</p>
             </div>
-            <nav class="sidebar-nav">
-                <div class="nav-section">Media</div>
-                <a class="nav-item active" onclick="switchTab('queue')" data-tab="queue">
-                    <span class="nav-icon">📋</span>
-                    <span class="nav-label">Queue</span>
-                    <span class="nav-badge" id="navQueueCount">0</span>
-                </a>
-                <a class="nav-item" onclick="switchTab('profiles')" data-tab="profiles">
-                    <span class="nav-icon">🎛️</span>
-                    <span class="nav-label">Profiles</span>
-                </a>
-                <a class="nav-item" onclick="switchTab('scan-roots')" data-tab="scan-roots">
-                    <span class="nav-icon">📂</span>
-                    <span class="nav-label">Libraries</span>
-                </a>
-                <a class="nav-item" onclick="switchTab('watches')" data-tab="watches">
-                    <span class="nav-icon">👁️</span>
-                    <span class="nav-label">Folder Watches</span>
-                </a>
-                <div class="nav-section">Insights</div>
-                <a class="nav-item" onclick="switchTab('statistics')" data-tab="statistics">
-                    <span class="nav-icon">📊</span>
-                    <span class="nav-label">Statistics</span>
-                </a>
-                <a class="nav-item" onclick="switchTab('logs')" data-tab="logs">
-                    <span class="nav-icon">📄</span>
-                    <span class="nav-label">Logs</span>
-                </a>
-                <div class="nav-section">System</div>
-                <a class="nav-item" onclick="switchTab('schedule')" data-tab="schedule">
-                    <span class="nav-icon">🕐</span>
-                    <span class="nav-label">Schedule</span>
-                </a>
-                <a class="nav-item" onclick="switchTab('connections')" data-tab="connections">
-                    <span class="nav-icon">🔗</span>
-                    <span class="nav-label">Connections</span>
-                </a>
-                <a class="nav-item" onclick="switchTab('settings')" data-tab="settings">
-                    <span class="nav-icon">⚙️</span>
-                    <span class="nav-label">Settings</span>
-                </a>
-            </nav>
-            <div class="sidebar-footer">
-                <span id="sidebarUser">admin</span>
-                <button class="btn btn-xs btn-danger" onclick="logout()">Logout</button>
+            <div class="flex items-center gap-4">
+                <span id="username" class="text-gray-300"></span>
+                <button onclick="switchTab('settings')" 
+                    class="bg-gray-700 hover:bg-gray-600 px-3 py-2 rounded text-sm"
+                    title="Settings">⚙️</button>
+                <button onclick="logout()" class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded text-sm">
+                    Logout
+                </button>
             </div>
-        </aside>
+        </div>
+    </nav>
 
-        <!-- MAIN CONTENT -->
-        <main class="main-content">
-            <button class="mobile-menu-btn btn btn-secondary btn-icon mb-3" onclick="toggleSidebar()">☰</button>
-
-            <!-- Dashboard Stats -->
-            <div class="stat-grid" id="dashboardStats">
-                <div class="stat-card"><div class="stat-label">Space Saved</div><div class="stat-value green" id="spaceSaved">0 GB</div></div>
-                <div class="stat-card"><div class="stat-label">Files Processed</div><div class="stat-value blue" id="filesProcessed">0</div></div>
-                <div class="stat-card"><div class="stat-label">Queue Pending</div><div class="stat-value yellow" id="queuePending">0</div></div>
-                <div class="stat-card"><div class="stat-label">Active Jobs</div><div class="stat-value purple" id="activeJobs">0</div></div>
+    <!-- Main Content - Fluid layout for ultra-wide displays -->
+    <div class="w-full px-4 sm:px-6 lg:px-8 xl:px-10 py-6">
+        <!-- Stats Cards - Adaptive grid -->
+        <div class="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-4 2xl:grid-cols-8 gap-4 mb-6">
+            <div class="bg-gray-800 p-4 rounded-lg">
+                <h3 class="text-gray-400 text-xs mb-1">Space Saved</h3>
+                <p id="spaceSaved" class="text-2xl font-bold text-green-400">0 GB</p>
             </div>
+            <div class="bg-gray-800 p-4 rounded-lg">
+                <h3 class="text-gray-400 text-xs mb-1">Files Processed</h3>
+                <p id="filesProcessed" class="text-2xl font-bold text-blue-400">0</p>
+            </div>
+            <div class="bg-gray-800 p-4 rounded-lg">
+                <h3 class="text-gray-400 text-xs mb-1">Queue Pending</h3>
+                <p id="queuePending" class="text-2xl font-bold text-yellow-400">0</p>
+            </div>
+            <div class="bg-gray-800 p-4 rounded-lg">
+                <h3 class="text-gray-400 text-xs mb-1">Active Jobs</h3>
+                <p id="activeJobs" class="text-2xl font-bold text-purple-400">0</p>
+            </div>
+        </div>
 
-            <!-- Resource Monitoring -->
-            <div class="resource-grid" id="resourceMonitor">
-                <div class="resource-card">
-                    <div class="resource-label">CPU Usage</div>
+        <!-- Resource Monitoring Cards - Adaptive -->
+        <div class="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-3 gap-4 mb-6">
+            <div class="bg-gray-800 p-6 rounded-lg">
+                <h3 class="text-gray-400 text-sm mb-2">CPU Usage</h3>
+                <div class="flex items-end gap-2">
+                    <p id="cpuUsage" class="text-3xl font-bold text-cyan-400">0%</p>
+                    <span id="cpuStatus" class="text-sm text-gray-500 mb-1"></span>
+                </div>
+                <div class="mt-3 bg-gray-700 rounded-full h-2">
+                    <div id="cpuBar" class="bg-cyan-400 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+                </div>
+            </div>
+            <div class="bg-gray-800 p-6 rounded-lg">
+                <h3 class="text-gray-400 text-sm mb-2">Memory Usage</h3>
+                <div class="flex items-end gap-2">
+                    <p id="memoryUsage" class="text-3xl font-bold text-purple-400">0%</p>
+                    <span id="memoryStatus" class="text-sm text-gray-500 mb-1"></span>
+                </div>
+                <div class="mt-3 bg-gray-700 rounded-full h-2">
+                    <div id="memoryBar" class="bg-purple-400 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+                </div>
+            </div>
+            <div class="bg-gray-800 p-6 rounded-lg">
+                <h3 class="text-gray-400 text-sm mb-2">GPU Usage</h3>
+                <div class="flex items-end gap-2">
+                    <p id="gpuUsage" class="text-3xl font-bold text-orange-400">N/A</p>
+                    <span id="gpuStatus" class="text-sm text-gray-500 mb-1"></span>
+                </div>
+                <div class="mt-3 bg-gray-700 rounded-full h-2">
+                    <div id="gpuBar" class="bg-orange-400 h-2 rounded-full transition-all duration-500" style="width: 0%"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Tabs -->
+        <div class="mb-6">
+            <div class="border-b border-gray-700">
+                <nav class="flex gap-8">
+                    <button onclick="switchTab('queue')" id="tab-queue" class="tab-button active">Queue</button>
+                    <button onclick="switchTab('profiles')" id="tab-profiles" class="tab-button">Profiles</button>
+                    <button onclick="switchTab('scanroots')" id="tab-scanroots" class="tab-button">Scan Roots</button>
+                    <button onclick="switchTab('watches')" id="tab-watches" class="tab-button">Watches</button>
+                    <button onclick="switchTab('statistics')" id="tab-statistics" class="tab-button">Statistics</button>
+                    <button onclick="switchTab('schedule')" id="tab-schedule" class="tab-button">Schedule</button>
+                    <button onclick="switchTab('logs')" id="tab-logs" class="tab-button">Logs</button>
+                    <button onclick="switchTab('settings')" id="tab-settings" class="tab-button">Settings</button>
+                </nav>
+            </div>
+        </div>
+
+        <!-- Tab Content -->
+        <div id="content-queue" class="tab-content">
+            <div class="bg-gray-800 rounded-lg p-6">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-xl font-bold">Encoding Queue</h2>
+                    <div class="flex gap-3">
+                        <button onclick="reprobeQueue()" id="reprobeBtn"
+                            class="bg-gray-600 hover:bg-gray-500 px-4 py-2 rounded flex items-center gap-2 text-sm"
+                            title="Re-detect codec and resolution for UNKNOWN items">
+                            <span id="reproBtnIcon">🔬</span>
+                            <span id="reproBtnText">Re-probe</span>
+                        </button>
+                        <button onclick="clearCompleted()" 
+                            class="bg-gray-600 hover:bg-gray-500 px-4 py-2 rounded text-sm"
+                            title="Remove all completed items from queue">
+                            ✅ Clear Done
+                        </button>
+                        <button onclick="scanAllRoots()" id="scanAllBtn" 
+                            class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded flex items-center gap-2">
+                            <span id="scanAllIcon">🔍</span>
+                            <span id="scanAllText">Scan All</span>
+                        </button>
+                        <button onclick="startEncoding()" class="bg-green-600 hover:bg-green-700 px-4 py-2 rounded">
+                            ▶️ Start
+                        </button>
+                        <button onclick="stopEncoding()" class="bg-red-600 hover:bg-red-700 px-4 py-2 rounded">
+                            ⏹️ Stop
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Filters & Sort Controls -->
+                <div class="mb-4 flex flex-wrap gap-3 items-center">
+                    <div class="flex-1 min-w-48">
+                        <input type="text" id="queueSearch" placeholder="🔍 Search by filename..." 
+                            onkeyup="filterQueue()"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                    </div>
+                    <div>
+                        <select id="queueStatusFilter" onchange="filterQueue()"
+                            class="bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                            <option value="">All Statuses</option>
+                            <option value="pending">⏳ Pending</option>
+                            <option value="processing">⚙️ Processing</option>
+                            <option value="completed">✅ Completed</option>
+                            <option value="failed">❌ Failed</option>
+                            <option value="paused">⏸️ Paused</option>
+                        </select>
+                    </div>
+                    <!-- Sort & Prioritize -->
                     <div class="flex items-center gap-2">
-                        <div class="resource-value" id="cpuUsage" style="color:var(--accent)">0%</div>
-                        <span class="text-xs text-muted" id="cpuStatus"></span>
-                    </div>
-                    <div class="resource-bar-track"><div class="resource-bar-fill cyan" id="cpuBar" style="width:0%"></div></div>
-                </div>
-                <div class="resource-card">
-                    <div class="resource-label">Memory Usage</div>
-                    <div class="flex items-center gap-2">
-                        <div class="resource-value" id="memoryUsage" style="color:var(--processing)">0%</div>
-                        <span class="text-xs text-muted" id="memoryStatus"></span>
-                    </div>
-                    <div class="resource-bar-track"><div class="resource-bar-fill purple" id="memoryBar" style="width:0%"></div></div>
-                </div>
-                <div class="resource-card">
-                    <div class="resource-label">GPU Usage</div>
-                    <div class="flex items-center gap-2">
-                        <div class="resource-value" id="gpuUsage" style="color:#e67e22">N/A</div>
-                        <span class="text-xs text-muted" id="gpuStatus"></span>
-                    </div>
-                    <div class="resource-bar-track"><div class="resource-bar-fill orange" id="gpuBar" style="width:0%"></div></div>
-                </div>
-            </div>
-
-            <!-- QUEUE TAB -->
-            <div class="tab-panel active" id="tab-queue">
-                <div class="page-toolbar">
-                    <div><h2 class="page-title">Queue</h2><p class="page-subtitle">Encoding jobs and progress</p></div>
-                    <div class="toolbar-actions">
-                        <label class="form-checkbox"><input type="checkbox" id="autoRefreshQueue" checked onchange="toggleAutoRefresh()"><span class="text-xs">Auto-refresh</span></label>
-                        <button class="btn btn-primary btn-sm" id="scanAllBtn" onclick="scanAllRoots()"><span id="scanAllIcon">🔍</span> <span id="scanAllText">Scan All</span></button>
-                        <button class="btn btn-success btn-sm" onclick="startEncoding()">▶ Start</button>
-                        <button class="btn btn-danger btn-sm" onclick="stopEncoding()">⏹ Stop</button>
-                    </div>
-                </div>
-                <div class="card card-compact mb-3">
-                    <div class="flex items-center gap-3" style="flex-wrap:wrap">
-                        <div class="flex items-center gap-2">
-                            <label class="text-xs text-muted">Status:</label>
-                            <select id="queueFilterStatus" class="form-select" style="width:auto;padding:5px 30px 5px 10px" onchange="loadQueue()">
-                                <option value="">All</option><option value="pending">Pending</option><option value="processing">Processing</option><option value="completed">Completed</option><option value="failed">Failed</option><option value="paused">Paused</option>
-                            </select>
-                        </div>
-                        <div class="flex items-center gap-2">
-                            <label class="text-xs text-muted">Search:</label>
-                            <input type="text" id="queueSearchInput" class="form-input" style="width:200px;padding:5px 10px" placeholder="Filter by filename..." oninput="debouncedFilterQueue()">
-                        </div>
-                        <div class="flex items-center gap-2">
-                            <label class="text-xs text-muted">Priority:</label>
-                            <select id="queueSortBy" class="form-select" style="width:auto;padding:5px 30px 5px 10px">
-                                <option value="default">Default</option><option value="file_size">File Size</option><option value="estimated_savings">Est. Savings</option><option value="filename">Filename</option>
-                            </select>
-                            <button class="btn btn-secondary btn-xs" onclick="applyQueuePriority()">Apply</button>
-                        </div>
-                        <div style="margin-left:auto" class="flex items-center gap-2">
-                            <label class="form-checkbox"><input type="checkbox" id="selectAllQueue" onchange="toggleSelectAll()"><span class="text-xs">Select All</span></label>
-                            <button class="btn btn-secondary btn-xs" onclick="bulkAction('delete')">🗑️ Delete</button>
-                            <button class="btn btn-secondary btn-xs" onclick="bulkAction('retry')">🔄 Retry</button>
-                            <button class="btn btn-secondary btn-xs" onclick="bulkAction('pause')">⏸ Pause</button>
-                        </div>
-                    </div>
-                </div>
-                <div class="table-container">
-                    <table class="data-table" id="queueTable">
-                        <thead><tr>
-                            <th style="width:32px"><input type="checkbox" id="queueHeaderCheck" onchange="toggleSelectAll()"></th>
-                            <th class="sortable" onclick="sortQueue('filename')">File <span class="sort-arrow">↕</span></th>
-                            <th class="sortable" onclick="sortQueue('status')">Status <span class="sort-arrow">↕</span></th>
-                            <th class="sortable" onclick="sortQueue('profile')">Profile <span class="sort-arrow">↕</span></th>
-                            <th class="sortable" onclick="sortQueue('size')">Size <span class="sort-arrow">↕</span></th>
-                            <th class="sortable" onclick="sortQueue('savings')">Savings <span class="sort-arrow">↕</span></th>
-                            <th>Progress</th>
-                            <th style="width:120px">Actions</th>
-                        </tr></thead>
-                        <tbody id="queueBody"><tr><td colspan="8" class="text-center text-muted" style="padding:40px">Loading queue...</td></tr></tbody>
-                    </table>
-                </div>
-                <!-- Bulk actions floating bar -->
-                <div id="bulkActionsBar" class="hidden" style="position:sticky;bottom:0;left:0;right:0;background:var(--bg-card);border-top:1px solid var(--border);padding:10px 16px;display:flex;align-items:center;gap:12px;z-index:10">
-                    <span class="text-sm"><strong id="bulkSelectedCount">0</strong> items selected</span>
-                    <button class="btn btn-secondary btn-xs" onclick="bulkAction('delete')">🗑️ Delete</button>
-                    <button class="btn btn-secondary btn-xs" onclick="bulkAction('retry')">🔄 Retry</button>
-                    <button class="btn btn-secondary btn-xs" onclick="bulkAction('pause')">⏸ Pause</button>
-                    <button class="btn btn-secondary btn-xs" onclick="bulkAction('resume')">▶ Resume</button>
-                    <button class="btn btn-xs" style="margin-left:auto;color:var(--text-muted)" onclick="clearSelection()">✕ Clear</button>
-                </div>
-            </div>
-
-            <!-- PROFILES TAB -->
-            <div class="tab-panel" id="tab-profiles">
-                <div class="page-toolbar">
-                    <div><h2 class="page-title">Encoding Profiles</h2><p class="page-subtitle">Configure video encoding settings</p></div>
-                    <div class="toolbar-actions">
-                        <button class="btn btn-secondary btn-sm" onclick="showCodecGuide()">📖 Codec Guide</button>
-                        <button class="btn btn-secondary btn-sm" onclick="exportProfiles()">⬇️ Export</button>
-                        <button class="btn btn-secondary btn-sm" onclick="document.getElementById('importProfileFile').click()">⬆️ Import</button>
-                        <input type="file" id="importProfileFile" accept=".json" class="hidden" onchange="importProfiles(event)">
-                        <button class="btn btn-primary btn-sm" onclick="showCreateProfileForm()">+ New Profile</button>
-                    </div>
-                </div>
-                <div id="profilesList"><div class="empty-state"><div class="empty-icon">🎛️</div><div class="empty-text">Loading profiles...</div></div></div>
-            </div>
-
-            <!-- LIBRARIES TAB -->
-            <div class="tab-panel" id="tab-scan-roots">
-                <div class="page-toolbar">
-                    <div><h2 class="page-title">Libraries</h2><p class="page-subtitle">Scan root directories for media</p></div>
-                    <div class="toolbar-actions"><button class="btn btn-primary btn-sm" onclick="showCreateRootForm()">+ Add Library</button></div>
-                </div>
-                <div id="scanRootsList"><div class="empty-state"><div class="empty-icon">📂</div><div class="empty-text">Loading libraries...</div></div></div>
-            </div>
-
-            <!-- WATCHES TAB -->
-            <div class="tab-panel" id="tab-watches">
-                <div class="page-toolbar">
-                    <div><h2 class="page-title">Folder Watches</h2><p class="page-subtitle">Automatic file monitoring</p></div>
-                    <div class="toolbar-actions">
-                        <div id="watcherStatus" class="text-xs text-muted"></div>
-                        <button class="btn btn-secondary btn-sm" onclick="forceWatchCheck()">🔄 Check Now</button>
-                        <button class="btn btn-primary btn-sm" onclick="showCreateWatchForm()">+ Add Watch</button>
-                    </div>
-                </div>
-                <div id="watchesList"><div class="empty-state"><div class="empty-icon">👁️</div><div class="empty-text">Loading watches...</div></div></div>
-            </div>
-
-            <!-- STATISTICS TAB -->
-            <div class="tab-panel" id="tab-statistics">
-                <div class="page-toolbar">
-                    <div><h2 class="page-title">Statistics</h2><p class="page-subtitle">Encoding performance and savings</p></div>
-                    <div class="toolbar-actions">
-                        <select id="statsDays" class="form-select" style="width:auto;padding:5px 30px 5px 10px" onchange="loadStatistics()">
-                            <option value="7">7 Days</option><option value="30" selected>30 Days</option><option value="90">90 Days</option><option value="365">Year</option>
+                        <span class="text-sm text-gray-400 whitespace-nowrap">Prioritize by:</span>
+                        <select id="queueSortBy" class="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
+                            <option value="default">Default</option>
+                            <option value="file_size">File Size ↓</option>
+                            <option value="estimated_savings">Savings ↓</option>
+                            <option value="filename">Filename A→Z</option>
                         </select>
-                        <label class="form-checkbox"><input type="checkbox" id="statsHideSensitive" onchange="loadStatistics()"><span class="text-xs">Hide sensitive paths</span></label>
+                        <button onclick="applyQueuePriority()" title="Apply priority to queue"
+                            class="bg-purple-600 hover:bg-purple-700 px-3 py-2 rounded text-sm whitespace-nowrap">
+                            ↑ Apply
+                        </button>
+                    </div>
+                    <div>
+                        <label class="flex items-center gap-2 text-sm">
+                            <input type="checkbox" id="autoRefreshQueue" checked onchange="toggleAutoRefresh()">
+                            <span>Auto-refresh</span>
+                        </label>
                     </div>
                 </div>
-                <div class="stat-grid mb-4" id="statsCards" style="grid-template-columns:repeat(auto-fill,minmax(160px,1fr))">
-                    <div class="stat-card"><div class="stat-label">Total Encoded</div><div class="stat-value cyan" id="statTotalFiles">0</div></div>
-                    <div class="stat-card"><div class="stat-label">Original Size</div><div class="stat-value blue" id="statOriginalSize">0 GB</div></div>
-                    <div class="stat-card"><div class="stat-label">New Size</div><div class="stat-value purple" id="statNewSize">0 GB</div></div>
-                    <div class="stat-card"><div class="stat-label">Space Saved</div><div class="stat-value green" id="statSaved">0 GB</div></div>
-                    <div class="stat-card"><div class="stat-label">Avg. Reduction</div><div class="stat-value yellow" id="statAvgPct">0%</div></div>
-                    <div class="stat-card"><div class="stat-label">Avg. Encode Time</div><div class="stat-value purple" id="statAvgTime">—</div></div>
+                
+                <!-- Bulk Actions Bar (hidden until selection) -->
+                <div id="bulkActionsBar" class="hidden mb-4 p-3 bg-gray-700 rounded-lg flex items-center gap-4">
+                    <span id="bulkSelectedCount" class="text-sm text-blue-400 font-medium"></span>
+                    <button onclick="bulkDeleteSelected()" class="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-sm">
+                        🗑️ Delete Selected
+                    </button>
+                    <button onclick="bulkClearCompleted()" class="bg-gray-600 hover:bg-gray-500 px-3 py-1 rounded text-sm">
+                        ✅ Clear Completed
+                    </button>
+                    <button onclick="deselectAll()" class="bg-gray-600 hover:bg-gray-500 px-3 py-1 rounded text-sm">
+                        Deselect All
+                    </button>
                 </div>
-                <div class="grid grid-2 gap-4">
-                    <div class="card"><div class="card-title mb-3">Daily Activity</div><div id="dailyChart" style="min-height:200px" class="text-muted text-sm text-center">No data</div></div>
-                    <div class="card"><div class="card-title mb-3">Codec Distribution</div><div id="codecChart" style="min-height:200px" class="text-muted text-sm text-center">No data</div></div>
-                </div>
-                <div class="grid grid-2 gap-4 mt-4">
-                    <div class="card"><div class="card-title mb-3">Codec Breakdown</div><div id="codecBreakdown" class="space-y-3 text-muted text-sm">No data</div></div>
-                    <div class="card"><div class="card-title mb-3">Recent History</div><div id="recentHistory" class="space-y-2 text-muted text-sm" style="max-height:400px;overflow-y:auto">No encoding history yet</div></div>
-                </div>
-                <!-- Upscaler & Reprobe Status -->
-                <div class="grid grid-2 gap-4 mt-4">
-                    <div class="card"><div class="card-title mb-3">AI Upscaler Status</div><div id="upscalerStatus" class="text-sm text-muted">Checking...</div></div>
-                    <div class="card">
-                        <div class="card-title mb-3">File Reprobe</div>
-                        <p class="text-xs text-muted mb-3">Re-scan all completed files to update codec/size metadata</p>
-                        <button id="reprobeBtn" class="btn btn-secondary btn-sm" onclick="reprobeQueue()"><span id="reproBtnIcon">🔄</span> <span id="reproBtnText">Reprobe All</span></button>
-                    </div>
+                
+                <div id="queueTable" class="overflow-x-auto">
+                    <p class="text-gray-400">Loading queue...</p>
                 </div>
             </div>
+        </div>
 
-            <!-- LOGS TAB -->
-            <div class="tab-panel" id="tab-logs">
-                <div class="page-toolbar">
-                    <div><h2 class="page-title">Logs</h2><p class="page-subtitle">System and encoding logs</p></div>
-                    <div class="toolbar-actions">
-                        <select id="logType" class="form-select" style="width:auto;padding:5px 30px 5px 10px" onchange="loadLogs()">
-                            <option value="app">Application</option><option value="handbrake">HandBrake</option><option value="error">Errors</option>
-                        </select>
-                        <select id="logLevel" class="form-select" style="width:auto;padding:5px 30px 5px 10px" onchange="loadLogs()">
-                            <option value="all">All Levels</option><option value="DEBUG">Debug</option><option value="INFO">Info</option><option value="WARNING">Warning</option><option value="ERROR">Error</option>
-                        </select>
-                        <select id="logLines" class="form-select" style="width:auto;padding:5px 30px 5px 10px" onchange="loadLogs()">
-                            <option value="100">100</option><option value="250">250</option><option value="500" selected>500</option><option value="1000">1000</option>
-                        </select>
-                        <button class="btn btn-secondary btn-sm" onclick="loadLogs()">🔄 Refresh</button>
-                        <button class="btn btn-danger btn-sm" onclick="clearLogs()">🗑️ Clear</button>
+        <div id="content-profiles" class="tab-content hidden">
+            <div class="bg-gray-800 rounded-lg p-6">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-xl font-bold">Encoding Profiles</h2>
+                    <div class="flex gap-2">
+                        <button onclick="seedDefaultProfiles()" 
+                            class="bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded text-sm" 
+                            title="Add missing built-in default profiles">
+                            ➕ Add Defaults
+                        </button>
+                        <button onclick="exportProfiles()" class="bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded text-sm" title="Export all profiles as JSON">
+                            📤 Export
+                        </button>
+                        <label class="bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded text-sm cursor-pointer" title="Import profiles from JSON">
+                            📥 Import
+                            <input type="file" accept=".json" onchange="importProfiles(event)" class="hidden">
+                        </label>
+                        <button onclick="showCreateProfileForm()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">
+                            New Profile
+                        </button>
                     </div>
                 </div>
-                <div class="text-xs text-muted mb-2" id="logStats"></div>
-                <div class="log-viewer" id="logOutput"><span class="text-muted">Select a log type and click Refresh...</span></div>
+                
+                <div id="profilesList">
+                    <p class="text-gray-400">Loading profiles...</p>
+                </div>
             </div>
+        </div>
 
-            <!-- SCHEDULE TAB -->
-            <div class="tab-panel" id="tab-schedule">
-                <div class="page-toolbar">
-                    <div><h2 class="page-title">Schedule</h2><p class="page-subtitle">Configure encoding time windows</p></div>
-                    <div class="toolbar-actions"><button class="btn btn-primary btn-sm" onclick="saveSchedule()">💾 Save Schedule</button></div>
+        <div id="content-scanroots" class="tab-content hidden">
+            <div class="bg-gray-800 rounded-lg p-6">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-xl font-bold">Scan Roots</h2>
+                    <button onclick="showCreateScanRootForm()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">
+                        Add Scan Root
+                    </button>
                 </div>
-                <div class="card">
-                    <div class="grid grid-2 gap-4">
-                        <div class="form-group"><label class="form-label">Start Time</label><input type="time" id="scheduleStart" class="form-input" value="22:00"></div>
-                        <div class="form-group"><label class="form-label">End Time</label><input type="time" id="scheduleEnd" class="form-input" value="06:00"></div>
+                
+                <div id="scanRootsList">
+                    <p class="text-gray-400">Loading scan roots...</p>
+                </div>
+            </div>
+        </div>
+
+        <div id="content-settings" class="tab-content hidden">
+            <!-- Account Management Section -->
+            <div class="bg-gray-800 rounded-lg p-6 mb-6">
+                <h2 class="text-xl font-bold mb-6">Account Management</h2>
+                
+                <div class="space-y-6">
+                    <!-- Change Password -->
+                    <div class="border-b border-gray-700 pb-6">
+                        <h3 class="text-lg font-semibold mb-4">Change Password</h3>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">Current Password</label>
+                                <input type="password" id="currentPassword" 
+                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
+                                    placeholder="Enter current password">
+                            </div>
+                            <div></div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">New Password</label>
+                                <input type="password" id="newPassword" 
+                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
+                                    placeholder="Enter new password">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">Confirm New Password</label>
+                                <input type="password" id="confirmPassword" 
+                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
+                                    placeholder="Confirm new password">
+                            </div>
+                        </div>
+                        <button onclick="changePassword()" 
+                            class="mt-4 bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded">
+                            Update Password
+                        </button>
                     </div>
-                    <div class="form-group mt-3">
-                        <label class="form-label">Active Days</label>
-                        <div class="flex gap-2" style="flex-wrap:wrap" id="scheduleDays">
-                            <label class="form-checkbox"><input type="checkbox" value="mon" checked> Mon</label>
-                            <label class="form-checkbox"><input type="checkbox" value="tue" checked> Tue</label>
-                            <label class="form-checkbox"><input type="checkbox" value="wed" checked> Wed</label>
-                            <label class="form-checkbox"><input type="checkbox" value="thu" checked> Thu</label>
-                            <label class="form-checkbox"><input type="checkbox" value="fri" checked> Fri</label>
-                            <label class="form-checkbox"><input type="checkbox" value="sat" checked> Sat</label>
-                            <label class="form-checkbox"><input type="checkbox" value="sun" checked> Sun</label>
+                    
+                    <!-- Account Information -->
+                    <div>
+                        <h3 class="text-lg font-semibold mb-4">Account Information</h3>
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">Username</label>
+                                <input type="text" id="accountUsername" readonly
+                                    class="w-full bg-gray-900 border border-gray-600 rounded px-4 py-2 text-gray-400 cursor-not-allowed">
+                            </div>
+                            <div>
+                                <label class="block text-sm font-medium text-gray-300 mb-2">Role</label>
+                                <input type="text" id="accountRole" readonly
+                                    class="w-full bg-gray-900 border border-gray-600 rounded px-4 py-2 text-gray-400 cursor-not-allowed">
+                            </div>
                         </div>
                     </div>
-                    <label class="form-checkbox mt-3"><input type="checkbox" id="scheduleEnabled"><span>Enable scheduled encoding</span></label>
-                    <label class="form-checkbox mt-2"><input type="checkbox" id="scheduleActiveHours"><span>Respect Windows Active Hours</span></label>
                 </div>
             </div>
-
-            <!-- CONNECTIONS TAB -->
-            <div class="tab-panel" id="tab-connections">
-                <div class="page-toolbar">
-                    <div><h2 class="page-title">External Connections</h2><p class="page-subtitle">Sonarr, Radarr, Stash integrations</p></div>
-                    <div class="toolbar-actions"><button class="btn btn-primary btn-sm" onclick="showCreateConnectionForm()">+ Add Connection</button></div>
-                </div>
-                <div id="connectionsList"><div class="empty-state"><div class="empty-icon">🔗</div><div class="empty-text">Loading connections...</div></div></div>
-            </div>
-
-            <!-- SETTINGS TAB -->
-            <div class="tab-panel" id="tab-settings">
-                <div class="page-toolbar"><div><h2 class="page-title">Settings</h2><p class="page-subtitle">Application configuration</p></div></div>
-                <div class="grid grid-2 gap-4">
-                    <div class="card">
-                        <div class="card-title mb-3">Account</div>
-                        <div class="form-group"><label class="form-label">Username</label><input type="text" id="accountUsername" class="form-input" readonly></div>
-                        <div class="form-group"><label class="form-label">Role</label><input type="text" id="accountRole" class="form-input" readonly></div>
-                        <div class="divider"></div>
-                        <div class="card-title mb-3">Change Password</div>
-                        <div class="form-group"><label class="form-label">Current Password</label><input type="password" id="currentPassword" class="form-input"></div>
-                        <div class="form-group"><label class="form-label">New Password</label><input type="password" id="newPassword" class="form-input"></div>
-                        <div class="form-group"><label class="form-label">Confirm Password</label><input type="password" id="confirmPassword" class="form-input"></div>
-                        <button class="btn btn-primary btn-sm" onclick="changePassword()">Update Password</button>
+            
+            <!-- Resource Management Section -->
+            <div class="bg-gray-800 rounded-lg p-6">
+                <h2 class="text-xl font-bold mb-6">Resource Management Settings</h2>
+                
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <!-- CPU Threshold -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">
+                            CPU Threshold (%)
+                        </label>
+                        <input 
+                            type="number" 
+                            id="cpuThreshold" 
+                            min="50" 
+                            max="100" 
+                            step="5"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
+                            value="90"
+                        >
+                        <p class="text-sm text-gray-400 mt-1">Pause encoding if CPU usage exceeds this threshold</p>
                     </div>
-                    <div class="card">
-                        <div class="card-title mb-3">System</div>
-                        <label class="form-checkbox"><input type="checkbox" id="settingsThrottle" checked><span>Enable automatic resource throttling</span></label>
-                        <div class="divider"></div>
-                        <div class="card-title mb-3">Resource Thresholds</div>
-                        <div class="grid grid-2 gap-3">
-                            <div class="form-group"><label class="form-label">CPU %</label><input type="number" id="cpuThreshold" class="form-input" value="90" min="10" max="100"></div>
-                            <div class="form-group"><label class="form-label">Memory %</label><input type="number" id="memoryThreshold" class="form-input" value="85" min="10" max="100"></div>
-                            <div class="form-group"><label class="form-label">GPU %</label><input type="number" id="gpuThreshold" class="form-input" value="90" min="10" max="100"></div>
-                            <div class="form-group"><label class="form-label">Nice Level</label><input type="number" id="niceLevel" class="form-input" value="10" min="0" max="19"></div>
+                    
+                    <!-- Memory Threshold -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">
+                            Memory Threshold (%)
+                        </label>
+                        <input 
+                            type="number" 
+                            id="memoryThreshold" 
+                            min="50" 
+                            max="100" 
+                            step="5"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
+                            value="85"
+                        >
+                        <p class="text-sm text-gray-400 mt-1">Pause encoding if memory usage exceeds this threshold</p>
+                    </div>
+                    
+                    <!-- GPU Threshold -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">
+                            GPU Threshold (%)
+                        </label>
+                        <input 
+                            type="number" 
+                            id="gpuThreshold" 
+                            min="50" 
+                            max="100" 
+                            step="5"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
+                            value="90"
+                        >
+                        <p class="text-sm text-gray-400 mt-1">Pause encoding if GPU usage exceeds this threshold</p>
+                    </div>
+                    
+                    <!-- Nice Level -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">
+                            Process Priority (Nice Level)
+                        </label>
+                        <input 
+                            type="number" 
+                            id="niceLevel" 
+                            min="0" 
+                            max="19" 
+                            step="1"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
+                            value="10"
+                        >
+                        <p class="text-sm text-gray-400 mt-1">Higher = lower priority (0-19)</p>
+                    </div>
+                    
+                    <!-- Enable Throttling -->
+                    <div class="md:col-span-2">
+                        <label class="flex items-center gap-3 cursor-pointer">
+                            <input 
+                                type="checkbox" 
+                                id="enableThrottling" 
+                                class="w-5 h-5 bg-gray-700 border-gray-600 rounded"
+                                checked
+                            >
+                            <span class="text-sm font-medium text-gray-300">
+                                Enable automatic resource throttling
+                            </span>
+                        </label>
+                        <p class="text-sm text-gray-400 mt-1 ml-8">
+                            Automatically pause/resume encoding based on system resource usage
+                        </p>
+                    </div>
+                </div>
+                
+                <!-- Preset Buttons -->
+                <div class="mt-8 pt-6 border-t border-gray-700">
+                    <h3 class="text-lg font-semibold mb-4">Quick Presets</h3>
+                    <div class="flex gap-3">
+                        <button onclick="applyPreset('conservative')" class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded">
+                            Conservative (CPU: 70%, Mem: 70%, Nice: 15)
+                        </button>
+                        <button onclick="applyPreset('balanced')" class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded">
+                            Balanced (CPU: 85%, Mem: 80%, Nice: 10)
+                        </button>
+                        <button onclick="applyPreset('aggressive')" class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded">
+                            Aggressive (CPU: 95%, Mem: 90%, Nice: 5)
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Save Button -->
+                <div class="mt-6 flex justify-end">
+                    <button onclick="saveResourceSettings()" class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded font-medium">
+                        Save Settings
+                    </button>
+                </div>
+                
+                <div id="settingsMessage" class="mt-4 hidden"></div>
+            </div>
+
+            <!-- AI Upscalers Section -->
+            <div class="bg-gray-800 rounded-lg p-6 mt-6">
+                <div class="flex justify-between items-center mb-2">
+                    <div>
+                        <h2 class="text-xl font-bold">🤖 AI Upscalers</h2>
+                        <p class="text-sm text-gray-400 mt-1">
+                            Pre-encode resolution enhancement (e.g. 480p→1080p). Click <strong>Download</strong> to install automatically.
+                        </p>
+                    </div>
+                    <button onclick="checkUpscalerUpdates()" class="bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded text-sm">
+                        🔄 Check Updates
+                    </button>
+                </div>
+                <div id="upscalerStatus" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mt-4">
+                    <p class="text-gray-500 text-sm">Loading…</p>
+                </div>
+            </div>
+
+            <!-- External Connections Section -->
+            <div class="bg-gray-800 rounded-lg p-6 mt-6">
+                <div class="flex justify-between items-center mb-2">
+                    <div>
+                        <h2 class="text-xl font-bold">🔌 External Connections</h2>
+                        <p class="text-sm text-gray-400 mt-1">
+                            Connect Sonarr or Radarr to import libraries and receive automatic download events.
+                        </p>
+                    </div>
+                    <button onclick="showAddConnectionModal()"
+                        class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded text-sm font-medium transition-colors">
+                        + Add Connection
+                    </button>
+                </div>
+                <div id="connectionsList" class="space-y-3 mt-4">
+                    <p class="text-gray-500 text-sm">Loading…</p>
+                </div>
+            </div>
+
+            <!-- Backup & Restore Section -->
+            <div class="bg-gray-800 rounded-lg p-6 mt-6">
+                <h2 class="text-xl font-bold mb-1">💾 Backup & Restore</h2>
+                <p class="text-sm text-gray-400 mb-6">Download a complete backup of your database (profiles, scan roots, queue, history) or restore from a previous backup.</p>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <!-- Backup -->
+                    <div class="bg-gray-700 rounded-lg p-5">
+                        <h3 class="font-semibold mb-1">📤 Download Backup</h3>
+                        <p class="text-xs text-gray-400 mb-4">Downloads the full SQLite database as a <code class="bg-gray-900 px-1 rounded">.db</code> file. Includes everything: profiles, scan roots, watch folders, history, and settings.</p>
+                        <button onclick="downloadBackup()"
+                            class="bg-blue-600 hover:bg-blue-700 px-5 py-2 rounded text-sm font-medium transition-colors">
+                            Download Backup
+                        </button>
+                    </div>
+
+                    <!-- Restore -->
+                    <div class="bg-gray-700 rounded-lg p-5">
+                        <h3 class="font-semibold mb-1">📥 Restore from Backup</h3>
+                        <p class="text-xs text-gray-400 mb-3">Upload a previously downloaded <code class="bg-gray-900 px-1 rounded">.db</code> file. <strong class="text-yellow-300">Overwrites your current database.</strong> Optimizarr must be restarted after restore.</p>
+                        <div class="flex items-center gap-3">
+                            <label class="bg-gray-600 hover:bg-gray-500 px-5 py-2 rounded text-sm font-medium cursor-pointer transition-colors">
+                                Choose File
+                                <input type="file" accept=".db" onchange="restoreBackup(event)" class="hidden">
+                            </label>
+                            <span id="restoreFileName" class="text-xs text-gray-400">No file chosen</span>
                         </div>
-                        <button class="btn btn-primary btn-sm mt-2" onclick="saveResourceSettings()">Save Thresholds</button>
-                        <div class="divider"></div>
-                        <div class="card-title mb-3">Data Management</div>
-                        <div class="flex gap-2">
-                            <button class="btn btn-secondary btn-sm" onclick="downloadBackup()">⬇️ Backup</button>
-                            <button class="btn btn-secondary btn-sm" onclick="document.getElementById('restoreFile').click()">⬆️ Restore</button>
-                            <input type="file" id="restoreFile" accept=".db,.sqlite" class="hidden" onchange="restoreBackup(event)">
-                        </div>
-                        <div id="restoreFileName" class="text-xs text-muted mt-2 hidden"></div>
-                        <div id="restoreStatus" class="text-xs mt-1 hidden"></div>
-                        <div class="divider"></div>
-                        <div class="card-title mb-3">Health Check</div>
-                        <div id="healthStatus" class="text-sm text-muted">Click to check system health</div>
-                        <button class="btn btn-secondary btn-sm mt-2" onclick="loadHealth()">🩺 Run Health Check</button>
+                        <div id="restoreStatus" class="mt-3 text-xs hidden"></div>
                     </div>
                 </div>
             </div>
-        </main>
-    </div>
+        </div>
 
-    <!-- MODALS -->
+        <!-- External Connection Modal -->
+        <div id="connectionModal" class="hidden fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
+            <div class="bg-gray-800 rounded-lg p-6 w-full max-w-lg">
+                <div class="flex justify-between items-center mb-5">
+                    <h3 class="text-xl font-bold" id="connectionModalTitle">Add Connection</h3>
+                    <button onclick="closeConnectionModal()" class="text-gray-400 hover:text-white text-xl">✕</button>
+                </div>
 
-    <!-- Profile Modal -->
-    <div class="modal-backdrop hidden" id="profileModal">
-        <div class="modal-panel" style="max-width:720px">
-            <div class="modal-header">
-                <h3 class="modal-title" id="profileModalTitle">New Profile</h3>
-                <button class="modal-close" onclick="closeProfileModal()">&times;</button>
+                <form id="connectionForm" class="space-y-4" onsubmit="return false;">
+                    <input type="hidden" id="connectionId">
+
+                    <!-- App Type -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">App Type *</label>
+                        <select id="connectionAppType" onchange="handleConnectionTypeChange()"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                            <option value="radarr">📽️ Radarr (Movies)</option>
+                            <option value="sonarr">📺 Sonarr (TV Shows)</option>
+                            <option value="stash">🔒 Stash (Adult Content Manager)</option>
+                        </select>
+                    </div>
+
+                    <!-- Privacy notice — shown only for Stash -->
+                    <div id="connectionPrivacyNote" class="hidden bg-yellow-900 border border-yellow-700 rounded px-4 py-3">
+                        <p class="text-xs text-yellow-200">
+                            <strong>🔒 Privacy mode:</strong> Stash is treated as a private connection.
+                            Scene titles and file paths will not appear in logs.
+                            Statistics are hidden by default — you can enable them below.
+                        </p>
+                    </div>
+
+                    <!-- Name -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">Display Name *</label>
+                        <input type="text" id="connectionName"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
+                            placeholder="e.g. Radarr — 4K Movies">
+                    </div>
+
+                    <!-- Base URL -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">URL *</label>
+                        <input type="url" id="connectionUrl"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
+                            placeholder="http://localhost:7878">
+                        <p class="text-xs text-gray-500 mt-1" id="connectionUrlHint">Radarr default: :7878 · Sonarr default: :8989</p>
+                    </div>
+
+                    <!-- API Key -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">API Key *</label>
+                        <div class="relative">
+                            <input type="password" id="connectionApiKey"
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white pr-16"
+                                placeholder="Paste your API key here">
+                            <button type="button" onclick="toggleConnectionKeyVisibility()"
+                                class="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-gray-400 hover:text-white px-2 py-1 bg-gray-600 rounded">
+                                Show
+                            </button>
+                        </div>
+                        <p class="text-xs text-gray-500 mt-1" id="connectionKeyHint">Settings → General → API Key in Sonarr/Radarr</p>
+                    </div>
+
+                    <!-- Show in Stats -->
+                    <div class="flex items-center gap-3">
+                        <input type="checkbox" id="connectionShowInStats" checked
+                            class="w-4 h-4 bg-gray-700 border-gray-600 rounded">
+                        <label for="connectionShowInStats" class="text-sm text-gray-300 cursor-pointer">
+                            Show files from this connection in Statistics
+                        </label>
+                    </div>
+
+                    <!-- Link to Scan Root -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">Link to Scan Root <span class="text-gray-500 font-normal">(optional)</span></label>
+                        <select id="connectionScanRoot"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                            <option value="">— None (use default profile) —</option>
+                        </select>
+                        <p class="text-xs text-gray-500 mt-1">Files from this connection will use the linked scan root's profile</p>
+                    </div>
+
+                    <!-- Test result banner -->
+                    <div id="connectionTestResult" class="hidden rounded px-4 py-2 text-sm"></div>
+
+                    <div class="flex gap-3 pt-2">
+                        <button type="button" onclick="testConnectionForm()"
+                            class="bg-gray-600 hover:bg-gray-500 px-4 py-2 rounded text-sm transition-colors">
+                            🔌 Test Connection
+                        </button>
+                        <div class="flex-1"></div>
+                        <button type="button" onclick="closeConnectionModal()"
+                            class="bg-gray-600 hover:bg-gray-500 px-4 py-2 rounded text-sm">Cancel</button>
+                        <button type="button" id="connectionSaveBtn" onclick="saveConnection()"
+                            class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded text-sm font-medium transition-colors">
+                            Save
+                        </button>
+                    </div>
+                </form>
             </div>
-            <div class="modal-body">
-                <form id="profileForm" onsubmit="saveProfile(event)">
+        </div>
+
+        <!-- Profile Modal -->
+        <div id="profileModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div class="bg-gray-800 rounded-lg p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+                <div class="flex justify-between items-center mb-6">
+                    <h3 class="text-xl font-bold" id="profileModalTitle">Create Profile</h3>
+                    <button onclick="closeProfileModal()" class="text-gray-400 hover:text-white">✕</button>
+                </div>
+                
+                <form id="profileForm" class="space-y-4">
                     <input type="hidden" id="profileId">
-                    <div class="grid grid-2 gap-3">
-                        <div class="form-group"><label class="form-label">Profile Name</label><input type="text" id="profileName" class="form-input" required placeholder="e.g. Movies AV1 1080p"></div>
-                        <div class="form-group"><label class="form-label">Library Type</label>
-                            <select id="profileLibraryType" class="form-select">
-                                <option value="movie">🎬 Movies</option><option value="tv_show">📺 TV Shows</option><option value="anime">🎌 Anime</option><option value="home_video">🎥 Home Videos</option><option value="4k_content">🖥️ 4K/UHD</option><option value="web_content">🌐 Web/YouTube</option><option value="archive">📦 Archive</option><option value="music_video">🎵 Music Videos</option><option value="custom">⚙️ Custom</option>
+                    
+                    <div>
+                        <label class="block text-sm font-medium mb-2">Profile Name *</label>
+                        <input type="text" id="profileName" required 
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2"
+                            placeholder="e.g., 1080p AV1 High Quality">
+                    </div>
+                    
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <div class="flex items-center gap-2 mb-2">
+                                <label class="block text-sm font-medium">Codec *</label>
+                                <button type="button" onclick="showCodecGuide()" 
+                                    class="text-blue-400 hover:text-blue-300 text-xs" title="Codec Guide">
+                                    ℹ️ Guide
+                                </button>
+                            </div>
+                            <select id="profileCodec" required 
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                                <option value="h264">H.264</option>
+                                <option value="h265">H.265 (HEVC)</option>
+                                <option value="av1" selected>AV1 ⭐</option>
+                                <option value="vp9">VP9</option>
+                            </select>
+                        </div>
+                        
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Encoder *</label>
+                            <select id="profileEncoder" required onchange="updatePresetOptions()"
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                                <option value="x264">x264 (CPU)</option>
+                                <option value="x265">x265 (CPU)</option>
+                                <option value="svt_av1" selected>SVT-AV1 (CPU) ⭐</option>
+                                <option value="nvenc_h264">NVENC H.264 (GPU)</option>
+                                <option value="nvenc_h265">NVENC H.265 (GPU)</option>
+                                <option value="nvenc_av1">NVENC AV1 (GPU)</option>
+                                <option value="qsv_h264">QuickSync H.264 (GPU)</option>
+                                <option value="qsv_h265">QuickSync H.265 (GPU)</option>
                             </select>
                         </div>
                     </div>
-                    <div class="grid grid-3 gap-3">
-                        <div class="form-group"><label class="form-label">Codec</label>
-                            <select id="profileCodec" class="form-select"><option value="av1">AV1 ⭐</option><option value="h265">H.265 (HEVC)</option><option value="h264">H.264 (AVC)</option><option value="vp9">VP9</option></select>
+                    
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Resolution</label>
+                            <select id="profileResolution" 
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                                <option value="">Preserve Source (recommended)</option>
+                                <option value="1920x1080">1920x1080 (1080p/HD)</option>
+                                <option value="2560x1440">2560x1440 (1440p/2K)</option>
+                                <option value="3840x2160">3840x2160 (2160p/4K)</option>
+                                <option value="7680x4320">7680x4320 (4320p/8K)</option>
+                            </select>
+                            <p class="text-xs text-gray-400 mt-1">Leave empty to keep original quality</p>
                         </div>
-                        <div class="form-group"><label class="form-label">Encoder</label>
-                            <select id="profileEncoder" class="form-select" onchange="updatePresetOptions()">
-                                <option value="svt_av1">SVT-AV1</option><option value="x265">x265</option><option value="x264">x264</option><option value="nvenc_h264">NVENC H.264</option><option value="nvenc_h265">NVENC H.265</option><option value="nvenc_av1">NVENC AV1</option><option value="qsv_h264">QSV H.264</option><option value="qsv_h265">QSV H.265</option>
+                        
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Framerate (FPS)</label>
+                            <select id="profileFramerate" onchange="handleFramerateChange()"
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                                <option value="">Variable (VFR) - Preserve Source</option>
+                                <option value="24">24 fps (Movies)</option>
+                                <option value="30">30 fps (Standard TV)</option>
+                                <option value="60">60 fps (Action/Sports)</option>
+                                <option value="custom">Custom...</option>
+                            </select>
+                            <input type="number" id="profileFramerateCustom" 
+                                class="hidden w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 mt-2"
+                                placeholder="Enter FPS (e.g., 25, 48, 120)" min="1" max="240">
+                            <p class="text-xs text-gray-400 mt-1">24=Movies, 30=TV, 60=Sports/Action</p>
+                        </div>
+                    </div>
+                    
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Quality (CRF) *</label>
+                            <input type="number" id="profileQuality" required min="18" max="51" value="28"
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                            <p class="text-xs text-gray-400 mt-1">Lower = better quality (18-28 recommended)</p>
+                        </div>
+                        
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Preset</label>
+                            <select id="profilePreset" 
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                                <option value="">Auto (recommended)</option>
+                                <!-- Options populated dynamically based on encoder -->
+                            </select>
+                            <p class="text-xs text-gray-400 mt-1" id="presetHelp">Speed vs quality trade-off</p>
+                        </div>
+                    </div>
+                    
+                    <div class="grid grid-cols-2 gap-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Audio Codec *</label>
+                            <select id="profileAudioCodec" required 
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                                <option value="aac">AAC</option>
+                                <option value="opus">Opus</option>
+                                <option value="ac3">AC3</option>
+                                <option value="flac">FLAC (Lossless)</option>
+                                <option value="passthrough">Passthrough (copy)</option>
                             </select>
                         </div>
-                        <div class="form-group"><label class="form-label">Quality (CRF)</label><input type="number" id="profileQuality" class="form-input" value="28" min="0" max="63"></div>
-                    </div>
-                    <div class="grid grid-3 gap-3">
-                        <div class="form-group"><label class="form-label">Preset</label><select id="profilePreset" class="form-select"></select><div class="form-hint" id="presetHelp">Speed vs quality trade-off</div></div>
-                        <div class="form-group"><label class="form-label">Container</label><select id="profileContainer" class="form-select"><option value="mkv">MKV</option><option value="mp4">MP4</option><option value="webm">WebM</option></select></div>
-                        <div class="form-group"><label class="form-label">Resolution</label>
-                            <select id="profileResolution" class="form-select"><option value="">Preserve</option><option value="3840x2160">4K</option><option value="2560x1440">1440p</option><option value="1920x1080">1080p</option><option value="1280x720">720p</option><option value="854x480">480p</option></select>
+                        
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Container Format *</label>
+                            <select id="profileContainer" required 
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                                <option value="mkv" selected>MKV (recommended)</option>
+                                <option value="mp4">MP4 (max compatibility)</option>
+                                <option value="webm">WebM (web streaming)</option>
+                            </select>
+                            <p class="text-xs text-gray-400 mt-1">MKV supports all codecs/subs; MP4 for Apple/mobile</p>
                         </div>
                     </div>
-                    <div class="grid grid-2 gap-3">
-                        <div class="form-group"><label class="form-label">Audio Codec</label>
-                            <select id="profileAudioCodec" class="form-select"><option value="copy">Copy</option><option value="aac">AAC</option><option value="opus">Opus</option><option value="ac3">AC3</option><option value="eac3">E-AC3</option><option value="flac">FLAC</option></select>
+                    
+                    <div>
+                        <label class="flex items-center">
+                            <input type="checkbox" id="profileTwoPass" class="mr-2">
+                            <span class="text-sm">Enable two-pass encoding (better quality, slower)</span>
+                        </label>
+                    </div>
+                    
+                    <!-- Phase 2: Audio/Subtitle/Filters Section -->
+                    <div class="border-t border-gray-600 pt-4 mt-2">
+                        <h4 class="text-sm font-bold text-blue-400 mb-3">🔧 Advanced: Audio, Subtitles & Filters</h4>
+                        
+                        <div class="grid grid-cols-2 gap-4">
+                            <div>
+                                <label class="block text-sm font-medium mb-2">Audio Handling</label>
+                                <select id="profileAudioHandling" 
+                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                                    <option value="preserve_all">🔊 Preserve All Tracks</option>
+                                    <option value="keep_primary">🔈 Keep Primary Only</option>
+                                    <option value="stereo_mixdown">🎧 Convert to Stereo</option>
+                                    <option value="hd_plus_aac">🎭 HD Audio + AAC Fallback</option>
+                                    <option value="high_quality">🎵 High Quality (256kbps)</option>
+                                </select>
+                                <p class="text-xs text-gray-400 mt-1" id="audioHandlingHelp">Keeps all original audio tracks</p>
+                            </div>
+                            
+                            <div>
+                                <label class="block text-sm font-medium mb-2">Subtitle Handling</label>
+                                <select id="profileSubtitleHandling" 
+                                    class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                                    <option value="none">❌ Remove All</option>
+                                    <option value="preserve_all">💬 Preserve All Subtitles</option>
+                                    <option value="keep_english">🇺🇸 English Only</option>
+                                    <option value="burn_in">🔥 Burn-in First Track</option>
+                                    <option value="foreign_scan">🌍 Foreign Audio Scan</option>
+                                </select>
+                                <p class="text-xs text-gray-400 mt-1" id="subtitleHandlingHelp">No subtitles in output</p>
+                            </div>
                         </div>
-                        <div class="form-group"><label class="form-label">Audio Bitrate</label>
-                            <select id="profileAudioBitrate" class="form-select"><option value="128">128k</option><option value="160">160k</option><option value="192" selected>192k</option><option value="256">256k</option><option value="320">320k</option></select>
+                        
+                        <div class="grid grid-cols-3 gap-4 mt-3">
+                            <div>
+                                <label class="flex items-center">
+                                    <input type="checkbox" id="profileEnableFilters" class="mr-2">
+                                    <span class="text-sm">Auto Filters</span>
+                                </label>
+                                <p class="text-xs text-gray-400 mt-1">Deinterlace, denoise, crop</p>
+                            </div>
+                            <div>
+                                <label class="flex items-center">
+                                    <input type="checkbox" id="profileChapterMarkers" checked class="mr-2">
+                                    <span class="text-sm">Chapter Markers</span>
+                                </label>
+                                <p class="text-xs text-gray-400 mt-1">Preserve DVD/Blu-ray chapters</p>
+                            </div>
+                            <div>
+                                <label class="flex items-center">
+                                    <input type="checkbox" id="profileHwAccel" class="mr-2" onchange="checkHwAccel()">
+                                    <span class="text-sm">HW Acceleration</span>
+                                </label>
+                                <p class="text-xs text-gray-400 mt-1" id="hwAccelHelp">Use GPU encoding</p>
+                            </div>
                         </div>
                     </div>
-                    <label class="form-checkbox mt-2"><input type="checkbox" id="profileTwoPass"><span>Two-pass encoding</span></label>
-                    <label class="form-checkbox mt-2"><input type="checkbox" id="profileHwAccel" onchange="checkHwAccel()"><span>Hardware acceleration</span></label>
-                    <div class="form-hint" id="hwAccelHelp">Use GPU encoding</div>
-                    <label class="form-checkbox mt-2"><input type="checkbox" id="profileIsDefault"><span>Set as default profile</span></label>
+                    
+                    <div>
+                        <label class="flex items-center">
+                            <input type="checkbox" id="profileIsDefault" class="mr-2">
+                            <span class="text-sm font-medium">Set as default profile (used when no specific profile assigned)</span>
+                        </label>
+                    </div>
+                    
+                    <div>
+                        <label class="block text-sm font-medium mb-2">Custom Arguments</label>
+                        <input type="text" id="profileCustomArgs" 
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2"
+                            placeholder="Additional HandBrakeCLI arguments">
+                    </div>
 
-                    <!-- Advanced Section -->
-                    <button type="button" class="collapse-toggle mt-4" onclick="toggleCollapse('advancedSection', this)"><span class="chevron">▶</span> Advanced Settings</button>
-                    <div id="advancedSection" class="collapse-content">
-                        <div class="grid grid-2 gap-3">
-                            <div class="form-group"><label class="form-label">Audio Handling</label>
-                                <select id="profileAudioHandling" class="form-select"><option value="preserve_all">🔊 Preserve All</option><option value="keep_primary">🔈 Primary Only</option><option value="stereo_mixdown">🎧 Stereo</option><option value="hd_plus_aac">🎭 HD+AAC</option><option value="high_quality">🎵 HQ Audio</option></select>
-                                <div class="form-hint" id="audioHandlingHelp"></div>
+                    <!-- AI Upscaling — collapsible -->
+                    <div class="border border-gray-700 rounded-lg overflow-hidden">
+                        <button type="button" onclick="toggleProfileUpscaleSection()"
+                            class="w-full flex items-center justify-between px-4 py-3 bg-gray-750 hover:bg-gray-700 transition-colors text-left">
+                            <div class="flex items-center gap-2">
+                                <span id="profileUpscaleToggleIcon" class="text-gray-400 text-xs">▶</span>
+                                <span class="text-sm font-medium">🤖 AI Upscaling</span>
+                                <span id="profileUpscaleEnabledBadge" class="hidden text-xs bg-blue-600 text-white px-2 py-0.5 rounded-full">Enabled</span>
                             </div>
-                            <div class="form-group"><label class="form-label">Subtitle Handling</label>
-                                <select id="profileSubtitleHandling" class="form-select"><option value="preserve_all">💬 All Subs</option><option value="keep_english">🇺🇸 English</option><option value="burn_in">🔥 Burn-in</option><option value="foreign_scan">🌍 Foreign Scan</option><option value="none">❌ None</option></select>
-                                <div class="form-hint" id="subtitleHandlingHelp"></div>
+                            <span class="text-xs text-gray-500">Upscale low-res files before encoding</span>
+                        </button>
+
+                        <div id="profileUpscaleSection" class="hidden px-4 py-4 space-y-4 bg-gray-900 border-t border-gray-700">
+
+                            <div class="flex items-start gap-3">
+                                <input type="checkbox" id="profileUpscaleEnabled" class="mt-0.5 w-4 h-4 flex-shrink-0"
+                                    onchange="handleProfileUpscaleToggle()">
+                                <div>
+                                    <label for="profileUpscaleEnabled" class="text-sm font-medium cursor-pointer">Enable AI Upscaling for this profile</label>
+                                    <p class="text-xs text-gray-400 mt-0.5">Files assigned this profile will be upscaled before encoding when below the trigger threshold. Per-library scan root settings take priority over this.</p>
+                                </div>
                             </div>
-                        </div>
-                        <div class="grid grid-2 gap-3">
-                            <div class="form-group"><label class="form-label">Framerate</label>
-                                <select id="profileFramerate" class="form-select" onchange="handleFramerateChange()"><option value="">Preserve</option><option value="23.976">23.976</option><option value="24">24</option><option value="25">25</option><option value="29.97">29.97</option><option value="30">30</option><option value="60">60</option><option value="custom">Custom</option></select>
-                                <input type="number" id="profileFramerateCustom" class="form-input hidden mt-2" step="0.001" placeholder="FPS">
+
+                            <div id="profileUpscaleFields" class="space-y-4 opacity-50 pointer-events-none">
+
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-300 mb-2">Upscaler</label>
+                                    <select id="profileUpscaleKey" onchange="handleProfileUpscalerKeyChange()"
+                                        class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <option value="realesrgan">🎬 Real-ESRGAN — best for live action / films</option>
+                                        <option value="realcugan">⚡ Real-CUGAN — fast, good for anime</option>
+                                        <option value="waifu2x">🎌 Waifu2x NCNN — classic anime upscaler</option>
+                                    </select>
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-300 mb-2">Model</label>
+                                    <select id="profileUpscaleModel"
+                                        class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <!-- populated by handleProfileUpscalerKeyChange() -->
+                                    </select>
+                                </div>
+
+                                <div class="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-300 mb-2">Trigger Below (height px)</label>
+                                        <input type="number" id="profileUpscaleTrigger" value="720" min="240" max="2160"
+                                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <p class="text-xs text-gray-500 mt-1">Files shorter than this are candidates</p>
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-300 mb-2">Target Height (px)</label>
+                                        <input type="number" id="profileUpscaleTarget" value="1080" min="480" max="4320"
+                                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <p class="text-xs text-gray-500 mt-1">Desired output height</p>
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-300 mb-2">Scale Factor</label>
+                                    <select id="profileUpscaleFactor"
+                                        class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <option value="2">2× — doubles resolution (e.g. 480p → 960p)</option>
+                                        <option value="3">3× — triples resolution (e.g. 480p → 1440p)</option>
+                                        <option value="4">4× — quadruples resolution (e.g. 480p → 1920p)</option>
+                                    </select>
+                                </div>
+
+                                <div class="bg-yellow-900 border border-yellow-700 rounded px-4 py-3 text-xs text-yellow-200">
+                                    ⚠️ <strong>Note:</strong> Profile-level upscaling applies to all libraries and watched folders using this profile. If a scan root has its own upscale settings enabled, those take priority over these profile settings.
+                                </div>
                             </div>
-                            <div class="form-group"><label class="form-label">Deinterlace</label>
-                                <select id="profileDeinterlace" class="form-select"><option value="">Off</option><option value="yadif">Yadif</option><option value="decomb">Decomb</option></select>
-                            </div>
-                        </div>
-                        <label class="form-checkbox mt-2"><input type="checkbox" id="profileChapterMarkers" checked><span>Preserve chapter markers</span></label>
-                        <label class="form-checkbox mt-2"><input type="checkbox" id="profileWebOptimized"><span>Web-optimized</span></label>
-                        <label class="form-checkbox mt-2"><input type="checkbox" id="profileEnableFilters"><span>Enable video filters</span></label>
-                        <div class="form-group mt-3">
-                            <label class="form-label">Custom HandBrake Arguments</label>
-                            <textarea id="profileCustomArgs" class="form-input" rows="2" placeholder="e.g. --encoder-tune animation" style="font-family:monospace;font-size:12px"></textarea>
-                            <div class="form-hint">Additional CLI flags passed directly to HandBrakeCLI</div>
                         </div>
                     </div>
-
-                    <!-- AI Upscaling Section -->
-                    <button type="button" class="collapse-toggle mt-3" onclick="toggleCollapse('profileUpscaleSection', this)"><span class="chevron" id="profileUpscaleToggleIcon">▶</span> AI Upscaling <span id="profileUpscaleEnabledBadge" class="hidden" style="color:var(--green);font-size:11px;margin-left:6px">● ON</span></button>
-                    <div id="profileUpscaleSection" class="collapse-content">
-                        <label class="form-checkbox"><input type="checkbox" id="profileUpscaleEnabled" onchange="document.getElementById('profileUpscaleEnabledBadge').classList.toggle('hidden', !this.checked)"><span>Enable AI upscaling</span></label>
-                        <div id="profileUpscaleFields" class="mt-3">
-                            <div class="grid grid-3 gap-3">
-                                <div class="form-group"><label class="form-label">Trigger Below</label><input type="number" id="profileUpscaleTrigger" class="form-input" value="720" min="240" max="2160"></div>
-                                <div class="form-group"><label class="form-label">Target Height</label><input type="number" id="profileUpscaleTarget" class="form-input" value="1080" min="480" max="4320"></div>
-                                <div class="form-group"><label class="form-label">Upscaler</label>
-                                    <select id="profileUpscaleKey" class="form-select"><option value="realesrgan">Real-ESRGAN</option><option value="waifu2x">Waifu2x</option><option value="realcugan">Real-CUGAN</option></select>
-                                </div>
-                            </div>
-                            <div class="grid grid-2 gap-3 mt-2">
-                                <div class="form-group"><label class="form-label">Model</label>
-                                    <select id="profileUpscaleModel" class="form-select"><option value="realesrgan-x4plus">realesrgan-x4plus</option><option value="realesrgan-x4plus-anime">realesrgan-x4plus-anime</option><option value="realesr-animevideov3">realesr-animevideov3</option></select>
-                                </div>
-                                <div class="form-group"><label class="form-label">Scale Factor</label>
-                                    <select id="profileUpscaleFactor" class="form-select"><option value="2">2×</option><option value="3">3×</option><option value="4" selected>4×</option></select>
-                                </div>
-                            </div>
-                        </div>
+                    
+                    <div class="flex justify-end gap-3 pt-4">
+                        <button type="button" onclick="closeProfileModal()" 
+                            class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded">
+                            Cancel
+                        </button>
+                        <button type="submit" 
+                            class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded">
+                            Save Profile
+                        </button>
                     </div>
                 </form>
             </div>
-            <div class="modal-footer">
-                <button class="btn btn-secondary" onclick="closeProfileModal()">Cancel</button>
-                <button class="btn btn-primary" onclick="document.getElementById('profileForm').requestSubmit()">Save Profile</button>
-            </div>
         </div>
-    </div>
 
-    <!-- Scan Root Modal -->
-    <div class="modal-backdrop hidden" id="scanRootModal">
-        <div class="modal-panel">
-            <div class="modal-header"><h3 class="modal-title" id="scanRootModalTitle">Add Library</h3><button class="modal-close" onclick="closeScanRootModal()">&times;</button></div>
-            <div class="modal-body">
-                <form id="scanRootForm" onsubmit="saveScanRoot(event)">
+        <!-- Scan Root Modal -->
+        <div id="scanRootModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+            <div class="bg-gray-800 rounded-lg p-6 max-w-xl w-full">
+                <div class="flex justify-between items-center mb-6">
+                    <h3 class="text-xl font-bold" id="scanRootModalTitle">Add Scan Root</h3>
+                    <button onclick="closeScanRootModal()" class="text-gray-400 hover:text-white">✕</button>
+                </div>
+                
+                <form id="scanRootForm" class="space-y-4">
                     <input type="hidden" id="scanRootId">
-                    <div class="form-group"><label class="form-label">Path</label>
-                        <div class="flex gap-2"><input type="text" id="scanRootPath" class="form-input" required placeholder="/media/movies"><button type="button" class="btn btn-secondary btn-sm" onclick="browseFolderPath()">Browse</button></div>
+                    
+                    <div>
+                        <label class="block text-sm font-medium mb-2">Directory Path *</label>
+                        <div class="flex gap-2">
+                            <input type="text" id="scanRootPath" required
+                                class="flex-1 bg-gray-700 border border-gray-600 rounded px-4 py-2"
+                                placeholder="C:\Media\Movies or /mnt/media/movies">
+                            <button type="button" onclick="browseFolderPath()"
+                                class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded whitespace-nowrap">
+                                📁 Browse
+                            </button>
+                        </div>
+                        <p class="text-xs text-gray-400 mt-1">Absolute path to scan for video files</p>
                     </div>
-                    <div class="grid grid-2 gap-3">
-                        <div class="form-group"><label class="form-label">Library Type</label>
-                            <select id="scanRootLibraryType" class="form-select" onchange="handleLibraryTypeChange()"><option value="movie">🎬 Movies</option><option value="tv_show">📺 TV Shows</option><option value="anime">🎌 Anime</option><option value="home_video">🎥 Home Videos</option><option value="4k_content">🖥️ 4K/UHD</option><option value="web_content">🌐 Web/YouTube</option><option value="archive">📦 Archive</option><option value="music_video">🎵 Music Videos</option><option value="custom">⚙️ Custom</option></select>
+                    
+                    <div>
+                        <label class="block text-sm font-medium mb-2">Library Type</label>
+                        <select id="scanRootLibraryType" onchange="handleLibraryTypeChange()"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                            <option value="custom">⚙️ Custom — Manual configuration</option>
+                            <option value="movie">🎬 Movies — Feature films, documentaries</option>
+                            <option value="tv_show">📺 TV Shows — Series, sitcoms, episodic</option>
+                            <option value="anime">🎌 Anime — Japanese animation</option>
+                            <option value="home_video">🎥 Home Videos — Personal recordings</option>
+                            <option value="4k_content">🖥️ 4K/UHD — Ultra HD content</option>
+                            <option value="web_content">🌐 Web/YouTube — Downloaded web videos</option>
+                            <option value="archive">📦 Archive — Long-term preservation</option>
+                            <option value="music_video">🎵 Music Videos — Concerts, MVs</option>
+                        </select>
+                        <p class="text-xs text-gray-400 mt-1">Selects optimized encoding settings for this content type</p>
+                        <div id="libraryTypeRecommendation" class="hidden mt-2 p-3 bg-gray-600 rounded text-sm">
                         </div>
-                        <div class="form-group"><label class="form-label">Profile</label><select id="scanRootProfile" class="form-select"></select></div>
                     </div>
-                    <div id="libraryTypeRecommendation" class="card card-compact hidden mt-2" style="background:var(--info-dim);border-color:rgba(52,152,219,0.15)"></div>
-                    <label class="form-checkbox mt-3"><input type="checkbox" id="scanRootEnabled" checked><span>Enabled</span></label>
-                    <label class="form-checkbox mt-2"><input type="checkbox" id="scanRootRecursive" checked><span>Scan subdirectories recursively</span></label>
-                    <label class="form-checkbox mt-2"><input type="checkbox" id="scanRootShowInStats" checked><span>Show in statistics</span></label>
-                    <!-- Scan Root Upscale Override -->
-                    <button type="button" class="collapse-toggle mt-3" onclick="toggleCollapse('upscaleSettingsFields', this)"><span class="chevron" id="upscaleSectionToggleIcon">▶</span> AI Upscale Override <span id="upscaleEnabledBadge" class="hidden" style="color:var(--green);font-size:11px;margin-left:6px">● ON</span></button>
-                    <div id="upscaleSettingsFields" class="collapse-content">
-                        <div class="form-hint mb-2">Override the profile's upscale settings for this library</div>
-                        <label class="form-checkbox"><input type="checkbox" id="scanRootUpscaleEnabled" onchange="document.getElementById('upscaleEnabledBadge').classList.toggle('hidden', !this.checked)"><span>Enable AI upscaling</span></label>
-                        <div class="grid grid-3 gap-3 mt-3">
-                            <div class="form-group"><label class="form-label">Trigger Below</label><input type="number" id="scanRootUpscaleTrigger" class="form-input" value="720" min="240" max="2160"></div>
-                            <div class="form-group"><label class="form-label">Target Height</label><input type="number" id="scanRootUpscaleTarget" class="form-input" value="1080" min="480" max="4320"></div>
-                            <div class="form-group"><label class="form-label">Upscaler</label>
-                                <select id="scanRootUpscaleKey" class="form-select"><option value="realesrgan">Real-ESRGAN</option><option value="waifu2x">Waifu2x</option><option value="realcugan">Real-CUGAN</option></select>
+                    
+                    <div>
+                        <label class="block text-sm font-medium mb-2">Encoding Profile *</label>
+                        <select id="scanRootProfile" required 
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                            <option value="">Loading profiles...</option>
+                        </select>
+                    </div>
+                    
+                    <div>
+                        <label class="flex items-center">
+                            <input type="checkbox" id="scanRootRecursive" checked class="mr-2">
+                            <span class="text-sm">Scan subdirectories recursively</span>
+                        </label>
+                    </div>
+                    
+                    <div>
+                        <label class="flex items-center">
+                            <input type="checkbox" id="scanRootEnabled" checked class="mr-2">
+                            <span class="text-sm">Enabled</span>
+                        </label>
+                    </div>
+
+                    <div>
+                        <label class="flex items-center gap-2">
+                            <input type="checkbox" id="scanRootShowInStats" checked class="mr-1">
+                            <div>
+                                <span class="text-sm">Show in Statistics</span>
+                                <p class="text-xs text-gray-400">When disabled, this root's files and paths are hidden from the Statistics tab for privacy</p>
                             </div>
-                        </div>
-                        <div class="grid grid-2 gap-3 mt-2">
-                            <div class="form-group"><label class="form-label">Model</label>
-                                <select id="scanRootUpscaleModel" class="form-select"><option value="realesrgan-x4plus">realesrgan-x4plus</option><option value="realesrgan-x4plus-anime">realesrgan-x4plus-anime</option><option value="realesr-animevideov3">realesr-animevideov3</option></select>
+                        </label>
+                    </div>
+
+                    <!-- AI Upscale Settings (collapsible) -->
+                    <div class="border border-gray-700 rounded-lg overflow-hidden">
+                        <button type="button" onclick="toggleUpscaleSection()"
+                            class="w-full flex items-center justify-between px-4 py-3 bg-gray-750 hover:bg-gray-700 transition-colors text-left">
+                            <div class="flex items-center gap-2">
+                                <span id="upscaleSectionToggleIcon" class="text-gray-400 text-xs">▶</span>
+                                <span class="text-sm font-medium">🤖 AI Upscaling</span>
+                                <span id="upscaleEnabledBadge" class="hidden text-xs bg-blue-600 text-white px-2 py-0.5 rounded">Enabled</span>
                             </div>
-                            <div class="form-group"><label class="form-label">Scale Factor</label>
-                                <select id="scanRootUpscaleFactor" class="form-select"><option value="2">2×</option><option value="3">3×</option><option value="4" selected>4×</option></select>
+                            <span class="text-xs text-gray-500">Upscale low-res files before encoding</span>
+                        </button>
+                        <div id="upscaleSection" class="hidden px-4 py-4 space-y-4 bg-gray-900 border-t border-gray-700">
+
+                            <!-- Enable toggle -->
+                            <div class="flex items-start gap-3">
+                                <input type="checkbox" id="scanRootUpscaleEnabled" class="mt-0.5 w-4 h-4"
+                                    onchange="handleUpscaleToggle()">
+                                <div>
+                                    <label for="scanRootUpscaleEnabled" class="text-sm font-medium cursor-pointer">Enable AI Upscaling for this library</label>
+                                    <p class="text-xs text-gray-400 mt-0.5">Files below the trigger threshold will be upscaled with AI before HandBrake encodes them. This is GPU-intensive and slow — ideal for overnight batch jobs.</p>
+                                </div>
                             </div>
-                        </div>
+
+                            <div id="upscaleSettingsFields" class="space-y-4 opacity-50 pointer-events-none">
+
+                                <!-- Upscaler selection -->
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-300 mb-2">Upscaler</label>
+                                    <select id="scanRootUpscaleKey" onchange="handleUpscalerKeyChange()"
+                                        class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <option value="realesrgan">🎬 Real-ESRGAN — best for live action / films</option>
+                                        <option value="realcugan">⚡ Real-CUGAN — fast, good for anime</option>
+                                        <option value="waifu2x">🎌 Waifu2x NCNN — classic anime upscaler</option>
+                                    </select>
+                                </div>
+
+                                <!-- Model -->
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-300 mb-2">Model</label>
+                                    <select id="scanRootUpscaleModel"
+                                        class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <!-- populated by handleUpscalerKeyChange() -->
+                                    </select>
+                                </div>
+
+                                <!-- Trigger + Target in two columns -->
+                                <div class="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-300 mb-2">Trigger Below (height px)</label>
+                                        <input type="number" id="scanRootUpscaleTrigger" value="720" min="240" max="2160" step="1"
+                                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <p class="text-xs text-gray-500 mt-1">Files shorter than this are candidates</p>
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-300 mb-2">Target Height (px)</label>
+                                        <input type="number" id="scanRootUpscaleTarget" value="1080" min="480" max="4320" step="1"
+                                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <p class="text-xs text-gray-500 mt-1">Desired output height</p>
+                                    </div>
+                                </div>
+
+                                <!-- Scale factor -->
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-300 mb-2">Scale Factor</label>
+                                    <select id="scanRootUpscaleFactor"
+                                        class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <option value="2">2× — doubles resolution (480p → 960p)</option>
+                                        <option value="3">3× — triples resolution (480p → 1440p)</option>
+                                        <option value="4">4× — quadruples resolution (480p → 1920p)</option>
+                                    </select>
+                                </div>
+
+                                <!-- Disk space warning -->
+                                <div class="bg-yellow-900 border border-yellow-700 rounded px-4 py-3 text-xs text-yellow-200">
+                                    ⚠️ <strong>Disk space note:</strong> Upscaling extracts every frame as a PNG image before processing.
+                                    A 30-minute 480p file at ×2 requires ~20–50 GB of free temp space.
+                                    Make sure your system drive has enough room.
+                                </div>
+
+                            </div><!-- /upscaleSettingsFields -->
+                        </div><!-- /upscaleSection -->
+                    </div><!-- /collapsible wrapper -->
+                    
+                    <div class="flex justify-end gap-3 pt-4">
+                        <button type="button" onclick="closeScanRootModal()" 
+                            class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded">
+                            Cancel
+                        </button>
+                        <button type="submit" 
+                            class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded">
+                            Save Scan Root
+                        </button>
                     </div>
                 </form>
             </div>
-            <div class="modal-footer"><button class="btn btn-secondary" onclick="closeScanRootModal()">Cancel</button><button class="btn btn-primary" onclick="document.getElementById('scanRootForm').requestSubmit()">Save</button></div>
         </div>
-    </div>
 
-    <!-- Watch Modal -->
-    <div class="modal-backdrop hidden" id="watchModal">
-        <div class="modal-panel">
-            <div class="modal-header"><h3 class="modal-title" id="watchModalTitle">Add Folder Watch</h3><button class="modal-close" onclick="closeWatchModal()">&times;</button></div>
-            <div class="modal-body">
+        <!-- Folder Browser Modal -->
+        <div id="folderBrowserModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
+            <div class="bg-gray-800 rounded-lg p-6 max-w-lg w-full max-h-[80vh] flex flex-col">
+                <div class="flex justify-between items-center mb-4">
+                    <h3 class="text-xl font-bold">Browse Server Directories</h3>
+                    <button onclick="closeFolderBrowser()" class="text-gray-400 hover:text-white">✕</button>
+                </div>
+                <div class="flex items-center gap-2 mb-4 p-2 bg-gray-900 rounded text-sm">
+                    <span class="text-gray-400">Path:</span>
+                    <span id="folderBrowserPath" class="text-blue-400 truncate" data-current-path="">Root</span>
+                </div>
+                <div id="folderBrowserList" class="flex-1 overflow-y-auto bg-gray-700 rounded p-2 mb-4 min-h-[300px] max-h-[400px]">
+                    <p class="text-gray-400 p-4">Loading...</p>
+                </div>
+                <div class="flex justify-end gap-3">
+                    <button onclick="closeFolderBrowser()"
+                        class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded">Cancel</button>
+                    <button onclick="selectCurrentFolder()"
+                        class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">Select This Folder</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- ============================================================ -->
+        <!-- FOLDER WATCHES TAB -->
+        <!-- ============================================================ -->
+        <div id="content-watches" class="tab-content hidden">
+            <div class="bg-gray-800 rounded-lg p-6">
+                <div class="flex justify-between items-center mb-6">
+                    <div>
+                        <h2 class="text-xl font-bold">Folder Watches</h2>
+                        <p class="text-sm text-gray-400 mt-1">Auto-queue new media files when they appear in watched folders</p>
+                    </div>
+                    <div class="flex gap-2">
+                        <button onclick="forceWatchCheck()" class="bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded text-sm">
+                            🔍 Check Now
+                        </button>
+                        <button onclick="showCreateWatchForm()" class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">
+                            Add Watch
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Watcher Status -->
+                <div id="watcherStatus" class="mb-4 p-3 bg-gray-700 rounded text-sm text-gray-300"></div>
+                
+                <div id="watchesList">
+                    <p class="text-gray-400">Loading watches...</p>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Watch Modal -->
+        <div id="watchModal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
+            <div class="bg-gray-800 rounded-lg p-6 w-full max-w-lg">
+                <h3 id="watchModalTitle" class="text-xl font-bold mb-4">Add Folder Watch</h3>
                 <form id="watchForm" onsubmit="saveWatch(event)">
                     <input type="hidden" id="watchId">
-                    <div class="form-group"><label class="form-label">Watch Path</label><input type="text" id="watchPath" class="form-input" required placeholder="/media/incoming"></div>
-                    <div class="form-group"><label class="form-label">Profile</label><select id="watchProfile" class="form-select"></select></div>
-                    <div class="form-group"><label class="form-label">Extensions</label><input type="text" id="watchExtensions" class="form-input" value=".mkv,.mp4,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.mpg,.mpeg"></div>
-                    <div class="flex gap-4 mt-3">
-                        <label class="form-checkbox"><input type="checkbox" id="watchEnabled" checked> Enabled</label>
-                        <label class="form-checkbox"><input type="checkbox" id="watchRecursive" checked> Recursive</label>
-                        <label class="form-checkbox"><input type="checkbox" id="watchAutoQueue" checked> Auto Queue</label>
+                    
+                    <div class="space-y-4">
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Folder Path *</label>
+                            <div class="flex gap-2">
+                                <input type="text" id="watchPath" required 
+                                    class="flex-1 bg-gray-700 border border-gray-600 rounded px-4 py-2"
+                                    placeholder="/path/to/media/folder">
+                                <button type="button" onclick="openFolderBrowser('watchPath')" 
+                                    class="bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded">📁</button>
+                            </div>
+                        </div>
+                        
+                        <div>
+                            <label class="block text-sm font-medium mb-2">Encoding Profile *</label>
+                            <select id="watchProfile" required 
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                            </select>
+                        </div>
+                        
+                        <div>
+                            <label class="block text-sm font-medium mb-2">File Extensions</label>
+                            <input type="text" id="watchExtensions" 
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2"
+                                value=".mkv,.mp4,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.mpg,.mpeg">
+                        </div>
+                        
+                        <div class="grid grid-cols-3 gap-4">
+                            <label class="flex items-center">
+                                <input type="checkbox" id="watchEnabled" checked class="mr-2">
+                                <span class="text-sm">Enabled</span>
+                            </label>
+                            <label class="flex items-center">
+                                <input type="checkbox" id="watchRecursive" checked class="mr-2">
+                                <span class="text-sm">Recursive</span>
+                            </label>
+                            <label class="flex items-center">
+                                <input type="checkbox" id="watchAutoQueue" checked class="mr-2">
+                                <span class="text-sm">Auto Queue</span>
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <div class="flex justify-end gap-3 pt-4">
+                        <button type="button" onclick="closeWatchModal()" 
+                            class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded">Cancel</button>
+                        <button type="submit" 
+                            class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded">Save Watch</button>
                     </div>
                 </form>
             </div>
-            <div class="modal-footer"><button class="btn btn-secondary" onclick="closeWatchModal()">Cancel</button><button class="btn btn-primary" onclick="document.getElementById('watchForm').requestSubmit()">Save</button></div>
         </div>
-    </div>
 
-    <!-- Connection Modal -->
-    <div class="modal-backdrop hidden" id="connectionModal">
-        <div class="modal-panel">
-            <div class="modal-header"><h3 class="modal-title" id="connectionModalTitle">Add Connection</h3><button class="modal-close" onclick="closeConnectionModal()">&times;</button></div>
-            <div class="modal-body">
-                <form id="connectionForm" onsubmit="saveConnection(event)">
-                    <input type="hidden" id="connectionId">
-                    <div class="grid grid-2 gap-3">
-                        <div class="form-group"><label class="form-label">Name</label><input type="text" id="connectionName" class="form-input" required placeholder="My Sonarr"></div>
-                        <div class="form-group"><label class="form-label">Type</label><select id="connectionAppType" class="form-select" onchange="handleConnectionTypeChange()"><option value="sonarr">Sonarr</option><option value="radarr">Radarr</option><option value="stash">Stash</option></select></div>
+        <!-- ============================================================ -->
+        <!-- STATISTICS TAB -->
+        <!-- ============================================================ -->
+        <div id="content-statistics" class="tab-content hidden">
+            <div class="space-y-6">
+                <!-- Summary Cards -->
+                <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
+                    <div class="bg-gray-800 p-5 rounded-lg text-center">
+                        <p class="text-gray-400 text-xs mb-1">Files Processed</p>
+                        <p id="statTotalFiles" class="text-2xl font-bold text-blue-400">—</p>
                     </div>
-                    <div class="form-group"><label class="form-label">URL</label><input type="url" id="connectionUrl" class="form-input" required placeholder="http://localhost:8989"><div class="form-hint" id="connectionUrlHint"></div></div>
-                    <div class="form-group"><label class="form-label">API Key</label><input type="password" id="connectionApiKey" class="form-input" required><div class="form-hint" id="connectionKeyHint"></div></div>
-                    <div class="form-group"><label class="form-label">Scan Root</label><select id="connectionScanRoot" class="form-select"><option value="">— None (manual only) —</option></select></div>
-                    <label class="form-checkbox mt-3"><input type="checkbox" id="connectionEnabled" checked><span>Enabled</span></label>
-                    <label class="form-checkbox mt-2"><input type="checkbox" id="connectionShowInStats" checked><span>Show in statistics</span></label>
-                    <div class="form-hint mt-2 hidden" id="connectionPrivacyNote"></div>
-                    <div id="connectionTestResult" class="hidden mt-3 p-3 rounded text-sm" style="background:var(--bg-overlay)"></div>
-                </form>
-            </div>
-            <div class="modal-footer">
-                <button class="btn btn-secondary btn-sm" onclick="testConnection()">🧪 Test</button>
-                <div style="flex:1"></div>
-                <button class="btn btn-secondary" onclick="closeConnectionModal()">Cancel</button>
-                <button id="connectionSaveBtn" class="btn btn-primary" onclick="document.getElementById('connectionForm').requestSubmit()">Save</button>
-            </div>
-        </div>
-    </div>
-
-    <!-- Folder Browser Modal -->
-    <div class="modal-backdrop hidden" id="folderBrowserModal">
-        <div class="modal-panel" style="max-width:560px;max-height:70vh">
-            <div class="modal-header"><h3 class="modal-title">Browse Folders</h3><button class="modal-close" onclick="closeFolderBrowser()">&times;</button></div>
-            <div class="modal-body" style="padding:0">
-                <div style="padding:12px 22px;border-bottom:1px solid var(--border-subtle);display:flex;align-items:center;gap:8px">
-                    <span class="text-xs text-muted">Path:</span>
-                    <code class="text-sm text-accent" id="folderBrowserPath">Root</code>
+                    <div class="bg-gray-800 p-5 rounded-lg text-center">
+                        <p class="text-gray-400 text-xs mb-1">Original Size</p>
+                        <p id="statOriginalSize" class="text-2xl font-bold text-gray-300">—</p>
+                    </div>
+                    <div class="bg-gray-800 p-5 rounded-lg text-center">
+                        <p class="text-gray-400 text-xs mb-1">New Size</p>
+                        <p id="statNewSize" class="text-2xl font-bold text-blue-300">—</p>
+                    </div>
+                    <div class="bg-gray-800 p-5 rounded-lg text-center">
+                        <p class="text-gray-400 text-xs mb-1">Space Saved</p>
+                        <p id="statSaved" class="text-2xl font-bold text-green-400">—</p>
+                    </div>
+                    <div class="bg-gray-800 p-5 rounded-lg text-center">
+                        <p class="text-gray-400 text-xs mb-1">Avg Savings</p>
+                        <p id="statAvgPct" class="text-2xl font-bold text-yellow-400">—</p>
+                    </div>
+                    <div class="bg-gray-800 p-5 rounded-lg text-center">
+                        <p class="text-gray-400 text-xs mb-1">Avg Encode Time</p>
+                        <p id="statAvgTime" class="text-2xl font-bold text-purple-400">—</p>
+                    </div>
                 </div>
-                <div id="folderBrowserList" style="max-height:400px;overflow-y:auto;padding:8px"></div>
+                
+                <!-- Daily Activity Chart -->
+                <div class="bg-gray-800 rounded-lg p-6">
+                    <div class="flex justify-between items-center mb-4">
+                        <h3 class="text-lg font-bold">Daily Activity</h3>
+                        <select id="statsDays" onchange="loadStatistics()" 
+                            class="bg-gray-700 border border-gray-600 rounded px-3 py-1 text-sm">
+                            <option value="7">Last 7 Days</option>
+                            <option value="30" selected>Last 30 Days</option>
+                            <option value="90">Last 90 Days</option>
+                            <option value="365">Last Year</option>
+                        </select>
+                    </div>
+                    <div id="dailyChart" class="h-48 flex items-end gap-1 overflow-x-auto">
+                        <p class="text-gray-500 text-sm">Loading chart...</p>
+                    </div>
+                </div>
+                
+                <!-- Two Column: Codecs + Recent History -->
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                    <!-- Codec Breakdown -->
+                    <div class="bg-gray-800 rounded-lg p-6">
+                        <h3 class="text-lg font-bold mb-4">Codec Breakdown</h3>
+                        <div id="codecBreakdown" class="space-y-3">
+                            <p class="text-gray-500 text-sm">Loading...</p>
+                        </div>
+                    </div>
+                    
+                    <!-- Recent History -->
+                    <div class="bg-gray-800 rounded-lg p-6">
+                        <h3 class="text-lg font-bold mb-4">Recent Encodes</h3>
+                        <div id="recentHistory" class="space-y-2 max-h-80 overflow-y-auto">
+                            <p class="text-gray-500 text-sm">Loading...</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- System Health -->
+                <div class="bg-gray-800 rounded-lg p-6">
+                    <div class="flex items-center justify-between mb-4">
+                        <h3 class="text-lg font-bold">System Health</h3>
+                        <button onclick="loadHealth()" class="bg-gray-700 hover:bg-gray-600 px-3 py-1.5 rounded text-sm transition-colors">
+                            🔄 Refresh
+                        </button>
+                    </div>
+                    <div id="healthStatus">
+                        <p class="text-gray-500 text-sm">Loading...</p>
+                    </div>
+                </div>
             </div>
-            <div class="modal-footer"><button class="btn btn-secondary" onclick="closeFolderBrowser()">Cancel</button><button class="btn btn-primary" onclick="selectCurrentFolder()">Select Folder</button></div>
         </div>
-    </div>
 
-    <!-- Codec Guide Modal -->
-    <div class="modal-backdrop hidden" id="codecGuideModal">
-        <div class="modal-panel" style="max-width:580px">
-            <div class="modal-header"><h3 class="modal-title">Video Codec Guide</h3><button class="modal-close" onclick="document.getElementById('codecGuideModal').classList.add('hidden')">&times;</button></div>
-            <div class="modal-body" id="codecGuideContent"></div>
+        <div id="content-schedule" class="tab-content hidden">
+            <div class="bg-gray-800 rounded-lg p-6">
+                <h2 class="text-xl font-bold mb-6">Encoding Schedule</h2>
+                
+                <div class="space-y-6">
+                    <!-- Enable/Disable Schedule -->
+                    <div class="flex items-center justify-between p-4 bg-gray-700 rounded-lg">
+                        <div>
+                            <h3 class="text-lg font-semibold">Enable Scheduled Encoding</h3>
+                            <p class="text-sm text-gray-400">Automatically start/stop encoding based on schedule</p>
+                        </div>
+                        <label class="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" id="scheduleEnabled" class="sr-only peer">
+                            <div class="w-11 h-6 bg-gray-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                        </label>
+                    </div>
+                    
+                    <!-- Days of Week -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-3">Days of Week</label>
+                        <div class="grid grid-cols-7 gap-2">
+                            <button type="button" onclick="toggleDay(0)" id="day-0" class="day-button">Mon</button>
+                            <button type="button" onclick="toggleDay(1)" id="day-1" class="day-button">Tue</button>
+                            <button type="button" onclick="toggleDay(2)" id="day-2" class="day-button">Wed</button>
+                            <button type="button" onclick="toggleDay(3)" id="day-3" class="day-button">Thu</button>
+                            <button type="button" onclick="toggleDay(4)" id="day-4" class="day-button">Fri</button>
+                            <button type="button" onclick="toggleDay(5)" id="day-5" class="day-button">Sat</button>
+                            <button type="button" onclick="toggleDay(6)" id="day-6" class="day-button">Sun</button>
+                        </div>
+                    </div>
+                    
+                    <!-- Windows Rest Hours (Windows only) -->
+                    <div id="windowsRestHoursSection" class="p-4 bg-gray-700 rounded-lg border border-blue-600/30">
+                        <div class="flex items-center justify-between">
+                            <div>
+                                <h3 class="font-semibold flex items-center gap-2">
+                                    🪟 Use Windows Active Hours
+                                    <span id="windowsHoursAvailable" class="text-xs text-gray-400 font-normal">(detecting…)</span>
+                                </h3>
+                                <p class="text-sm text-gray-400 mt-1">
+                                    Automatically schedule encoding during Windows' designated rest hours
+                                    (outside your Active Hours set in Windows Update settings).
+                                </p>
+                                <p id="windowsHoursInfo" class="text-xs text-blue-400 mt-1 hidden"></p>
+                            </div>
+                            <label class="relative inline-flex items-center cursor-pointer ml-4">
+                                <input type="checkbox" id="useWindowsRestHours" class="sr-only peer" onchange="toggleWindowsHours()">
+                                <div class="w-11 h-6 bg-gray-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-600"></div>
+                            </label>
+                        </div>
+                    </div>
+
+                    <!-- Time Window (hidden when Windows hours active) -->
+                    <div id="manualTimeWindow">
+                    <!-- Time Window -->
+                    <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                        <div>
+                            <label class="block text-sm font-medium text-gray-300 mb-2">Start Time</label>
+                            <input 
+                                type="time" 
+                                id="startTime" 
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
+                                value="22:00"
+                            >
+                            <p class="text-sm text-gray-400 mt-1">When to start encoding</p>
+                        </div>
+                        
+                        <div>
+                            <label class="block text-sm font-medium text-gray-300 mb-2">End Time</label>
+                            <input 
+                                type="time" 
+                                id="endTime" 
+                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
+                                value="06:00"
+                            >
+                            <p class="text-sm text-gray-400 mt-1">When to stop encoding</p>
+                        </div>
+                    </div>
+                    </div> <!-- end manualTimeWindow -->
+                    
+                    <!-- Current Status -->
+                    <div class="p-4 bg-gray-700 rounded-lg">
+                        <h3 class="font-semibold mb-2">Current Status</h3>
+                        <div class="grid grid-cols-2 gap-4 text-sm">
+                            <div>
+                                <span class="text-gray-400">Schedule Active:</span>
+                                <span id="scheduleStatus" class="ml-2 font-medium">-</span>
+                            </div>
+                            <div>
+                                <span class="text-gray-400">Within Window:</span>
+                                <span id="withinWindow" class="ml-2 font-medium">-</span>
+                            </div>
+                            <div>
+                                <span class="text-gray-400">Manual Override:</span>
+                                <span id="manualOverride" class="ml-2 font-medium">-</span>
+                            </div>
+                            <div>
+                                <span class="text-gray-400">Next Check:</span>
+                                <span id="nextCheck" class="ml-2 font-medium">Every minute</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Save Button -->
+                    <div class="flex justify-end gap-3">
+                        <button onclick="saveSchedule()" class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded font-medium">
+                            Save Schedule
+                        </button>
+                    </div>
+                    
+                    <div id="scheduleMessage" class="hidden mt-4"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Logs Tab -->
+        <div id="content-logs" class="tab-content hidden">
+            <div class="bg-gray-800 rounded-lg p-6">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-xl font-bold">System Logs</h2>
+                    <div class="flex gap-3">
+                        <select id="logType" onchange="loadLogs()" 
+                            class="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
+                            <option value="app">Application</option>
+                            <option value="handbrake">HandBrake</option>
+                            <option value="errors">Errors</option>
+                        </select>
+                        <select id="logLevel" onchange="loadLogs()" 
+                            class="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
+                            <option value="ALL">All Levels</option>
+                            <option value="DEBUG">DEBUG</option>
+                            <option value="INFO">INFO</option>
+                            <option value="WARNING">WARNING</option>
+                            <option value="ERROR">ERROR</option>
+                        </select>
+                        <select id="logLines" onchange="loadLogs()" 
+                            class="bg-gray-700 border border-gray-600 rounded px-3 py-2 text-sm">
+                            <option value="50">Last 50</option>
+                            <option value="100" selected>Last 100</option>
+                            <option value="250">Last 250</option>
+                            <option value="500">Last 500</option>
+                        </select>
+                        <button onclick="loadLogs()" 
+                            class="bg-blue-600 hover:bg-blue-700 px-3 py-2 rounded text-sm">
+                            🔄 Refresh
+                        </button>
+                        <button onclick="clearLogs()" 
+                            class="bg-red-600 hover:bg-red-700 px-3 py-2 rounded text-sm">
+                            🗑️ Clear
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- Log Stats -->
+                <div id="logStats" class="mb-4 text-xs text-gray-400"></div>
+                
+                <!-- Log Output -->
+                <div id="logOutput" 
+                    class="bg-gray-900 rounded-lg p-4 font-mono text-xs leading-relaxed overflow-x-auto max-h-[600px] overflow-y-auto">
+                    <p class="text-gray-500">Select a log type and click Refresh...</p>
+                </div>
+            </div>
         </div>
     </div>
 
