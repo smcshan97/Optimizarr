@@ -1546,6 +1546,29 @@ def _sync_connection_task(conn_id: int):
         perm_status, _ = scanner.check_file_permissions(path)
         file_size = item.get("file_size_bytes", 0)
 
+        # Evaluate upscale eligibility: linked scan root > profile fallback
+        import json as _json
+        upscale_plan   = None
+        linked_root    = db.get_scan_root(root_id) if root_id else None
+        upscale_source = None
+        if linked_root and linked_root.get("upscale_enabled"):
+            upscale_source = linked_root
+        elif profile.get("upscale_enabled"):
+            upscale_source = profile
+        if upscale_source:
+            src_h   = current_specs.get("height", 0) or 0
+            trigger = upscale_source.get("upscale_trigger_below", 720)
+            t_h     = upscale_source.get("upscale_target_height", 1080)
+            if src_h > 0 and src_h < trigger and src_h < (t_h * 0.85):
+                upscale_plan = _json.dumps({
+                    "enabled":       True,
+                    "upscaler_key":  upscale_source.get("upscale_key", "realesrgan"),
+                    "model":         upscale_source.get("upscale_model", "realesrgan-x4plus"),
+                    "factor":        upscale_source.get("upscale_factor", 2),
+                    "source_height": src_h,
+                    "target_height": t_h,
+                })
+
         db.add_to_queue(
             file_path=path,
             root_id=root_id,
@@ -1560,6 +1583,7 @@ def _sync_connection_task(conn_id: int):
                 profile["codec"],
                 current_specs=current_specs,
             ),
+            upscale_plan=upscale_plan,
         )
         added += 1
 
@@ -1690,6 +1714,30 @@ async def receive_webhook(app_type: str, payload: dict):
     }
 
     perm_status, _ = scanner.check_file_permissions(file_path)
+
+    # Evaluate upscale eligibility: linked scan root > profile fallback
+    import json as _json
+    upscale_plan   = None
+    linked_root    = db.get_scan_root(root_id) if root_id else None
+    upscale_source = None
+    if linked_root and linked_root.get("upscale_enabled"):
+        upscale_source = linked_root
+    elif profile.get("upscale_enabled"):
+        upscale_source = profile
+    if upscale_source:
+        src_h   = current_specs.get("height", 0) or 0
+        trigger = upscale_source.get("upscale_trigger_below", 720)
+        t_h     = upscale_source.get("upscale_target_height", 1080)
+        if src_h > 0 and src_h < trigger and src_h < (t_h * 0.85):
+            upscale_plan = _json.dumps({
+                "enabled":       True,
+                "upscaler_key":  upscale_source.get("upscale_key", "realesrgan"),
+                "model":         upscale_source.get("upscale_model", "realesrgan-x4plus"),
+                "factor":        upscale_source.get("upscale_factor", 2),
+                "source_height": src_h,
+                "target_height": t_h,
+            })
+
     db.add_to_queue(
         file_path=file_path,
         root_id=root_id,
@@ -1701,7 +1749,19 @@ async def receive_webhook(app_type: str, payload: dict):
         estimated_savings_bytes=scanner._estimate_savings(
             file_size, codec, profile["codec"], current_specs=current_specs
         ),
+        upscale_plan=upscale_plan,
     )
+
+    # Wake the encoder if it's not already running and schedule allows
+    try:
+        from app.encoder import encoder_pool
+        from app.scheduler import encoding_scheduler
+        import threading
+        if not encoder_pool.is_running and encoding_scheduler.should_encode_now():
+            t = threading.Thread(target=encoder_pool.process_queue, daemon=True)
+            t.start()
+    except Exception:
+        pass  # Non-fatal — item is queued, encoder will pick it up on next scheduler tick
 
     optimizarr_logger.app_logger.info(
         "Webhook: queued %s from %s", file_path, app_type
