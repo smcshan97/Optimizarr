@@ -186,6 +186,17 @@ async function loadQueue() {
     }
 }
 
+// Debounce utility — delays rapid calls (e.g. keystrokes) by `delay` ms
+function debounce(fn, delay) {
+    let timer;
+    return function(...args) {
+        clearTimeout(timer);
+        timer = setTimeout(() => fn.apply(this, args), delay);
+    };
+}
+
+const debouncedFilter = debounce(filterQueue, 300);
+
 // Filter queue by search and status, then sort and display
 function filterQueue() {
     const searchTerm = (document.getElementById('queueSearch')?.value || '').toLowerCase();
@@ -607,11 +618,15 @@ document.addEventListener('DOMContentLoaded', () => {
     loadResources();
     loadQueue();
     
-    // Auto-refresh every 5 seconds
+    // Auto-refresh every 5 seconds (pauses when tab is hidden)
     setInterval(() => {
+        if (document.hidden) return;
         loadStats();
         loadResources();
-        if (!document.getElementById('content-queue').classList.contains('hidden')) {
+        // Only refresh queue if auto-refresh is checked and queue tab is visible
+        const autoRefresh = document.getElementById('autoRefreshQueue');
+        if (autoRefresh && autoRefresh.checked &&
+            !document.getElementById('content-queue').classList.contains('hidden')) {
             loadQueue();
         }
     }, 5000);
@@ -691,33 +706,7 @@ function applyPreset(preset) {
 // Schedule management
 let selectedDays = new Set([0, 1, 2, 3, 4, 5, 6]); // All days selected by default
 
-async function loadSchedule() {
-    const schedule = await apiRequest('/schedule');
-    if (schedule && schedule.config) {
-        const config = schedule.config;
-        
-        // Set enabled state
-        document.getElementById('scheduleEnabled').checked = config.enabled;
-        
-        // Set days
-        selectedDays = new Set(config.days_of_week.split(',').map(d => parseInt(d)));
-        updateDayButtons();
-        
-        // Set times
-        document.getElementById('startTime').value = config.start_time;
-        document.getElementById('endTime').value = config.end_time;
-        
-        // Update status
-        document.getElementById('scheduleStatus').textContent = config.enabled ? '✓ Enabled' : '✗ Disabled';
-        document.getElementById('scheduleStatus').className = config.enabled ? 'ml-2 font-medium text-green-400' : 'ml-2 font-medium text-gray-400';
-        
-        document.getElementById('withinWindow').textContent = schedule.within_schedule ? '✓ Yes' : '✗ No';
-        document.getElementById('withinWindow').className = schedule.within_schedule ? 'ml-2 font-medium text-green-400' : 'ml-2 font-medium text-gray-400';
-        
-        document.getElementById('manualOverride').textContent = schedule.manual_override ? '✓ Active' : '✗ Inactive';
-        document.getElementById('manualOverride').className = schedule.manual_override ? 'ml-2 font-medium text-yellow-400' : 'ml-2 font-medium text-gray-400';
-    }
-}
+// loadSchedule and saveSchedule are defined in the Windows hours section below (~line 2560+)
 
 function toggleDay(day) {
     if (selectedDays.has(day)) {
@@ -736,33 +725,6 @@ function updateDayButtons() {
         } else {
             btn.className = 'day-button';
         }
-    }
-}
-
-async function saveSchedule() {
-    const config = {
-        enabled: document.getElementById('scheduleEnabled').checked,
-        days_of_week: Array.from(selectedDays).sort().join(','),
-        start_time: document.getElementById('startTime').value,
-        end_time: document.getElementById('endTime').value,
-        timezone: 'UTC'
-    };
-    
-    const result = await apiRequest('/schedule', {
-        method: 'POST',
-        body: JSON.stringify(config)
-    });
-    
-    if (result) {
-        const msgEl = document.getElementById('scheduleMessage');
-        msgEl.textContent = '✓ Schedule saved successfully';
-        msgEl.className = 'mt-4 p-3 bg-green-900/50 border border-green-700 rounded text-green-300';
-        msgEl.classList.remove('hidden');
-        
-        setTimeout(() => msgEl.classList.add('hidden'), 3000);
-        
-        // Reload schedule to update status
-        loadSchedule();
     }
 }
 
@@ -1527,8 +1489,6 @@ function loadAccountInfo() {
 // QUEUE IMPROVEMENTS
 // ============================================================
 
-let queueRefreshInterval = null;
-
 // Scan all enabled scan roots
 async function scanAllRoots() {
     const btn = document.getElementById('scanAllBtn');
@@ -1602,25 +1562,12 @@ async function deleteQueueItem(id) {
     }
 }
 
-// Toggle auto-refresh
+// Toggle auto-refresh (main interval checks this checkbox directly)
 function toggleAutoRefresh() {
     const enabled = document.getElementById('autoRefreshQueue').checked;
-    
     if (enabled) {
-        queueRefreshInterval = setInterval(() => {
-            loadQueue();
-        }, 5000);
-    } else {
-        if (queueRefreshInterval) {
-            clearInterval(queueRefreshInterval);
-            queueRefreshInterval = null;
-        }
+        loadQueue(); // Immediate refresh when re-enabled
     }
-}
-
-// Initialize auto-refresh on page load
-if (document.getElementById('autoRefreshQueue').checked) {
-    toggleAutoRefresh();
 }
 
 
@@ -2554,8 +2501,7 @@ function toggleWindowsHours() {
     }
 }
 
-// Override saveSchedule to include new fields
-const _originalSaveSchedule = typeof saveSchedule === 'function' ? saveSchedule : null;
+// Save schedule configuration
 async function saveSchedule() {
     const useWinEl = document.getElementById('useWindowsRestHours');
     const config = {
@@ -2583,8 +2529,7 @@ async function saveSchedule() {
     }
 }
 
-// Override loadSchedule to include Windows hours fields
-const _origLoadSchedule = window._loadScheduleOriginal || null;
+// Load schedule configuration (includes Windows hours support)
 async function loadSchedule() {
     const schedule = await apiRequest('/schedule');
     if (!schedule) return;
@@ -2628,15 +2573,6 @@ async function loadSchedule() {
 
     // Load Windows hours info if on this tab
     loadWindowsActiveHours();
-}
-
-// ============================================================
-// SHOW MESSAGE HELPER (if not already defined)
-// ============================================================
-if (typeof showMessage !== 'function') {
-    function showMessage(msg, type = 'info') {
-        console.log(`[${type.toUpperCase()}] ${msg}`);
-    }
 }
 
 

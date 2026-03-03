@@ -4,7 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Optimizarr - Dashboard</title>
+    <link rel="stylesheet" href="/static/css/theme.css">
     <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         .tab-button {
             padding: 1rem 0;
@@ -162,7 +165,7 @@
                 <div class="mb-4 flex flex-wrap gap-3 items-center">
                     <div class="flex-1 min-w-48">
                         <input type="text" id="queueSearch" placeholder="🔍 Search by filename..." 
-                            onkeyup="filterQueue()"
+                            oninput="debouncedFilter()"
                             class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
                     </div>
                     <div>
