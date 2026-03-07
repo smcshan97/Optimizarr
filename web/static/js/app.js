@@ -56,16 +56,29 @@ async function apiRequest(endpoint, options = {}) {
     return response.json();
 }
 
-// Tab switching
+// Tab switching — sidebar nav + tab panels
 function switchTab(tabName) {
-    // Hide all tabs
-    document.querySelectorAll('.tab-content').forEach(el => el.classList.add('hidden'));
-    document.querySelectorAll('.tab-button').forEach(el => el.classList.remove('active'));
-    
-    // Show selected tab
-    document.getElementById(`content-${tabName}`).classList.remove('hidden');
-    document.getElementById(`tab-${tabName}`).classList.add('active');
-    
+    // Hide all tab panels
+    document.querySelectorAll('.tab-panel').forEach(el => el.classList.remove('active'));
+    // Deactivate all nav items
+    document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'));
+
+    // Show selected tab panel
+    const panel = document.getElementById(`content-${tabName}`);
+    if (panel) panel.classList.add('active');
+
+    // Activate nav item
+    const navItem = document.querySelector(`.nav-item[data-tab="${tabName}"]`);
+    if (navItem) navItem.classList.add('active');
+
+    // Close mobile sidebar if open
+    if (window.innerWidth < 769) {
+        const sb = document.getElementById('sidebar');
+        const ov = document.getElementById('mobileOverlay');
+        if (sb) sb.classList.remove('open');
+        if (ov) ov.classList.add('hidden');
+    }
+
     // Load tab data
     if (tabName === 'queue') loadQueue();
     if (tabName === 'profiles') loadProfiles();
@@ -77,6 +90,14 @@ function switchTab(tabName) {
     if (tabName === 'statistics') loadStatistics();
 }
 
+// Mobile sidebar toggle
+function toggleSidebar() {
+    const sidebar = document.getElementById('sidebar');
+    const overlay = document.getElementById('mobileOverlay');
+    if (sidebar) sidebar.classList.toggle('open');
+    if (overlay) overlay.classList.toggle('hidden');
+}
+
 // Load statistics
 async function loadStats() {
     const stats = await apiRequest('/stats');
@@ -85,6 +106,14 @@ async function loadStats() {
         document.getElementById('filesProcessed').textContent = stats.total_files_processed;
         document.getElementById('queuePending').textContent = stats.queue_pending;
         document.getElementById('activeJobs').textContent = stats.queue_processing;
+
+        // Update sidebar nav badge
+        const navBadge = document.getElementById('navQueueCount');
+        if (navBadge) {
+            const total = (stats.queue_pending || 0) + (stats.queue_processing || 0);
+            navBadge.textContent = total;
+            navBadge.style.display = total > 0 ? '' : 'none';
+        }
     }
 }
 
@@ -609,9 +638,10 @@ document.addEventListener('DOMContentLoaded', () => {
     // Check auth
     if (!checkAuth()) return;
     
-    // Set username
+    // Set username in sidebar
     const user = JSON.parse(localStorage.getItem('user') || '{}');
-    document.getElementById('username').textContent = user.username || '';
+    const sidebarUser = document.getElementById('sidebarUser');
+    if (sidebarUser) sidebarUser.textContent = user.username || 'admin';
     
     // Load initial data
     loadStats();
@@ -625,8 +655,9 @@ document.addEventListener('DOMContentLoaded', () => {
         loadResources();
         // Only refresh queue if auto-refresh is checked and queue tab is visible
         const autoRefresh = document.getElementById('autoRefreshQueue');
+        const queuePanel = document.getElementById('content-queue');
         if (autoRefresh && autoRefresh.checked &&
-            !document.getElementById('content-queue').classList.contains('hidden')) {
+            queuePanel && queuePanel.classList.contains('active')) {
             loadQueue();
         }
     }, 5000);
@@ -1132,17 +1163,19 @@ async function scanSingleRoot(id) {
 // ============================================================
 
 function showMessage(text, type = 'info') {
-    // Create a toast notification
+    const container = document.getElementById('toastContainer');
+    if (!container) {
+        // Fallback if container missing
+        console.log(`[${type}] ${text}`);
+        return;
+    }
+    const typeMap = { success: 'toast-success', error: 'toast-error', info: 'toast-info', warning: 'toast-warning' };
     const toast = document.createElement('div');
-    toast.className = `fixed top-4 right-4 px-6 py-3 rounded shadow-lg z-50 ${
-        type === 'success' ? 'bg-green-900 border border-green-700 text-green-300' :
-        type === 'error' ? 'bg-red-900 border border-red-700 text-red-300' :
-        'bg-blue-900 border border-blue-700 text-blue-300'
-    }`;
+    toast.className = `toast ${typeMap[type] || 'toast-info'}`;
     toast.textContent = text;
-    document.body.appendChild(toast);
-    
-    setTimeout(() => toast.remove(), 3000);
+    container.appendChild(toast);
+    // Auto-remove after animation completes
+    setTimeout(() => toast.remove(), 4000);
 }
 // ============================================================
 // PROFILE UI IMPROVEMENTS
