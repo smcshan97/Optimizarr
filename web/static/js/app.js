@@ -120,74 +120,62 @@ async function loadStats() {
 // Load resource monitoring data
 async function loadResources() {
     const resources = await apiRequest('/resources/current');
-    if (resources) {
-        // CPU
-        const cpuPercent = resources.cpu.percent.toFixed(1);
-        document.getElementById('cpuUsage').textContent = `${cpuPercent}%`;
-        document.getElementById('cpuBar').style.width = `${cpuPercent}%`;
-        
-        // Color based on usage
-        const cpuBar = document.getElementById('cpuBar');
-        const cpuUsageEl = document.getElementById('cpuUsage');
-        if (cpuPercent > 90) {
-            cpuBar.className = cpuBar.className.replace(/bg-\w+-\d+/, 'bg-red-500');
-            cpuUsageEl.className = cpuUsageEl.className.replace(/text-\w+-\d+/, 'text-red-400');
-            document.getElementById('cpuStatus').textContent = '⚠️ High';
-        } else if (cpuPercent > 75) {
-            cpuBar.className = cpuBar.className.replace(/bg-\w+-\d+/, 'bg-yellow-500');
-            cpuUsageEl.className = cpuUsageEl.className.replace(/text-\w+-\d+/, 'text-yellow-400');
-            document.getElementById('cpuStatus').textContent = '⚠️ Elevated';
+    if (!resources) return;
+
+    // Helper: set bar color class and value text color
+    function setBarColor(barEl, valueEl, percent, normalColor, normalVar) {
+        // Remove old color classes
+        barEl.className = barEl.className.replace(/\b(cyan|purple|orange|red|yellow)\b/g, '');
+        if (percent > 90) {
+            barEl.classList.add('red');
+            valueEl.style.color = 'var(--danger)';
+        } else if (percent > 75) {
+            barEl.classList.add('yellow');
+            valueEl.style.color = 'var(--warning)';
         } else {
-            cpuBar.className = cpuBar.className.replace(/bg-\w+-\d+/, 'bg-cyan-400');
-            cpuUsageEl.className = cpuUsageEl.className.replace(/text-\w+-\d+/, 'text-cyan-400');
-            document.getElementById('cpuStatus').textContent = '✓ Normal';
+            barEl.classList.add(normalColor);
+            valueEl.style.color = `var(--${normalVar})`;
         }
-        
-        // Memory
-        const memoryPercent = resources.memory.percent.toFixed(1);
-        const memoryUsedGB = (resources.memory.used_mb / 1024).toFixed(1);
-        const memoryTotalGB = (resources.memory.total_mb / 1024).toFixed(1);
-        document.getElementById('memoryUsage').textContent = `${memoryPercent}%`;
-        document.getElementById('memoryBar').style.width = `${memoryPercent}%`;
-        document.getElementById('memoryStatus').textContent = `${memoryUsedGB}/${memoryTotalGB} GB`;
-        
-        const memoryBar = document.getElementById('memoryBar');
-        const memoryUsageEl = document.getElementById('memoryUsage');
-        if (memoryPercent > 85) {
-            memoryBar.className = memoryBar.className.replace(/bg-\w+-\d+/, 'bg-red-500');
-            memoryUsageEl.className = memoryUsageEl.className.replace(/text-\w+-\d+/, 'text-red-400');
-        } else if (memoryPercent > 70) {
-            memoryBar.className = memoryBar.className.replace(/bg-\w+-\d+/, 'bg-yellow-500');
-            memoryUsageEl.className = memoryUsageEl.className.replace(/text-\w+-\d+/, 'text-yellow-400');
-        } else {
-            memoryBar.className = memoryBar.className.replace(/bg-\w+-\d+/, 'bg-purple-400');
-            memoryUsageEl.className = memoryUsageEl.className.replace(/text-\w+-\d+/, 'text-purple-400');
-        }
-        
-        // GPU
-        if (resources.gpu && resources.gpu.length > 0) {
-            const gpu = resources.gpu[0]; // First GPU
-            const gpuPercent = gpu.utilization_percent.toFixed(1);
-            document.getElementById('gpuUsage').textContent = `${gpuPercent}%`;
-            document.getElementById('gpuBar').style.width = `${gpuPercent}%`;
-            document.getElementById('gpuStatus').textContent = gpu.name.substring(0, 20);
-            
-            const gpuBar = document.getElementById('gpuBar');
-            const gpuUsageEl = document.getElementById('gpuUsage');
-            if (gpuPercent > 90) {
-                gpuBar.className = gpuBar.className.replace(/bg-\w+-\d+/, 'bg-red-500');
-                gpuUsageEl.className = gpuUsageEl.className.replace(/text-\w+-\d+/, 'text-red-400');
-            } else if (gpuPercent > 75) {
-                gpuBar.className = gpuBar.className.replace(/bg-\w+-\d+/, 'bg-yellow-500');
-                gpuUsageEl.className = gpuUsageEl.className.replace(/text-\w+-\d+/, 'text-yellow-400');
-            } else {
-                gpuBar.className = gpuBar.className.replace(/bg-\w+-\d+/, 'bg-orange-400');
-                gpuUsageEl.className = gpuUsageEl.className.replace(/text-\w+-\d+/, 'text-orange-400');
-            }
-        } else {
-            document.getElementById('gpuUsage').textContent = 'N/A';
-            document.getElementById('gpuStatus').textContent = 'No GPU detected';
-        }
+    }
+
+    // CPU
+    const cpuPercent = resources.cpu.percent.toFixed(1);
+    const cpuBar = document.getElementById('cpuBar');
+    const cpuVal = document.getElementById('cpuUsage');
+    cpuVal.textContent = `${cpuPercent}%`;
+    cpuBar.style.width = `${cpuPercent}%`;
+    setBarColor(cpuBar, cpuVal, cpuPercent, 'cyan', 'accent');
+    const cpuStatus = document.getElementById('cpuStatus');
+    if (cpuStatus) {
+        cpuStatus.textContent = cpuPercent > 90 ? '⚠️ High' : cpuPercent > 75 ? '⚠️ Elevated' : '✓ Normal';
+    }
+
+    // Memory
+    const memPercent = resources.memory.percent.toFixed(1);
+    const memUsedGB = (resources.memory.used_mb / 1024).toFixed(1);
+    const memTotalGB = (resources.memory.total_mb / 1024).toFixed(1);
+    const memBar = document.getElementById('memoryBar');
+    const memVal = document.getElementById('memoryUsage');
+    memVal.textContent = `${memPercent}%`;
+    memBar.style.width = `${memPercent}%`;
+    setBarColor(memBar, memVal, memPercent, 'purple', 'processing');
+    const memStatus = document.getElementById('memoryStatus');
+    if (memStatus) memStatus.textContent = `${memUsedGB}/${memTotalGB} GB`;
+
+    // GPU
+    if (resources.gpu && resources.gpu.length > 0) {
+        const gpu = resources.gpu[0];
+        const gpuPercent = gpu.utilization_percent.toFixed(1);
+        const gpuBar = document.getElementById('gpuBar');
+        const gpuVal = document.getElementById('gpuUsage');
+        gpuVal.textContent = `${gpuPercent}%`;
+        gpuBar.style.width = `${gpuPercent}%`;
+        setBarColor(gpuBar, gpuVal, gpuPercent, 'orange', 'warning');
+        const gpuStatus = document.getElementById('gpuStatus');
+        if (gpuStatus) gpuStatus.textContent = gpu.name.substring(0, 20);
+    } else {
+        document.getElementById('gpuUsage').textContent = 'N/A';
+        document.getElementById('gpuStatus').textContent = 'No GPU detected';
     }
 }
 
