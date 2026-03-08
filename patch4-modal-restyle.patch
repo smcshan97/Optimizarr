@@ -1,0 +1,217 @@
+diff --git a/web/templates/index.html b/web/templates/index.html
+index 263c9ed..30c1256 100644
+--- a/web/templates/index.html
++++ b/web/templates/index.html
+@@ -515,13 +515,13 @@
+         </div>
+ 
+         <!-- External Connection Modal -->
+-        <div id="connectionModal" class="hidden fixed inset-0 bg-black bg-opacity-60 flex items-center justify-center z-50">
+-            <div class="bg-gray-800 rounded-lg p-6 w-full max-w-lg">
+-                <div class="flex justify-between items-center mb-5">
+-                    <h3 class="text-xl font-bold" id="connectionModalTitle">Add Connection</h3>
+-                    <button onclick="closeConnectionModal()" class="text-gray-400 hover:text-white text-xl">✕</button>
++        <div id="connectionModal" class="modal-backdrop hidden">
++            <div class="modal-panel" style="max-width:540px">
++                <div class="modal-header">
++                    <h3 class="modal-title" id="connectionModalTitle">Add Connection</h3>
++                    <button onclick="closeConnectionModal()" class="modal-close">✕</button>
+                 </div>
+-
++                <div class="modal-body">
+                 <form id="connectionForm" class="space-y-4" onsubmit="return false;">
+                     <input type="hidden" id="connectionId">
+ 
+@@ -598,32 +598,25 @@
+ 
+                     <!-- Test result banner -->
+                     <div id="connectionTestResult" class="hidden rounded px-4 py-2 text-sm"></div>
+-
+-                    <div class="flex gap-3 pt-2">
+-                        <button type="button" onclick="testConnectionForm()"
+-                            class="bg-gray-600 hover:bg-gray-500 px-4 py-2 rounded text-sm transition-colors">
+-                            🔌 Test Connection
+-                        </button>
+-                        <div class="flex-1"></div>
+-                        <button type="button" onclick="closeConnectionModal()"
+-                            class="bg-gray-600 hover:bg-gray-500 px-4 py-2 rounded text-sm">Cancel</button>
+-                        <button type="button" id="connectionSaveBtn" onclick="saveConnection()"
+-                            class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded text-sm font-medium transition-colors">
+-                            Save
+-                        </button>
+-                    </div>
+                 </form>
++                </div>
++                <div class="modal-footer">
++                    <button type="button" onclick="testConnectionForm()" class="btn btn-secondary btn-sm">🔌 Test</button>
++                    <div style="flex:1"></div>
++                    <button type="button" onclick="closeConnectionModal()" class="btn btn-secondary">Cancel</button>
++                    <button type="button" id="connectionSaveBtn" onclick="saveConnection()" class="btn btn-primary">Save</button>
++                </div>
+             </div>
+         </div>
+ 
+         <!-- Profile Modal -->
+-        <div id="profileModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+-            <div class="bg-gray-800 rounded-lg p-6 max-w-2xl w-full max-h-[90vh] overflow-y-auto">
+-                <div class="flex justify-between items-center mb-6">
+-                    <h3 class="text-xl font-bold" id="profileModalTitle">Create Profile</h3>
+-                    <button onclick="closeProfileModal()" class="text-gray-400 hover:text-white">✕</button>
++        <div id="profileModal" class="modal-backdrop hidden">
++            <div class="modal-panel" style="max-width:680px;max-height:90vh;overflow-y:auto">
++                <div class="modal-header">
++                    <h3 class="modal-title" id="profileModalTitle">Create Profile</h3>
++                    <button onclick="closeProfileModal()" class="modal-close">✕</button>
+                 </div>
+-                
++                <div class="modal-body">
+                 <form id="profileForm" class="space-y-4">
+                     <input type="hidden" id="profileId">
+                     
+@@ -896,28 +889,23 @@
+                         </div>
+                     </div>
+                     
+-                    <div class="flex justify-end gap-3 pt-4">
+-                        <button type="button" onclick="closeProfileModal()" 
+-                            class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded">
+-                            Cancel
+-                        </button>
+-                        <button type="submit" 
+-                            class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded">
+-                            Save Profile
+-                        </button>
+-                    </div>
+                 </form>
++                </div>
++                <div class="modal-footer">
++                    <button type="button" onclick="closeProfileModal()" class="btn btn-secondary">Cancel</button>
++                    <button type="submit" onclick="document.getElementById('profileForm').requestSubmit()" class="btn btn-primary">Save Profile</button>
++                </div>
+             </div>
+         </div>
+ 
+         <!-- Scan Root Modal -->
+-        <div id="scanRootModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+-            <div class="bg-gray-800 rounded-lg p-6 max-w-xl w-full">
+-                <div class="flex justify-between items-center mb-6">
+-                    <h3 class="text-xl font-bold" id="scanRootModalTitle">Add Scan Root</h3>
+-                    <button onclick="closeScanRootModal()" class="text-gray-400 hover:text-white">✕</button>
++        <div id="scanRootModal" class="modal-backdrop hidden">
++            <div class="modal-panel" style="max-width:580px">
++                <div class="modal-header">
++                    <h3 class="modal-title" id="scanRootModalTitle">Add Scan Root</h3>
++                    <button onclick="closeScanRootModal()" class="modal-close">✕</button>
+                 </div>
+-                
++                <div class="modal-body">
+                 <form id="scanRootForm" class="space-y-4">
+                     <input type="hidden" id="scanRootId">
+                     
+@@ -1069,39 +1057,34 @@
+                         </div><!-- /upscaleSection -->
+                     </div><!-- /collapsible wrapper -->
+                     
+-                    <div class="flex justify-end gap-3 pt-4">
+-                        <button type="button" onclick="closeScanRootModal()" 
+-                            class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded">
+-                            Cancel
+-                        </button>
+-                        <button type="submit" 
+-                            class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded">
+-                            Save Scan Root
+-                        </button>
+-                    </div>
+                 </form>
++                </div>
++                <div class="modal-footer">
++                    <button type="button" onclick="closeScanRootModal()" class="btn btn-secondary">Cancel</button>
++                    <button type="submit" onclick="document.getElementById('scanRootForm').requestSubmit()" class="btn btn-primary">Save Scan Root</button>
++                </div>
+             </div>
+         </div>
+ 
+         <!-- Folder Browser Modal -->
+-        <div id="folderBrowserModal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[60]">
+-            <div class="bg-gray-800 rounded-lg p-6 max-w-lg w-full max-h-[80vh] flex flex-col">
+-                <div class="flex justify-between items-center mb-4">
+-                    <h3 class="text-xl font-bold">Browse Server Directories</h3>
+-                    <button onclick="closeFolderBrowser()" class="text-gray-400 hover:text-white">✕</button>
+-                </div>
+-                <div class="flex items-center gap-2 mb-4 p-2 bg-gray-900 rounded text-sm">
+-                    <span class="text-gray-400">Path:</span>
+-                    <span id="folderBrowserPath" class="text-blue-400 truncate" data-current-path="">Root</span>
++        <div id="folderBrowserModal" class="modal-backdrop hidden" style="z-index:110">
++            <div class="modal-panel" style="max-width:560px;max-height:70vh">
++                <div class="modal-header">
++                    <h3 class="modal-title">Browse Server Directories</h3>
++                    <button onclick="closeFolderBrowser()" class="modal-close">✕</button>
+                 </div>
+-                <div id="folderBrowserList" class="flex-1 overflow-y-auto bg-gray-700 rounded p-2 mb-4 min-h-[300px] max-h-[400px]">
+-                    <p class="text-gray-400 p-4">Loading...</p>
++                <div class="modal-body" style="padding:0">
++                    <div style="padding:12px 22px;border-bottom:1px solid var(--border-subtle);display:flex;align-items:center;gap:8px">
++                        <span style="font-size:12px;color:var(--text-muted)">Path:</span>
++                        <code id="folderBrowserPath" style="font-size:13px;color:var(--accent)" data-current-path="">Root</code>
++                    </div>
++                    <div id="folderBrowserList" style="max-height:400px;overflow-y:auto;padding:8px">
++                        <p class="text-gray-400 p-4">Loading...</p>
++                    </div>
+                 </div>
+-                <div class="flex justify-end gap-3">
+-                    <button onclick="closeFolderBrowser()"
+-                        class="bg-gray-700 hover:bg-gray-600 px-4 py-2 rounded">Cancel</button>
+-                    <button onclick="selectCurrentFolder()"
+-                        class="bg-blue-600 hover:bg-blue-700 px-4 py-2 rounded">Select This Folder</button>
++                <div class="modal-footer">
++                    <button onclick="closeFolderBrowser()" class="btn btn-secondary">Cancel</button>
++                    <button onclick="selectCurrentFolder()" class="btn btn-primary">Select Folder</button>
+                 </div>
+             </div>
+         </div>
+@@ -1136,9 +1119,13 @@
+         </div>
+         
+         <!-- Watch Modal -->
+-        <div id="watchModal" class="fixed inset-0 bg-black bg-opacity-50 hidden flex items-center justify-center z-50">
+-            <div class="bg-gray-800 rounded-lg p-6 w-full max-w-lg">
+-                <h3 id="watchModalTitle" class="text-xl font-bold mb-4">Add Folder Watch</h3>
++        <div id="watchModal" class="modal-backdrop hidden">
++            <div class="modal-panel" style="max-width:540px">
++                <div class="modal-header">
++                    <h3 class="modal-title" id="watchModalTitle">Add Folder Watch</h3>
++                    <button onclick="closeWatchModal()" class="modal-close">✕</button>
++                </div>
++                <div class="modal-body">
+                 <form id="watchForm" onsubmit="saveWatch(event)">
+                     <input type="hidden" id="watchId">
+                     
+@@ -1150,7 +1137,7 @@
+                                     class="flex-1 bg-gray-700 border border-gray-600 rounded px-4 py-2"
+                                     placeholder="/path/to/media/folder">
+                                 <button type="button" onclick="openFolderBrowser('watchPath')" 
+-                                    class="bg-gray-600 hover:bg-gray-500 px-3 py-2 rounded">📁</button>
++                                    class="btn btn-secondary">📁</button>
+                             </div>
+                         </div>
+                         
+@@ -1183,14 +1170,12 @@
+                             </label>
+                         </div>
+                     </div>
+-                    
+-                    <div class="flex justify-end gap-3 pt-4">
+-                        <button type="button" onclick="closeWatchModal()" 
+-                            class="bg-gray-700 hover:bg-gray-600 px-6 py-2 rounded">Cancel</button>
+-                        <button type="submit" 
+-                            class="bg-blue-600 hover:bg-blue-700 px-6 py-2 rounded">Save Watch</button>
+-                    </div>
+                 </form>
++                </div>
++                <div class="modal-footer">
++                    <button type="button" onclick="closeWatchModal()" class="btn btn-secondary">Cancel</button>
++                    <button type="submit" onclick="document.getElementById('watchForm').requestSubmit()" class="btn btn-primary">Save Watch</button>
++                </div>
+             </div>
+         </div>
+ 
