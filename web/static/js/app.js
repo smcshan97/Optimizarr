@@ -302,10 +302,10 @@ function toggleSort(field) {
 
 // Get sort arrow indicator
 function sortArrow(field) {
-    if (queueSortField !== field) return '<span class="text-gray-600 ml-1">⇅</span>';
+    if (queueSortField !== field) return '<span style="color:var(--text-muted);margin-left:4px">⇅</span>';
     return queueSortDir === 'asc' 
-        ? '<span class="text-blue-400 ml-1">▲</span>' 
-        : '<span class="text-blue-400 ml-1">▼</span>';
+        ? '<span style="color:var(--accent);margin-left:4px">▲</span>' 
+        : '<span style="color:var(--accent);margin-left:4px">▼</span>';
 }
 
 // Extract spec value from current_specs JSON
@@ -405,7 +405,7 @@ function displayQueueItems(items) {
     const container = document.getElementById('queueTable');
 
     if (!items || items.length === 0) {
-        container.innerHTML = '<p class="text-gray-400">No items in queue. Click "Scan All" to find media files.</p>';
+        container.innerHTML = '<p style="color:var(--text-muted);padding:20px 0">No items in queue. Click "Scan All" to find media files.</p>';
         document.getElementById('bulkActionsBar').classList.add('hidden');
         return;
     }
@@ -422,48 +422,32 @@ function displayQueueItems(items) {
     const savingsPct = totalSize > 0 ? ((totalSavings / totalSize) * 100).toFixed(1) : 0;
 
     let html = `
-        <div class="flex gap-4 mb-4 text-xs text-gray-400 flex-wrap">
-            <span>Total: <strong class="text-gray-200">${items.length}</strong></span>
-            ${counts.processing ? `<span class="text-blue-400">⚙️ Processing: ${counts.processing}</span>` : ''}
-            ${counts.pending ? `<span class="text-yellow-400">⏳ Pending: ${counts.pending}</span>` : ''}
-            ${counts.completed ? `<span class="text-green-400">✅ Completed: ${counts.completed}</span>` : ''}
-            ${counts.failed ? `<span class="text-red-400">❌ Failed: ${counts.failed}</span>` : ''}
-            ${counts.paused ? `<span class="text-orange-400">⏸️ Paused: ${counts.paused}</span>` : ''}
-            <span class="ml-auto">Size: <strong class="text-gray-200">${formatSize(totalSize)}</strong></span>
-            <span>Projected Savings: <strong class="text-green-400">${formatSize(totalSavings)} (${savingsPct}%)</strong></span>
+        <div class="flex gap-4 mb-4 flex-wrap" style="font-size:12px;color:var(--text-muted)">
+            <span>Total: <strong style="color:var(--text-primary)">${items.length}</strong></span>
+            ${counts.processing ? `<span style="color:var(--info)">⚙️ Processing: ${counts.processing}</span>` : ''}
+            ${counts.pending ? `<span style="color:var(--warning)">⏳ Pending: ${counts.pending}</span>` : ''}
+            ${counts.completed ? `<span style="color:var(--success)">✅ Completed: ${counts.completed}</span>` : ''}
+            ${counts.failed ? `<span style="color:var(--danger)">❌ Failed: ${counts.failed}</span>` : ''}
+            ${counts.paused ? `<span style="color:#e67e22">⏸️ Paused: ${counts.paused}</span>` : ''}
+            <span style="margin-left:auto">Size: <strong style="color:var(--text-primary)">${formatSize(totalSize)}</strong></span>
+            <span>Projected Savings: <strong style="color:var(--success)">${formatSize(totalSavings)} (${savingsPct}%)</strong></span>
         </div>
-        <table class="w-full text-sm">
-            <thead class="border-b border-gray-600">
-                <tr class="text-left text-gray-400 text-xs uppercase tracking-wider">
-                    <th class="py-2 px-1 w-8">
+        <table class="tbl">
+            <thead>
+                <tr>
+                    <th class="w-8" style="cursor:default">
                         <input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll(this)" title="Select All">
                     </th>
-                    <th class="py-2 px-2 cursor-pointer hover:text-white select-none" onclick="toggleSort('file')">
-                        File ${sortArrow('file')}
-                    </th>
-                    <th class="py-2 px-2 cursor-pointer hover:text-white select-none" onclick="toggleSort('codec')">
-                        Codec ${sortArrow('codec')}
-                    </th>
-                    <th class="py-2 px-2 cursor-pointer hover:text-white select-none" onclick="toggleSort('resolution')">
-                        Resolution ${sortArrow('resolution')}
-                    </th>
-                    <th class="py-2 px-2 cursor-pointer hover:text-white select-none" onclick="toggleSort('size')">
-                        Size ${sortArrow('size')}
-                    </th>
-                    <th class="py-2 px-2 cursor-pointer hover:text-white select-none" onclick="toggleSort('savings')">
-                        Savings ${sortArrow('savings')}
-                    </th>
-                    <th class="py-2 px-2 cursor-pointer hover:text-white select-none" onclick="toggleSort('status')">
-                        Status ${sortArrow('status')}
-                    </th>
-                    <th class="py-2 px-2 cursor-pointer hover:text-white select-none min-w-[180px]" onclick="toggleSort('progress')">
-                        Progress ${sortArrow('progress')}
-                    </th>
-                    <th class="py-2 px-2 cursor-pointer hover:text-white select-none" onclick="toggleSort('priority')">
-                        Priority ${sortArrow('priority')}
-                    </th>
-                    <th class="py-2 px-2">Profile</th>
-                    <th class="py-2 px-2">Actions</th>
+                    <th onclick="toggleSort('file')">File ${sortArrow('file')}</th>
+                    <th onclick="toggleSort('codec')">Codec ${sortArrow('codec')}</th>
+                    <th onclick="toggleSort('resolution')">Resolution ${sortArrow('resolution')}</th>
+                    <th onclick="toggleSort('size')">Size ${sortArrow('size')}</th>
+                    <th onclick="toggleSort('savings')">Savings ${sortArrow('savings')}</th>
+                    <th onclick="toggleSort('status')">Status ${sortArrow('status')}</th>
+                    <th onclick="toggleSort('progress')" style="min-width:180px">Progress ${sortArrow('progress')}</th>
+                    <th onclick="toggleSort('priority')">Priority ${sortArrow('priority')}</th>
+                    <th style="cursor:default">Profile</th>
+                    <th style="cursor:default">Actions</th>
                 </tr>
             </thead>
             <tbody>
@@ -585,7 +569,7 @@ function displayQueueItems(items) {
                 </td>
                 <td class="py-2 px-2">
                     <button onclick="deleteQueueItem(${item.id})"
-                        class="text-red-400 hover:text-red-300 text-xs">Delete</button>
+                        class="btn btn-danger btn-xs">Delete</button>
                 </td>
             </tr>
         `;
