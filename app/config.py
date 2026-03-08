@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     host: str = "0.0.0.0"
     port: int = 5000
     log_level: str = "INFO"
+    cors_origins: str = ""  # Comma-separated origins, e.g. "http://localhost:3000,https://myapp.com"
     
     # Database
     db_path: str = "data/optimizarr.db"
