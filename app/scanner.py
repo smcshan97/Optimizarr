@@ -288,8 +288,6 @@ class MediaScanner:
 
             # ── Upscale plan ─────────────────────────────────────────────────
             import json as _json
-            # ── Upscale plan ─────────────────────────────────────────────────
-            import json as _json
             upscale_plan = None
             # Priority: scan_root upscale settings > profile upscale settings
             if scan_root.get('upscale_enabled'):
