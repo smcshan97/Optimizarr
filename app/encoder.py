@@ -479,7 +479,6 @@ class EncodingJob:
             if upscale_temp:
                 from app.upscaler import cleanup_upscale_workdir
                 cleanup_upscale_workdir(upscale_temp)
-            return False
     
     def _finalize_encoding(self):
         """Replace original file with encoded version and update database."""
