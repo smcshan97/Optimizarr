@@ -17,18 +17,27 @@ class Database:
     
     def __init__(self, db_path: str = None):
         self.db_path = db_path or settings.db_path
+        self._write_lock = __import__('threading').Lock()
         
         # CRITICAL: Ensure directory exists before trying to connect
         db_file = Path(self.db_path)
         db_file.parent.mkdir(parents=True, exist_ok=True)
         
+        # Enable WAL mode once at startup for concurrent read/write safety
+        _conn = sqlite3.connect(self.db_path)
+        _conn.execute("PRAGMA journal_mode=WAL")
+        _conn.execute("PRAGMA busy_timeout = 5000")
+        _conn.close()
+        
         self.initialize_database()
     
     @contextmanager
     def get_connection(self):
-        """Context manager for database connections."""
+        """Context manager for database connections with thread-safe writes."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row  # Enable dict-like access
+        conn.execute("PRAGMA busy_timeout = 5000")
+        self._write_lock.acquire()
         try:
             yield conn
             conn.commit()
@@ -36,6 +45,7 @@ class Database:
             conn.rollback()
             raise e
         finally:
+            self._write_lock.release()
             conn.close()
     
     def initialize_database(self):
