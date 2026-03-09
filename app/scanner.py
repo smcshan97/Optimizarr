@@ -283,7 +283,8 @@ class MediaScanner:
                 file_size,
                 current_specs.get('codec', 'unknown'),
                 target_specs.get('codec', 'unknown'),
-                current_specs=current_specs
+                current_specs=current_specs,
+                profile=profile,
             )
 
             # ── Upscale plan ─────────────────────────────────────────────────
@@ -330,10 +331,14 @@ class MediaScanner:
         return added_count
 
     def _estimate_savings(self, file_size: int, current_codec: str, target_codec: str,
-                          current_specs: Dict = None) -> int:
+                          current_specs: Dict = None, profile: Dict = None) -> int:
         """
         Estimate post-encode savings using actual bitrate when available,
         falling back to conservative codec-efficiency ratios.
+
+        When a profile is provided, adjusts the estimate based on the
+        quality (CRF) setting relative to the reference CRF used to
+        calibrate the codec efficiency ratios.
 
         Codec efficiency ratios are derived from published encoder benchmarks
         (x265 vs x264 SSIM curves, AOM AV1 vs HEVC, etc.) and represent
@@ -377,6 +382,40 @@ class MediaScanner:
         if ratio is None:
             # Encoding to same generation or unknown pair — assume no gain
             return 0
+
+        # ── Quality multiplier: adjust ratio based on CRF vs reference ──
+        # Reference CRFs are the values at which the EFFICIENCY ratios above
+        # were calibrated.  Lower CRF = higher quality = larger output.
+        if profile and profile.get('quality') is not None:
+            REFERENCE_CRF = {'av1': 30, 'h265': 24, 'h264': 23}
+            ref_crf = REFERENCE_CRF.get(target_codec)
+            if ref_crf is not None:
+                try:
+                    quality = float(profile['quality'])
+                    # Each CRF step away from reference shifts output size ~3-4%
+                    slope = 0.03 if target_codec == 'av1' else 0.04
+                    quality_mult = 1.0 + (ref_crf - quality) * slope
+                    quality_mult = max(0.5, min(quality_mult, 1.5))
+                    ratio = ratio * quality_mult
+                    # Clamp ratio: output can't be <10% or >100% of input
+                    ratio = max(0.10, min(ratio, 1.0))
+                except (ValueError, TypeError):
+                    pass
+
+        # ── Resolution multiplier: scaling down reduces size further ─────
+        if profile and profile.get('resolution') and current_specs.get('resolution'):
+            try:
+                src_res = current_specs['resolution']
+                tgt_res = profile['resolution']
+                if tgt_res and tgt_res not in ('', 'preserve') and 'x' in src_res and 'x' in tgt_res:
+                    src_pixels = int(src_res.split('x')[0]) * int(src_res.split('x')[1])
+                    tgt_pixels = int(tgt_res.split('x')[0]) * int(tgt_res.split('x')[1])
+                    if src_pixels > 0 and tgt_pixels < src_pixels:
+                        res_mult = tgt_pixels / src_pixels
+                        ratio = ratio * max(0.25, res_mult)
+                        ratio = max(0.10, min(ratio, 1.0))
+            except (ValueError, IndexError):
+                pass
 
         # ── Use actual bitrate if available ──────────────────────────────
         # ffprobe stores it as 'bit_rate', we also accept 'bitrate' as alias
