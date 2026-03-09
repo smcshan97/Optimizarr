@@ -331,6 +331,45 @@ class Database:
                     cursor.execute(f"ALTER TABLE profiles ADD COLUMN {col_name} {col_def}")
                     print(f"  ↳ Migrated: added '{col_name}' to profiles")
 
+            # profiles: 3D / stereo conversion settings per profile
+            cursor.execute("PRAGMA table_info(profiles)")
+            profile_cols_stereo = [col[1] for col in cursor.fetchall()]
+            profile_stereo_migrations = [
+                ("stereo_enabled",     "BOOLEAN DEFAULT 0"),
+                ("stereo_mode",        "TEXT DEFAULT '2d_to_3d'"),
+                ("stereo_format",      "TEXT DEFAULT 'half_sbs'"),
+                ("stereo_divergence",  "REAL DEFAULT 2.0"),
+                ("stereo_convergence", "REAL DEFAULT 0.5"),
+                ("stereo_depth_model", "TEXT DEFAULT 'Any_V2_S'"),
+            ]
+            for col_name, col_def in profile_stereo_migrations:
+                if col_name not in profile_cols_stereo:
+                    cursor.execute(f"ALTER TABLE profiles ADD COLUMN {col_name} {col_def}")
+                    print(f"  ↳ Migrated: added '{col_name}' to profiles")
+
+            # scan_roots: 3D / stereo conversion settings per library
+            cursor.execute("PRAGMA table_info(scan_roots)")
+            root_cols_stereo = [col[1] for col in cursor.fetchall()]
+            scanroot_stereo_migrations = [
+                ("stereo_enabled",     "BOOLEAN DEFAULT 0"),
+                ("stereo_mode",        "TEXT DEFAULT '2d_to_3d'"),
+                ("stereo_format",      "TEXT DEFAULT 'half_sbs'"),
+                ("stereo_divergence",  "REAL DEFAULT 2.0"),
+                ("stereo_convergence", "REAL DEFAULT 0.5"),
+                ("stereo_depth_model", "TEXT DEFAULT 'Any_V2_S'"),
+            ]
+            for col_name, col_def in scanroot_stereo_migrations:
+                if col_name not in root_cols_stereo:
+                    cursor.execute(f"ALTER TABLE scan_roots ADD COLUMN {col_name} {col_def}")
+                    print(f"  ↳ Migrated: added '{col_name}' to scan_roots")
+
+            # queue: stereo_plan stores the per-item stereo conversion JSON
+            cursor.execute("PRAGMA table_info(queue)")
+            queue_cols_stereo = [col[1] for col in cursor.fetchall()]
+            if 'stereo_plan' not in queue_cols_stereo:
+                cursor.execute("ALTER TABLE queue ADD COLUMN stereo_plan TEXT")
+                print("  ↳ Migrated: added 'stereo_plan' to queue")
+
             # Enforce single default profile — keep only the lowest-id one
             cursor.execute("SELECT id FROM profiles WHERE is_default = 1 ORDER BY id")
             default_rows = cursor.fetchall()
@@ -355,8 +394,10 @@ class Database:
                  container, audio_handling, subtitle_handling, enable_filters,
                  chapter_markers, hw_accel_enabled, preset, two_pass, custom_args, is_default,
                  upscale_enabled, upscale_trigger_below, upscale_target_height,
-                 upscale_model, upscale_factor, upscale_key)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 upscale_model, upscale_factor, upscale_key,
+                 stereo_enabled, stereo_mode, stereo_format,
+                 stereo_divergence, stereo_convergence, stereo_depth_model)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 kwargs.get('name'),
                 kwargs.get('resolution'),
@@ -381,6 +422,12 @@ class Database:
                 kwargs.get('upscale_model', 'realesrgan-x4plus'),
                 kwargs.get('upscale_factor', 2),
                 kwargs.get('upscale_key', 'realesrgan'),
+                kwargs.get('stereo_enabled', False),
+                kwargs.get('stereo_mode', '2d_to_3d'),
+                kwargs.get('stereo_format', 'half_sbs'),
+                kwargs.get('stereo_divergence', 2.0),
+                kwargs.get('stereo_convergence', 0.5),
+                kwargs.get('stereo_depth_model', 'Any_V2_S'),
             ))
             return cursor.lastrowid
     
@@ -403,6 +450,8 @@ class Database:
                 'hw_accel_enabled', 'preset', 'two_pass', 'custom_args', 'is_default',
                 'upscale_enabled', 'upscale_trigger_below', 'upscale_target_height',
                 'upscale_model', 'upscale_factor', 'upscale_key',
+                'stereo_enabled', 'stereo_mode', 'stereo_format',
+                'stereo_divergence', 'stereo_convergence', 'stereo_depth_model',
             ]
             
             for field in allowed_fields:
@@ -445,7 +494,10 @@ class Database:
                         enabled: bool = True, recursive: bool = True, show_in_stats: bool = True,
                         upscale_enabled: bool = False, upscale_trigger_below: int = 720,
                         upscale_target_height: int = 1080, upscale_model: str = "realesrgan-x4plus",
-                        upscale_factor: int = 2, upscale_key: str = "realesrgan") -> int:
+                        upscale_factor: int = 2, upscale_key: str = "realesrgan",
+                        stereo_enabled: bool = False, stereo_mode: str = "2d_to_3d",
+                        stereo_format: str = "half_sbs", stereo_divergence: float = 2.0,
+                        stereo_convergence: float = 0.5, stereo_depth_model: str = "Any_V2_S") -> int:
         """Create a new scan root."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -453,11 +505,15 @@ class Database:
                 INSERT INTO scan_roots
                     (path, profile_id, library_type, enabled, recursive, show_in_stats,
                      upscale_enabled, upscale_trigger_below, upscale_target_height,
-                     upscale_model, upscale_factor, upscale_key)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     upscale_model, upscale_factor, upscale_key,
+                     stereo_enabled, stereo_mode, stereo_format,
+                     stereo_divergence, stereo_convergence, stereo_depth_model)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (path, profile_id, library_type, enabled, recursive, show_in_stats,
                   upscale_enabled, upscale_trigger_below, upscale_target_height,
-                  upscale_model, upscale_factor, upscale_key))
+                  upscale_model, upscale_factor, upscale_key,
+                  stereo_enabled, stereo_mode, stereo_format,
+                  stereo_divergence, stereo_convergence, stereo_depth_model))
             return cursor.lastrowid
     
     def get_scan_roots(self, enabled_only: bool = False) -> List[Dict]:
@@ -483,7 +539,10 @@ class Database:
                         show_in_stats: bool = None, upscale_enabled: bool = None,
                         upscale_trigger_below: int = None, upscale_target_height: int = None,
                         upscale_model: str = None, upscale_factor: int = None,
-                        upscale_key: str = None) -> bool:
+                        upscale_key: str = None, stereo_enabled: bool = None,
+                        stereo_mode: str = None, stereo_format: str = None,
+                        stereo_divergence: float = None, stereo_convergence: float = None,
+                        stereo_depth_model: str = None) -> bool:
         """Update a scan root."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -503,6 +562,12 @@ class Database:
                 "upscale_model":          upscale_model,
                 "upscale_factor":         upscale_factor,
                 "upscale_key":            upscale_key,
+                "stereo_enabled":         stereo_enabled,
+                "stereo_mode":            stereo_mode,
+                "stereo_format":          stereo_format,
+                "stereo_divergence":      stereo_divergence,
+                "stereo_convergence":     stereo_convergence,
+                "stereo_depth_model":     stereo_depth_model,
             }
             for col, val in field_map.items():
                 if val is not None:
@@ -533,8 +598,9 @@ class Database:
             cursor.execute("""
                 INSERT INTO queue 
                 (file_path, root_id, profile_id, status, priority, current_specs, 
-                 target_specs, file_size_bytes, estimated_savings_bytes, upscale_plan)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 target_specs, file_size_bytes, estimated_savings_bytes, upscale_plan,
+                 stereo_plan)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 kwargs.get('file_path'),
                 kwargs.get('root_id'),
@@ -546,6 +612,7 @@ class Database:
                 kwargs.get('file_size_bytes', 0),
                 kwargs.get('estimated_savings_bytes', 0),
                 kwargs.get('upscale_plan'),
+                kwargs.get('stereo_plan'),
             ))
             return cursor.lastrowid
     
