@@ -569,6 +569,21 @@ class Database:
                 items.append(item)
             return items
     
+    def get_queue_item(self, item_id: int) -> Optional[Dict]:
+        """Get a single queue item by ID."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM queue WHERE id = ?", (item_id,))
+            row = cursor.fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            if item.get('current_specs'):
+                item['current_specs'] = json.loads(item['current_specs'])
+            if item.get('target_specs'):
+                item['target_specs'] = json.loads(item['target_specs'])
+            return item
+    
     def update_queue_item(self, item_id: int, **kwargs):
         """Update a queue item."""
         with self.get_connection() as conn:

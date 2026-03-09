@@ -41,8 +41,7 @@ class EncodingJob:
         }
         
         # Get queue item details
-        queue_items = db.get_queue_items()
-        self.queue_item = next((item for item in queue_items if item['id'] == queue_item_id), None)
+        self.queue_item = db.get_queue_item(queue_item_id)
         
         if not self.queue_item:
             raise ValueError(f"Queue item {queue_item_id} not found")
