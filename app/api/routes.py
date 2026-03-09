@@ -1569,6 +1569,23 @@ def _sync_connection_task(conn_id: int):
                     "target_height": t_h,
                 })
 
+        # Evaluate stereo eligibility: linked scan root > profile fallback
+        stereo_plan    = None
+        stereo_source  = None
+        if linked_root and linked_root.get("stereo_enabled"):
+            stereo_source = linked_root
+        elif profile.get("stereo_enabled"):
+            stereo_source = profile
+        if stereo_source:
+            stereo_plan = _json.dumps({
+                "enabled":     True,
+                "mode":        stereo_source.get("stereo_mode", "2d_to_3d"),
+                "format":      stereo_source.get("stereo_format", "half_sbs"),
+                "divergence":  stereo_source.get("stereo_divergence", 2.0),
+                "convergence": stereo_source.get("stereo_convergence", 0.5),
+                "depth_model": stereo_source.get("stereo_depth_model", "Any_V2_S"),
+            })
+
         db.add_to_queue(
             file_path=path,
             root_id=root_id,
@@ -1585,6 +1602,7 @@ def _sync_connection_task(conn_id: int):
                 profile=profile,
             ),
             upscale_plan=upscale_plan,
+            stereo_plan=stereo_plan,
         )
         added += 1
 
@@ -1739,6 +1757,23 @@ async def receive_webhook(app_type: str, payload: dict):
                 "target_height": t_h,
             })
 
+    # Evaluate stereo eligibility: linked scan root > profile fallback
+    stereo_plan    = None
+    stereo_source  = None
+    if linked_root and linked_root.get("stereo_enabled"):
+        stereo_source = linked_root
+    elif profile.get("stereo_enabled"):
+        stereo_source = profile
+    if stereo_source:
+        stereo_plan = _json.dumps({
+            "enabled":     True,
+            "mode":        stereo_source.get("stereo_mode", "2d_to_3d"),
+            "format":      stereo_source.get("stereo_format", "half_sbs"),
+            "divergence":  stereo_source.get("stereo_divergence", 2.0),
+            "convergence": stereo_source.get("stereo_convergence", 0.5),
+            "depth_model": stereo_source.get("stereo_depth_model", "Any_V2_S"),
+        })
+
     db.add_to_queue(
         file_path=file_path,
         root_id=root_id,
@@ -1752,6 +1787,7 @@ async def receive_webhook(app_type: str, payload: dict):
             profile=profile,
         ),
         upscale_plan=upscale_plan,
+        stereo_plan=stereo_plan,
     )
 
     # Wake the encoder if it's not already running and schedule allows

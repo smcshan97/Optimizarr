@@ -317,16 +317,38 @@ class MediaScanner:
                         "target_height": target_height,
                     })
 
+            # ── Stereo plan ──────────────────────────────────────────────────
+            stereo_plan = None
+            # Priority: scan_root stereo settings > profile stereo settings
+            if scan_root.get('stereo_enabled'):
+                stereo_source = scan_root
+            elif profile.get('stereo_enabled'):
+                stereo_source = profile
+            else:
+                stereo_source = None
+
+            if stereo_source:
+                stereo_plan = _json.dumps({
+                    "enabled":     True,
+                    "mode":        stereo_source.get('stereo_mode', '2d_to_3d'),
+                    "format":      stereo_source.get('stereo_format', 'half_sbs'),
+                    "divergence":  stereo_source.get('stereo_divergence', 2.0),
+                    "convergence": stereo_source.get('stereo_convergence', 0.5),
+                    "depth_model": stereo_source.get('stereo_depth_model', 'Any_V2_S'),
+                })
+
             db.add_to_queue(
                 file_path=file_path, root_id=root_id, profile_id=scan_root['profile_id'],
                 status='pending' if perm_status == 'ok' else 'permission_error',
                 current_specs=current_specs, target_specs=target_specs,
                 file_size_bytes=file_size, estimated_savings_bytes=savings,
                 upscale_plan=upscale_plan,
+                stereo_plan=stereo_plan,
             )
             upscale_tag = " 🔼upscale" if upscale_plan else ""
+            stereo_tag = " 🎥3D" if stereo_plan else ""
             added_count += 1
-            print(f"  + Added: {Path(file_path).name} [{current_specs.get('codec','?')} {current_specs.get('resolution','?')}]{upscale_tag}")
+            print(f"  + Added: {Path(file_path).name} [{current_specs.get('codec','?')} {current_specs.get('resolution','?')}]{upscale_tag}{stereo_tag}")
         print(f"✓ Added {added_count} files to queue")
         return added_count
 

@@ -190,6 +190,26 @@ class FolderWatcher:
                             'target_height': t_h,
                         })
 
+                # Stereo eligibility: scan root settings > profile settings
+                stereo_plan    = None
+                stereo_source  = None
+                for root in db.get_scan_roots():
+                    if root.get('enabled') and root.get('profile_id') == watch['profile_id'] and root.get('stereo_enabled'):
+                        stereo_source = root
+                        break
+                if stereo_source is None and profile.get('stereo_enabled'):
+                    stereo_source = profile
+
+                if stereo_source:
+                    stereo_plan = _json.dumps({
+                        'enabled':     True,
+                        'mode':        stereo_source.get('stereo_mode', '2d_to_3d'),
+                        'format':      stereo_source.get('stereo_format', 'half_sbs'),
+                        'divergence':  stereo_source.get('stereo_divergence', 2.0),
+                        'convergence': stereo_source.get('stereo_convergence', 0.5),
+                        'depth_model': stereo_source.get('stereo_depth_model', 'Any_V2_S'),
+                    })
+
                 db.add_to_queue(
                     file_path=file_path,
                     root_id=None,
@@ -200,6 +220,7 @@ class FolderWatcher:
                     file_size_bytes=file_size,
                     estimated_savings_bytes=savings,
                     upscale_plan=upscale_plan,
+                    stereo_plan=stereo_plan,
                 )
                 queued_count += 1
 
