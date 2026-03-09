@@ -114,6 +114,20 @@ class ProfileCreate(BaseModel):
     two_pass: bool = False
     custom_args: Optional[str] = None
     is_default: bool = False
+    # AI upscale settings
+    upscale_enabled: bool = False
+    upscale_trigger_below: int = 720
+    upscale_target_height: int = 1080
+    upscale_model: str = "realesrgan-x4plus"
+    upscale_factor: int = 2
+    upscale_key: str = "realesrgan"
+    # 3D / stereo conversion settings
+    stereo_enabled: bool = False
+    stereo_mode: str = Field(default="2d_to_3d", pattern="^(2d_to_3d|3d_to_2d)$")
+    stereo_format: str = Field(default="half_sbs", pattern="^(half_sbs|sbs|half_tb|tb|vr180|anaglyph)$")
+    stereo_divergence: float = Field(default=2.0, ge=0.0, le=5.0)
+    stereo_convergence: float = Field(default=0.5, ge=0.0, le=1.0)
+    stereo_depth_model: str = "Any_V2_S"
 
 
 class ProfileResponse(BaseModel):
@@ -136,6 +150,20 @@ class ProfileResponse(BaseModel):
     custom_args: Optional[str]
     is_default: bool
     created_at: Optional[str]
+    # AI upscale settings
+    upscale_enabled: Optional[bool] = False
+    upscale_trigger_below: Optional[int] = 720
+    upscale_target_height: Optional[int] = 1080
+    upscale_model: Optional[str] = "realesrgan-x4plus"
+    upscale_factor: Optional[int] = 2
+    upscale_key: Optional[str] = "realesrgan"
+    # 3D / stereo conversion settings
+    stereo_enabled: Optional[bool] = False
+    stereo_mode: Optional[str] = "2d_to_3d"
+    stereo_format: Optional[str] = "half_sbs"
+    stereo_divergence: Optional[float] = 2.0
+    stereo_convergence: Optional[float] = 0.5
+    stereo_depth_model: Optional[str] = "Any_V2_S"
 
 
 # ============================================================
@@ -156,6 +184,13 @@ class ScanRootCreate(BaseModel):
     upscale_model: str = "realesrgan-x4plus"
     upscale_factor: int = 2
     upscale_key: str = "realesrgan"
+    # 3D / stereo conversion settings
+    stereo_enabled: bool = False
+    stereo_mode: str = Field(default="2d_to_3d", pattern="^(2d_to_3d|3d_to_2d)$")
+    stereo_format: str = Field(default="half_sbs", pattern="^(half_sbs|sbs|half_tb|tb|vr180|anaglyph)$")
+    stereo_divergence: float = Field(default=2.0, ge=0.0, le=5.0)
+    stereo_convergence: float = Field(default=0.5, ge=0.0, le=1.0)
+    stereo_depth_model: str = "Any_V2_S"
 
 
 class ScanRootResponse(BaseModel):
@@ -173,6 +208,13 @@ class ScanRootResponse(BaseModel):
     upscale_model: Optional[str] = "realesrgan-x4plus"
     upscale_factor: Optional[int] = 2
     upscale_key: Optional[str] = "realesrgan"
+    # 3D / stereo conversion settings
+    stereo_enabled: Optional[bool] = False
+    stereo_mode: Optional[str] = "2d_to_3d"
+    stereo_format: Optional[str] = "half_sbs"
+    stereo_divergence: Optional[float] = 2.0
+    stereo_convergence: Optional[float] = 0.5
+    stereo_depth_model: Optional[str] = "Any_V2_S"
 
 
 # ============================================================
@@ -201,6 +243,7 @@ class QueueItemResponse(BaseModel):
     completed_at: Optional[str]
     created_at: Optional[str]
     upscale_plan: Optional[str] = None
+    stereo_plan: Optional[str] = None
 
 
 class QueueUpdateRequest(BaseModel):

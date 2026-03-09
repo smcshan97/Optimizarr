@@ -108,6 +108,12 @@ async def update_profile(
         upscale_model=profile.upscale_model,
         upscale_factor=profile.upscale_factor,
         upscale_key=profile.upscale_key,
+        stereo_enabled=profile.stereo_enabled,
+        stereo_mode=profile.stereo_mode,
+        stereo_format=profile.stereo_format,
+        stereo_divergence=profile.stereo_divergence,
+        stereo_convergence=profile.stereo_convergence,
+        stereo_depth_model=profile.stereo_depth_model,
     )
     
     if success:
@@ -239,6 +245,12 @@ async def update_scan_root(
         upscale_model=root_data.upscale_model,
         upscale_factor=root_data.upscale_factor,
         upscale_key=root_data.upscale_key,
+        stereo_enabled=root_data.stereo_enabled,
+        stereo_mode=root_data.stereo_mode,
+        stereo_format=root_data.stereo_format,
+        stereo_divergence=root_data.stereo_divergence,
+        stereo_convergence=root_data.stereo_convergence,
+        stereo_depth_model=root_data.stereo_depth_model,
     )
     
     if success:
@@ -1002,6 +1014,28 @@ async def detect_upscalers_endpoint(current_user: dict = Depends(get_current_use
     """Re-detect available AI upscalers."""
     from app.upscaler import detect_upscalers
     return detect_upscalers()
+
+
+# Stereo 3D Endpoints
+@router.get("/stereo/detect")
+async def detect_stereo(current_user: dict = Depends(get_current_user)):
+    """Detect iw3 and ffmpeg availability for stereo 3D conversion."""
+    from app.stereo import get_stereo_info
+    return get_stereo_info()
+
+
+@router.get("/stereo/depth-models")
+async def get_depth_models(current_user: dict = Depends(get_current_user)):
+    """Get available depth estimation models for 2D→3D conversion."""
+    from app.stereo import DEPTH_MODELS
+    return DEPTH_MODELS
+
+
+@router.get("/stereo/formats")
+async def get_stereo_formats(current_user: dict = Depends(get_current_user)):
+    """Get available stereo output formats."""
+    from app.stereo import STEREO_FORMATS
+    return {k: {"name": v["name"], "description": v["description"]} for k, v in STEREO_FORMATS.items()}
 
 
 # Schedule Endpoints
