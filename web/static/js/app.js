@@ -568,7 +568,7 @@ function displayQueueItems(items) {
                         onchange="toggleRowSelect(this, ${item.id})">
                 </td>
                 <td class="py-2 px-2 max-w-[220px] truncate" title="${tooltip}">
-                    <span class="text-gray-100">${fileName}</span>${item.upscale_plan ? ' <span class="text-blue-400 text-xs" title="AI upscaling queued">🔼</span>' : ''}
+                    <span class="text-gray-100">${fileName}</span>${item.upscale_plan ? ' <span class="text-blue-400 text-xs" title="AI upscaling queued">🔼</span>' : ''}${item.stereo_plan ? ' <span class="text-purple-400 text-xs" title="3D conversion queued">🎥</span>' : ''}
                 </td>
                 <td class="py-2 px-2"><span class="${codecColor} text-xs font-medium">${codec.toUpperCase()}</span></td>
                 <td class="py-2 px-2 text-xs text-gray-300">${resolution}${fps !== '-' ? ` <span class="text-gray-500">@ ${fps}fps</span>` : ''}</td>
@@ -790,6 +790,7 @@ async function loadProfiles() {
                         ${p.hw_accel_enabled ? '<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">GPU</span>' : ''}
                         ${p.two_pass ? '<span class="px-2 py-0.5 bg-yellow-900 text-yellow-300 text-xs rounded">2-Pass</span>' : ''}
                         ${p.upscale_enabled ? `<span class="px-2 py-0.5 bg-blue-900 text-blue-300 text-xs rounded" title="AI Upscale: ${p.upscale_key || 'realesrgan'} ×${p.upscale_factor || 2}, trigger below ${p.upscale_trigger_below || 720}px">🤖 Upscale ×${p.upscale_factor || 2}</span>` : ''}
+                        ${p.stereo_enabled ? `<span class="px-2 py-0.5 bg-purple-900 text-purple-300 text-xs rounded" title="3D: ${p.stereo_mode || '2d_to_3d'}, ${p.stereo_format || 'half_sbs'}, divergence ${p.stereo_divergence || 2.0}">🎥 ${p.stereo_mode === '3d_to_2d' ? '3D→2D' : '2D→3D'}</span>` : ''}
                     </div>
                 </div>
                 <div class="flex gap-2">
@@ -831,6 +832,16 @@ function showCreateProfileForm() {
     const upIcon = document.getElementById('profileUpscaleToggleIcon');
     if (upSec && !upSec.classList.contains('hidden')) upSec.classList.add('hidden');
     if (upIcon) upIcon.textContent = '▶';
+
+    // Reset stereo section to defaults and collapse it
+    _fillProfileStereoFields({
+        stereo_enabled: false, stereo_mode: '2d_to_3d', stereo_format: 'half_sbs',
+        stereo_divergence: 2.0, stereo_convergence: 0.5, stereo_depth_model: 'Any_V2_S',
+    });
+    const stSec  = document.getElementById('profileStereoSection');
+    const stIcon = document.getElementById('profileStereoToggleIcon');
+    if (stSec && !stSec.classList.contains('hidden')) stSec.classList.add('hidden');
+    if (stIcon) stIcon.textContent = '▶';
 
     // Initialize preset options for default encoder (svt_av1)
     updatePresetOptions();
@@ -880,6 +891,9 @@ async function editProfile(id) {
     // Populate AI upscale fields
     _fillProfileUpscaleFields(profile);
 
+    // Populate stereo fields
+    _fillProfileStereoFields(profile);
+
     // Update preset options based on encoder
     updatePresetOptions();
 
@@ -925,6 +939,13 @@ document.getElementById('profileForm').addEventListener('submit', async (e) => {
         upscale_key:           document.getElementById('profileUpscaleKey')?.value   || 'realesrgan',
         upscale_model:         document.getElementById('profileUpscaleModel')?.value || 'realesrgan-x4plus',
         upscale_factor:        parseInt(document.getElementById('profileUpscaleFactor')?.value)  || 2,
+        // 3D / stereo settings
+        stereo_enabled:       document.getElementById('profileStereoEnabled')?.checked ?? false,
+        stereo_mode:          document.getElementById('profileStereoMode')?.value || '2d_to_3d',
+        stereo_format:        document.getElementById('profileStereoFormat')?.value || 'half_sbs',
+        stereo_divergence:    parseFloat(document.getElementById('profileStereoDivergence')?.value) || 2.0,
+        stereo_convergence:   parseFloat(document.getElementById('profileStereoConvergence')?.value) || 0.5,
+        stereo_depth_model:   document.getElementById('profileStereoDepthModel')?.value || 'Any_V2_S',
     };
     
     const method = currentProfileId ? 'PUT' : 'POST';
@@ -1033,6 +1054,18 @@ async function showCreateScanRootForm() {
         if (icon) icon.textContent = '▶';
     }
 
+    // Reset stereo fields to defaults and collapse
+    _fillScanRootStereoFields({
+        stereo_enabled: false, stereo_mode: '2d_to_3d', stereo_format: 'half_sbs',
+        stereo_divergence: 2.0, stereo_convergence: 0.5, stereo_depth_model: 'Any_V2_S',
+    });
+    const stSection = document.getElementById('scanRootStereoSection');
+    const stIcon    = document.getElementById('scanRootStereoToggleIcon');
+    if (stSection && !stSection.classList.contains('hidden')) {
+        stSection.classList.add('hidden');
+        if (stIcon) stIcon.textContent = '▶';
+    }
+
     // Load profiles for dropdown
     const profiles = await apiRequest('/profiles');
     const select = document.getElementById('scanRootProfile');
@@ -1065,6 +1098,7 @@ async function editScanRoot(id) {
     document.getElementById('scanRootEnabled').checked = root.enabled;
     document.getElementById('scanRootShowInStats').checked = root.show_in_stats !== false;
     _fillUpscaleFields(root);
+    _fillScanRootStereoFields(root);
     
     document.getElementById('scanRootModal').classList.remove('hidden');
 }
@@ -1091,6 +1125,13 @@ document.getElementById('scanRootForm').addEventListener('submit', async (e) => 
         upscale_key:            document.getElementById('scanRootUpscaleKey')?.value    || 'realesrgan',
         upscale_model:          document.getElementById('scanRootUpscaleModel')?.value  || 'realesrgan-x4plus',
         upscale_factor:         parseInt(document.getElementById('scanRootUpscaleFactor')?.value || '2'),
+        // 3D / stereo settings
+        stereo_enabled:        document.getElementById('scanRootStereoEnabled')?.checked ?? false,
+        stereo_mode:           document.getElementById('scanRootStereoMode')?.value || '2d_to_3d',
+        stereo_format:         document.getElementById('scanRootStereoFormat')?.value || 'half_sbs',
+        stereo_divergence:     parseFloat(document.getElementById('scanRootStereoDivergence')?.value || '2.0'),
+        stereo_convergence:    parseFloat(document.getElementById('scanRootStereoConvergence')?.value || '0.5'),
+        stereo_depth_model:    document.getElementById('scanRootStereoDepthModel')?.value || 'Any_V2_S',
     };
 
     const method = currentScanRootId ? 'PUT' : 'POST';
@@ -3169,6 +3210,90 @@ function _fillProfileUpscaleFields(profile) {
     if (modelEl && profile.upscale_model) modelEl.value = profile.upscale_model;
 
     handleProfileUpscaleToggle();
+}
+
+// ============================================================
+// PROFILE STEREO FUNCTIONS
+// ============================================================
+
+function toggleProfileStereoSection() {
+    const section = document.getElementById('profileStereoSection');
+    const icon    = document.getElementById('profileStereoToggleIcon');
+    if (!section) return;
+    const hidden = section.classList.toggle('hidden');
+    if (icon) icon.textContent = hidden ? '▶' : '▼';
+}
+
+function handleProfileStereoToggle() {
+    const enabled = document.getElementById('profileStereoEnabled')?.checked;
+    const fields  = document.getElementById('profileStereoFields');
+    const badge   = document.getElementById('profileStereoEnabledBadge');
+    if (!fields) return;
+    fields.classList.toggle('opacity-50',          !enabled);
+    fields.classList.toggle('pointer-events-none', !enabled);
+    if (badge) badge.classList.toggle('hidden', !enabled);
+}
+
+function _fillProfileStereoFields(profile) {
+    const el = document.getElementById('profileStereoEnabled');
+    if (!el) return;
+    el.checked = !!profile.stereo_enabled;
+
+    const modeEl = document.getElementById('profileStereoMode');
+    const fmtEl  = document.getElementById('profileStereoFormat');
+    const divEl  = document.getElementById('profileStereoDivergence');
+    const conEl  = document.getElementById('profileStereoConvergence');
+    const depEl  = document.getElementById('profileStereoDepthModel');
+
+    if (modeEl) modeEl.value = profile.stereo_mode       || '2d_to_3d';
+    if (fmtEl)  fmtEl.value  = profile.stereo_format     || 'half_sbs';
+    if (divEl)  divEl.value  = profile.stereo_divergence  ?? 2.0;
+    if (conEl)  conEl.value  = profile.stereo_convergence ?? 0.5;
+    if (depEl)  depEl.value  = profile.stereo_depth_model || 'Any_V2_S';
+
+    handleProfileStereoToggle();
+}
+
+// ============================================================
+// SCAN ROOT STEREO FUNCTIONS
+// ============================================================
+
+function toggleScanRootStereoSection() {
+    const section = document.getElementById('scanRootStereoSection');
+    const icon    = document.getElementById('scanRootStereoToggleIcon');
+    if (!section) return;
+    const hidden = section.classList.toggle('hidden');
+    if (icon) icon.textContent = hidden ? '▶' : '▼';
+}
+
+function handleScanRootStereoToggle() {
+    const enabled = document.getElementById('scanRootStereoEnabled')?.checked;
+    const fields  = document.getElementById('scanRootStereoFields');
+    const badge   = document.getElementById('scanRootStereoEnabledBadge');
+    if (!fields) return;
+    fields.classList.toggle('opacity-50',          !enabled);
+    fields.classList.toggle('pointer-events-none', !enabled);
+    if (badge) badge.classList.toggle('hidden', !enabled);
+}
+
+function _fillScanRootStereoFields(root) {
+    const el = document.getElementById('scanRootStereoEnabled');
+    if (!el) return;
+    el.checked = !!root.stereo_enabled;
+
+    const modeEl = document.getElementById('scanRootStereoMode');
+    const fmtEl  = document.getElementById('scanRootStereoFormat');
+    const divEl  = document.getElementById('scanRootStereoDivergence');
+    const conEl  = document.getElementById('scanRootStereoConvergence');
+    const depEl  = document.getElementById('scanRootStereoDepthModel');
+
+    if (modeEl) modeEl.value = root.stereo_mode       || '2d_to_3d';
+    if (fmtEl)  fmtEl.value  = root.stereo_format     || 'half_sbs';
+    if (divEl)  divEl.value  = root.stereo_divergence  ?? 2.0;
+    if (conEl)  conEl.value  = root.stereo_convergence ?? 0.5;
+    if (depEl)  depEl.value  = root.stereo_depth_model || 'Any_V2_S';
+
+    handleScanRootStereoToggle();
 }
 
 // ============================================================

@@ -888,6 +888,88 @@
                             </div>
                         </div>
                     </div>
+
+                    <!-- 3D / Stereo Conversion — collapsible -->
+                    <div class="border border-gray-700 rounded-lg overflow-hidden">
+                        <button type="button" onclick="toggleProfileStereoSection()"
+                            class="w-full flex items-center justify-between px-4 py-3 bg-gray-750 hover:bg-gray-700 transition-colors text-left">
+                            <div class="flex items-center gap-2">
+                                <span id="profileStereoToggleIcon" class="text-gray-400 text-xs">▶</span>
+                                <span class="text-sm font-medium">🎥 3D / Stereo Conversion</span>
+                                <span id="profileStereoEnabledBadge" class="hidden text-xs bg-purple-600 text-white px-2 py-0.5 rounded-full">Enabled</span>
+                            </div>
+                            <span class="text-xs text-gray-500">Convert 2D↔3D using iw3</span>
+                        </button>
+
+                        <div id="profileStereoSection" class="hidden px-4 py-4 space-y-4 bg-gray-900 border-t border-gray-700">
+
+                            <div class="flex items-start gap-3">
+                                <input type="checkbox" id="profileStereoEnabled" class="mt-0.5 w-4 h-4 flex-shrink-0"
+                                    onchange="handleProfileStereoToggle()">
+                                <div>
+                                    <label for="profileStereoEnabled" class="text-sm font-medium cursor-pointer">Enable 3D/Stereo conversion for this profile</label>
+                                    <p class="text-xs text-gray-400 mt-0.5">Files will be converted to/from 3D before encoding. Requires iw3 (nunif) for 2D→3D or ffmpeg for 3D→2D.</p>
+                                </div>
+                            </div>
+
+                            <div id="profileStereoFields" class="space-y-4 opacity-50 pointer-events-none">
+
+                                <div class="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-300 mb-2">Mode</label>
+                                        <select id="profileStereoMode"
+                                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                            <option value="2d_to_3d">2D → 3D (iw3 depth estimation)</option>
+                                            <option value="3d_to_2d">3D → 2D (extract left eye)</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-300 mb-2">Output Format</label>
+                                        <select id="profileStereoFormat"
+                                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                            <option value="half_sbs">Half Side-by-Side (most compatible)</option>
+                                            <option value="sbs">Full Side-by-Side (highest quality)</option>
+                                            <option value="half_tb">Half Top-Bottom</option>
+                                            <option value="tb">Full Top-Bottom</option>
+                                            <option value="vr180">VR180 Equirectangular</option>
+                                            <option value="anaglyph">Anaglyph (Red/Cyan glasses)</option>
+                                        </select>
+                                    </div>
+                                </div>
+
+                                <div class="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-300 mb-2">Divergence (3D Strength)</label>
+                                        <input type="number" id="profileStereoDivergence" value="2.0" min="0" max="5" step="0.1"
+                                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <p class="text-xs text-gray-500 mt-1">0.0–5.0 — higher = stronger 3D effect</p>
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-300 mb-2">Convergence</label>
+                                        <input type="number" id="profileStereoConvergence" value="0.5" min="0" max="1" step="0.05"
+                                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <p class="text-xs text-gray-500 mt-1">0.0–1.0 — screen-depth zero plane</p>
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-300 mb-2">Depth Model</label>
+                                    <select id="profileStereoDepthModel"
+                                        class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <option value="Any_V2_S">Depth-Anything V2 Small — fast, general purpose</option>
+                                        <option value="Any_V2_N_B">Depth-Anything V2 Base — better quality</option>
+                                        <option value="ZoeD_Any_N">ZoeDepth Any N — mixed indoor/outdoor</option>
+                                        <option value="ZoeD_N">ZoeDepth NYUv2 — best for indoor scenes</option>
+                                        <option value="ZoeD_K">ZoeDepth KITTI — best for outdoor/driving</option>
+                                    </select>
+                                </div>
+
+                                <div class="bg-blue-900 border border-blue-700 rounded px-4 py-3 text-xs text-blue-200">
+                                    ℹ️ <strong>Note:</strong> 2D→3D requires iw3 (nunif) installed with GPU support. 3D→2D only needs ffmpeg. Check Settings → Stereo 3D to verify tool availability.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                     
                 </form>
                 </div>
@@ -1056,6 +1138,78 @@
                             </div><!-- /upscaleSettingsFields -->
                         </div><!-- /upscaleSection -->
                     </div><!-- /collapsible wrapper -->
+
+                    <!-- 3D / Stereo Conversion — collapsible -->
+                    <div class="border border-gray-700 rounded-lg overflow-hidden mt-4">
+                        <button type="button" onclick="toggleScanRootStereoSection()"
+                            class="w-full flex items-center justify-between px-4 py-3 bg-gray-750 hover:bg-gray-700 transition-colors text-left">
+                            <div class="flex items-center gap-2">
+                                <span id="scanRootStereoToggleIcon" class="text-gray-400 text-xs">▶</span>
+                                <span class="text-sm font-medium">🎥 3D / Stereo Conversion</span>
+                                <span id="scanRootStereoEnabledBadge" class="hidden text-xs bg-purple-600 text-white px-2 py-0.5 rounded">Enabled</span>
+                            </div>
+                            <span class="text-xs text-gray-500">Convert 2D↔3D using iw3</span>
+                        </button>
+                        <div id="scanRootStereoSection" class="hidden px-4 py-4 space-y-4 bg-gray-900 border-t border-gray-700">
+                            <div class="flex items-start gap-3">
+                                <input type="checkbox" id="scanRootStereoEnabled" class="mt-0.5 w-4 h-4"
+                                    onchange="handleScanRootStereoToggle()">
+                                <div>
+                                    <label for="scanRootStereoEnabled" class="text-sm font-medium cursor-pointer">Enable 3D/Stereo conversion for this library</label>
+                                    <p class="text-xs text-gray-400 mt-0.5">Files in this library will be converted to/from 3D before encoding. This overrides profile-level stereo settings.</p>
+                                </div>
+                            </div>
+                            <div id="scanRootStereoFields" class="space-y-4 opacity-50 pointer-events-none">
+                                <div class="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-300 mb-2">Mode</label>
+                                        <select id="scanRootStereoMode"
+                                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                            <option value="2d_to_3d">2D → 3D (iw3 depth estimation)</option>
+                                            <option value="3d_to_2d">3D → 2D (extract left eye)</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-300 mb-2">Output Format</label>
+                                        <select id="scanRootStereoFormat"
+                                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                            <option value="half_sbs">Half Side-by-Side (most compatible)</option>
+                                            <option value="sbs">Full Side-by-Side (highest quality)</option>
+                                            <option value="half_tb">Half Top-Bottom</option>
+                                            <option value="tb">Full Top-Bottom</option>
+                                            <option value="vr180">VR180 Equirectangular</option>
+                                            <option value="anaglyph">Anaglyph (Red/Cyan glasses)</option>
+                                        </select>
+                                    </div>
+                                </div>
+                                <div class="grid grid-cols-2 gap-4">
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-300 mb-2">Divergence (3D Strength)</label>
+                                        <input type="number" id="scanRootStereoDivergence" value="2.0" min="0" max="5" step="0.1"
+                                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <p class="text-xs text-gray-500 mt-1">0.0–5.0 — higher = stronger 3D</p>
+                                    </div>
+                                    <div>
+                                        <label class="block text-sm font-medium text-gray-300 mb-2">Convergence</label>
+                                        <input type="number" id="scanRootStereoConvergence" value="0.5" min="0" max="1" step="0.05"
+                                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <p class="text-xs text-gray-500 mt-1">0.0–1.0 — screen-depth zero plane</p>
+                                    </div>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-300 mb-2">Depth Model</label>
+                                    <select id="scanRootStereoDepthModel"
+                                        class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                                        <option value="Any_V2_S">Depth-Anything V2 Small — fast, general</option>
+                                        <option value="Any_V2_N_B">Depth-Anything V2 Base — better quality</option>
+                                        <option value="ZoeD_Any_N">ZoeDepth Any N — mixed scenes</option>
+                                        <option value="ZoeD_N">ZoeDepth NYUv2 — indoor</option>
+                                        <option value="ZoeD_K">ZoeDepth KITTI — outdoor/driving</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
                     
                 </form>
                 </div>
