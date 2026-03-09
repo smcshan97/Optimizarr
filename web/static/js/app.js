@@ -39,21 +39,34 @@ async function apiRequest(endpoint, options = {}) {
         }
     };
     
-    const response = await fetch(`${API_BASE}${endpoint}`, {
-        ...defaultOptions,
-        ...options,
-        headers: {
-            ...defaultOptions.headers,
-            ...options.headers
+    try {
+        const response = await fetch(`${API_BASE}${endpoint}`, {
+            ...defaultOptions,
+            ...options,
+            headers: {
+                ...defaultOptions.headers,
+                ...options.headers
+            }
+        });
+        
+        if (response.status === 401) {
+            logout();
+            return null;
         }
-    });
-    
-    if (response.status === 401) {
-        logout();
+        
+        if (!response.ok) {
+            const errorText = await response.text();
+            let detail = `HTTP ${response.status}`;
+            try { detail = JSON.parse(errorText).detail || detail; } catch {}
+            console.error(`API error ${endpoint}: ${detail}`);
+            return null;
+        }
+        
+        return response.json();
+    } catch (err) {
+        console.error(`API request failed ${endpoint}:`, err);
         return null;
     }
-    
-    return response.json();
 }
 
 // Tab switching — sidebar nav + tab panels
