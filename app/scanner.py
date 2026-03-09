@@ -452,8 +452,21 @@ class MediaScanner:
         target_res = target_specs.get('resolution')
         if target_res and target_res not in ('', 'preserve', None):
             current_res = current_specs.get('resolution', 'unknown')
-            if current_res != 'unknown' and current_res != target_res:
+            if current_res == 'unknown':
                 return True
+            # Compare heights rather than exact strings so aspect ratio
+            # differences (e.g. 1920x800 vs 1920x1080) don't cause
+            # unnecessary re-encodes.  Only queue if the source is
+            # meaningfully larger than the target.
+            try:
+                cur_h = int(current_res.split('x')[1])
+                tgt_h = int(target_res.split('x')[1])
+                if cur_h > tgt_h:
+                    return True  # source taller than target → downscale
+            except (ValueError, IndexError):
+                # Couldn't parse — fall back to string compare
+                if current_res != target_res:
+                    return True
         return False
     
     def scan_all_roots(self) -> int:
