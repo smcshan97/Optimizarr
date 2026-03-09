@@ -335,8 +335,15 @@ class EncodingJob:
         """
         Start the encoding job.
 
-        If the queue item has an upscale_plan, runs the AI upscale pipeline
-        first (progress 0-50%), then HandBrake (50-100%).
+        Three-phase pipeline (each phase optional):
+          1. Stereo conversion (iw3 2D→3D or ffmpeg 3D→2D)
+          2. AI upscale (Real-ESRGAN / etc.)
+          3. HandBrake encode
+
+        Progress mapping:
+          - All 3 phases: stereo 0-25%, upscale 25-50%, HandBrake 50-100%
+          - 2 phases:     pre-process 0-50%, HandBrake 50-100%
+          - HandBrake only: 0-100%
 
         Args:
             progress_callback: Function to call with progress updates (0.0-100.0)
@@ -351,42 +358,120 @@ class EncodingJob:
 
         from app.logger import optimizarr_logger
 
-        # ── Determine input file (may be replaced by upscaled version) ──────
+        # ── Determine input file (may be replaced by stereo/upscaled version) ─
         original_input = self.queue_item['file_path']
         encode_input   = original_input       # may be overridden below
+        stereo_temp    = None                 # path to clean up after encode
         upscale_temp   = None                 # path to clean up after encode
 
-        # ── Upscale phase (0–50%) ────────────────────────────────────────────
+        # ── Parse plans ──────────────────────────────────────────────────────
+        stereo_plan_raw = self.queue_item.get('stereo_plan')
+        if stereo_plan_raw:
+            try:
+                stereo_plan = _json.loads(stereo_plan_raw) if isinstance(stereo_plan_raw, str) else stereo_plan_raw
+            except Exception:
+                stereo_plan = {}
+        else:
+            stereo_plan = {}
+
         upscale_plan_raw = self.queue_item.get('upscale_plan')
         if upscale_plan_raw:
             try:
-                plan = _json.loads(upscale_plan_raw) if isinstance(upscale_plan_raw, str) else upscale_plan_raw
+                upscale_plan = _json.loads(upscale_plan_raw) if isinstance(upscale_plan_raw, str) else upscale_plan_raw
             except Exception:
-                plan = {}
+                upscale_plan = {}
         else:
-            plan = {}
+            upscale_plan = {}
 
-        if plan.get('enabled'):
-            from app.upscaler import run_upscale_pipeline, cleanup_upscale_workdir
+        has_stereo  = stereo_plan.get('enabled', False)
+        has_upscale = upscale_plan.get('enabled', False)
 
-            upscaler_key = plan.get('upscaler_key', 'realesrgan')
-            model        = plan.get('model', 'realesrgan-x4plus')
-            factor       = plan.get('factor', 2)
+        # ── Calculate progress ranges per phase ──────────────────────────────
+        # Three phases: stereo → upscale → handbrake
+        # Each active phase gets an equal share of the pre-handbrake half,
+        # and HandBrake always gets the final 50%.
+        pre_phases = int(has_stereo) + int(has_upscale)
+        if pre_phases == 2:
+            stereo_start, stereo_end   = 0.0, 25.0
+            upscale_start, upscale_end = 25.0, 50.0
+        elif pre_phases == 1:
+            stereo_start, stereo_end   = 0.0, 50.0    # only if has_stereo
+            upscale_start, upscale_end = 0.0, 50.0    # only if has_upscale
+        else:
+            stereo_start = stereo_end = 0.0
+            upscale_start = upscale_end = 0.0
+
+        hb_start = 50.0 if pre_phases > 0 else 0.0
+        hb_range = 50.0 if pre_phases > 0 else 100.0
+
+        # ── Stereo phase ─────────────────────────────────────────────────────
+        if has_stereo:
+            from app.stereo import run_stereo_pipeline, cleanup_stereo_workdir
+
+            s_mode       = stereo_plan.get('mode', '2d_to_3d')
+            s_format     = stereo_plan.get('format', 'half_sbs')
+            s_divergence = stereo_plan.get('divergence', 2.0)
+            s_convergence = stereo_plan.get('convergence', 0.5)
+            s_depth_model = stereo_plan.get('depth_model', 'Any_V2_S')
 
             optimizarr_logger.app_logger.info(
-                "Upscale phase: %s (×%d, model=%s)", original_input, factor, model
+                "Stereo phase: %s (%s → %s)", original_input, s_mode, s_format
             )
 
+            s_range = stereo_end - stereo_start
+
+            def _stereo_progress(pct: float):
+                mapped = stereo_start + (pct / 100.0) * s_range
+                self.progress = mapped
+                db.update_queue_item(self.queue_item_id, progress=mapped)
+                if progress_callback:
+                    progress_callback(mapped)
+
+            stereo_path = run_stereo_pipeline(
+                input_path=original_input,
+                mode=s_mode,
+                stereo_format=s_format,
+                divergence=s_divergence,
+                convergence=s_convergence,
+                depth_model=s_depth_model,
+                progress_callback=_stereo_progress,
+            )
+
+            if stereo_path:
+                encode_input = stereo_path
+                stereo_temp  = stereo_path
+                optimizarr_logger.app_logger.info(
+                    "Stereo complete — continuing from temp: %s", stereo_path
+                )
+            else:
+                optimizarr_logger.app_logger.warning(
+                    "Stereo conversion failed for %s — encoding original file instead",
+                    original_input,
+                )
+
+        # ── Upscale phase ────────────────────────────────────────────────────
+        if has_upscale:
+            from app.upscaler import run_upscale_pipeline, cleanup_upscale_workdir
+
+            upscaler_key = upscale_plan.get('upscaler_key', 'realesrgan')
+            model        = upscale_plan.get('model', 'realesrgan-x4plus')
+            factor       = upscale_plan.get('factor', 2)
+
+            optimizarr_logger.app_logger.info(
+                "Upscale phase: %s (×%d, model=%s)", encode_input, factor, model
+            )
+
+            u_range = upscale_end - upscale_start
+
             def _upscale_progress(pct: float):
-                # Map 0-100 → 0-50 so HandBrake fills the second half
-                mapped = pct / 2.0
+                mapped = upscale_start + (pct / 100.0) * u_range
                 self.progress = mapped
                 db.update_queue_item(self.queue_item_id, progress=mapped)
                 if progress_callback:
                     progress_callback(mapped)
 
             upscaled_path = run_upscale_pipeline(
-                input_path=original_input,
+                input_path=encode_input,
                 upscaler_key=upscaler_key,
                 model=model,
                 factor=factor,
@@ -400,18 +485,14 @@ class EncodingJob:
                     "Upscale complete — encoding from temp: %s", upscaled_path
                 )
             else:
-                # Upscale failed — fall back to encoding the original
                 optimizarr_logger.app_logger.warning(
-                    "Upscale failed for %s — encoding original file instead", original_input
+                    "Upscale failed for %s — encoding original file instead",
+                    original_input,
                 )
 
-        # ── Build HandBrake command (encode_input may be upscaled temp) ──────
+        # ── Build HandBrake command (encode_input may be stereo/upscaled) ────
         cmd = self.build_command(input_override=encode_input)
         optimizarr_logger.log_handbrake_start(original_input, cmd)
-
-        # Decide progress range for HandBrake
-        hb_start = 50.0 if (upscale_temp is not None) else 0.0
-        hb_range = 50.0 if (upscale_temp is not None) else 100.0
 
         try:
             self.process = subprocess.Popen(
@@ -474,6 +555,10 @@ class EncodingJob:
             return False
 
         finally:
+            # Clean up stereo temp file/directory
+            if stereo_temp:
+                from app.stereo import cleanup_stereo_workdir
+                cleanup_stereo_workdir(stereo_temp)
             # Clean up upscale temp file/directory
             if upscale_temp:
                 from app.upscaler import cleanup_upscale_workdir
