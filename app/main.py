@@ -12,6 +12,7 @@ from pathlib import Path
 from app.config import settings, ensure_data_directories
 from app.database import db
 from app.auth import auth
+from app import __version__
 from app.api import routes, auth_routes
 from app.scheduler import initialize_scheduler, shutdown_scheduler
 
@@ -54,7 +55,7 @@ async def lifespan(app: FastAPI):
     else:
         print("  Folder watcher: no active watches configured")
 
-    optimizarr_logger.log_startup("2.1.0", settings.host, settings.port)
+    optimizarr_logger.log_startup(__version__, settings.host, settings.port)
 
     print("=" * 60)
     print(f"Server starting on http://{settings.host}:{settings.port}")
@@ -78,7 +79,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Optimizarr",
     description="Automated Media Optimization System",
-    version="2.1.0",
+    version=__version__,
     lifespan=lifespan,
 )
 

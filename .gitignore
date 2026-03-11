@@ -52,3 +52,6 @@ backups/
 tmp/
 temp/
 *.tmp
+
+# Development artifacts
+*.patch
