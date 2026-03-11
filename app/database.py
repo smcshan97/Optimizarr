@@ -861,6 +861,24 @@ class Database:
                 'recent': recent
             }
     
+    def clear_history_file_names(self) -> int:
+        """Anonymize file paths in history while preserving all statistical data."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE history SET file_path = 'cleared' WHERE file_path != 'cleared'"
+            )
+            return cursor.rowcount
+
+    def purge_history(self) -> int:
+        """Delete all history records. Stats will reset to zero."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM history")
+            count = cursor.fetchone()[0]
+            cursor.execute("DELETE FROM history")
+            return count
+
     # Preset export/import
     def export_profiles(self) -> List[Dict]:
         """Export all profiles as a list of dicts for JSON export."""

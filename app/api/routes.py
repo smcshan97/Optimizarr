@@ -443,6 +443,20 @@ async def get_statistics(current_user: dict = Depends(get_current_user)):
     )
 
 
+@router.post("/stats/clear-names", response_model=MessageResponse)
+async def clear_history_file_names(current_user: dict = Depends(get_current_admin_user)):
+    """Anonymize file paths in history while preserving all statistical data (admin only)."""
+    count = db.clear_history_file_names()
+    return MessageResponse(message=f"Cleared file names from {count} history records")
+
+
+@router.post("/stats/purge", response_model=MessageResponse)
+async def purge_history(current_user: dict = Depends(get_current_admin_user)):
+    """Delete all history records. Aggregate stats will reset to zero (admin only)."""
+    count = db.purge_history()
+    return MessageResponse(message=f"Purged {count} history records")
+
+
 # Resource Monitoring Endpoints
 @router.get("/resources/current")
 async def get_current_resources(current_user: dict = Depends(get_current_user)):

@@ -2043,6 +2043,24 @@ async function loadStatistics() {
     loadUpscalers();
 }
 
+async function clearHistoryFileNames() {
+    if (!confirm('This will remove all file names from the encoding history.\n\nAggregate stats (total saved, codec breakdown, daily charts) will be preserved.\n\nContinue?')) return;
+    const result = await apiRequest('/stats/clear-names', { method: 'POST' });
+    if (result) {
+        showMessage(result.message, 'success');
+        loadStatistics();
+    }
+}
+
+async function purgeHistory() {
+    if (!confirm('⚠️ This will DELETE all encoding history.\n\nTotal stats, daily charts, and codec breakdown will all reset to zero.\n\nThis cannot be undone. Continue?')) return;
+    const result = await apiRequest('/stats/purge', { method: 'POST' });
+    if (result) {
+        showMessage(result.message, 'success');
+        loadStatistics();
+    }
+}
+
 function renderDailyChart(daily) {
     const container = document.getElementById('dailyChart');
     
@@ -2105,7 +2123,7 @@ function renderRecentHistory(recent) {
     }
 
     container.innerHTML = recent.map(h => {
-        const filename = h.file_path.split(/[/\\]/).pop();
+        const filename = h.file_path === 'cleared' ? '(cleared)' : h.file_path.split(/[/\\]/).pop();
         const savedPct = h.original_size_bytes > 0
             ? ((h.savings_bytes / h.original_size_bytes) * 100).toFixed(1)
             : '0.0';

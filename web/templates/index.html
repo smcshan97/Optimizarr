@@ -1395,7 +1395,17 @@
                     
                     <!-- Recent History -->
                     <div class="card">
-                        <h3 class="text-lg font-bold mb-4">Recent Encodes</h3>
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-bold">Recent Encodes</h3>
+                            <div class="flex gap-2">
+                                <button onclick="clearHistoryFileNames()" class="btn btn-secondary btn-sm" title="Remove file names but keep stats data">
+                                    🔒 Clear Names
+                                </button>
+                                <button onclick="purgeHistory()" class="btn btn-danger btn-sm" title="Delete all history (resets stats to zero)">
+                                    🗑️ Purge All
+                                </button>
+                            </div>
+                        </div>
                         <div id="recentHistory" class="space-y-2 max-h-80 overflow-y-auto">
                             <p class="text-gray-500 text-sm">Loading...</p>
                         </div>
