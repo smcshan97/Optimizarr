@@ -267,34 +267,44 @@ class EncodingJob:
         return filters
     
     def _get_hw_encoder(self, current_encoder: str) -> Optional[str]:
-        """Try to map a software encoder to a hardware encoder."""
+        """Try to map a software encoder to a hardware encoder.
+        
+        Conservative approach: only map codecs that are reliably supported
+        across all GPUs for each vendor. AV1 hardware encoding requires
+        specific GPU generations (NVIDIA RTX 40+, Intel Arc) that we
+        cannot reliably detect from HandBrake alone, so we skip those
+        and let the software encoder handle them.
+        """
         # Detect what's available
         hw = detect_hardware_acceleration()
         
-        # Map codec families to HW encoders
         codec = self.profile.get('codec', 'av1')
         
+        # NVIDIA: H.264/H.265 are safe on all NVENC GPUs.
+        # AV1 requires RTX 40+ (Ada Lovelace) — skip to avoid silent failures.
         if hw.get('nvidia'):
-            hw_map = {'h264': 'nvenc_h264', 'h265': 'nvenc_h265', 'av1': 'nvenc_av1'}
-            if codec in hw_map:
-                return hw_map[codec]
+            safe_map = {'h264': 'nvenc_h264', 'h265': 'nvenc_h265'}
+            if codec in safe_map:
+                return safe_map[codec]
         
+        # Intel QSV: H.264/H.265 are broadly supported.
+        # AV1 requires Arc GPUs — skip for safety.
         if hw.get('intel'):
-            hw_map = {'h264': 'qsv_h264', 'h265': 'qsv_h265', 'av1': 'qsv_av1'}
-            if codec in hw_map:
-                return hw_map[codec]
+            safe_map = {'h264': 'qsv_h264', 'h265': 'qsv_h265'}
+            if codec in safe_map:
+                return safe_map[codec]
         
         if hw.get('amd'):
-            hw_map = {'h264': 'vce_h264', 'h265': 'vce_h265'}
-            if codec in hw_map:
-                return hw_map[codec]
+            safe_map = {'h264': 'vce_h264', 'h265': 'vce_h265'}
+            if codec in safe_map:
+                return safe_map[codec]
         
         if hw.get('apple'):
-            hw_map = {'h264': 'vt_h264', 'h265': 'vt_h265'}
-            if codec in hw_map:
-                return hw_map[codec]
+            safe_map = {'h264': 'vt_h264', 'h265': 'vt_h265'}
+            if codec in safe_map:
+                return safe_map[codec]
         
-        # No HW encoder available, return None to keep software encoder
+        # No safe HW encoder for this codec — keep software encoder
         return None
     
     def _monitor_resources(self):
