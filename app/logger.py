@@ -31,6 +31,9 @@ class OptimizarrLogger:
         self.handbrake = self._create_logger("handbrake", self.log_files["handbrake"], logging.DEBUG)
         self.errors = self._create_logger("errors", self.log_files["errors"], logging.ERROR)
         
+        # Alias: many modules reference .app_logger instead of .app
+        self.app_logger = self.app
+        
         # Also add error handler to app logger so errors show in both
         error_handler = RotatingFileHandler(
             str(self.log_files["errors"]),

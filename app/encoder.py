@@ -143,7 +143,7 @@ class EncodingJob:
         
         # Two-pass encoding
         if self.profile.get('two_pass'):
-            cmd.append('--two-pass')
+            cmd.append('--multi-pass')
         
         # Custom arguments (always last so they can override)
         if self.profile.get('custom_args'):
