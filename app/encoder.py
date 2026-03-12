@@ -516,8 +516,16 @@ class EncodingJob:
                 self.monitoring_thread.start()
 
             progress_pattern = re.compile(r'Encoding: task \d+ of \d+, ([\d.]+) %')
+            last_lines = []  # Keep last 20 lines for diagnostics
 
             for line in self.process.stdout:
+                line_stripped = line.rstrip()
+                if line_stripped:
+                    last_lines.append(line_stripped)
+                    if len(last_lines) > 20:
+                        last_lines.pop(0)
+                    optimizarr_logger.log_handbrake_output(line_stripped)
+
                 match = progress_pattern.search(line)
                 if match:
                     hb_pct = float(match.group(1))
@@ -534,14 +542,16 @@ class EncodingJob:
                 self._finalize_encoding()
                 return True
             else:
+                # Include last HandBrake output in error for diagnostics
+                tail = '\n'.join(last_lines[-5:]) if last_lines else '(no output captured)'
                 optimizarr_logger.log_handbrake_error(
                     original_input,
-                    f"HandBrakeCLI exited with code {return_code}"
+                    f"HandBrakeCLI exited with code {return_code}\n{tail}"
                 )
                 db.update_queue_item(
                     self.queue_item_id,
                     status='failed',
-                    error_message=f"HandBrakeCLI exited with code {return_code}"
+                    error_message=f"HandBrakeCLI exited with code {return_code}: {tail[:200]}"
                 )
                 return False
 
@@ -577,10 +587,23 @@ class EncodingJob:
         output_path = input_path.parent / f"{input_path.stem}_optimized{output_ext}"
 
         if not output_path.exists():
+            # Diagnostic: list files in the directory that match the stem
+            try:
+                nearby = [f.name for f in input_path.parent.iterdir()
+                          if input_path.stem in f.name and f.name != input_path.name]
+            except Exception:
+                nearby = []
+            diag = f"Expected: {output_path}"
+            if nearby:
+                diag += f" | Found nearby: {', '.join(nearby[:5])}"
+            else:
+                diag += " | No matching files found in directory"
+            optimizarr_logger.app_logger.error("Output file not found: %s", diag)
+
             db.update_queue_item(
                 self.queue_item_id,
                 status='failed',
-                error_message='Output file not found'
+                error_message=f"Output file not found after encoding. {diag}"
             )
             optimizarr_logger.log_handbrake_error(
                 str(input_path), 'Output file not found after encoding'
