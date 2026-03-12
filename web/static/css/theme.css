@@ -272,7 +272,7 @@ body.theme-glass ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,
    ============================================================ */
 .resource-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
     gap: 16px;
     margin-bottom: 24px;
 }
@@ -312,6 +312,7 @@ body.theme-glass ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,
 .resource-bar-fill.orange { background: #e67e22; }
 .resource-bar-fill.red    { background: var(--danger); }
 .resource-bar-fill.yellow { background: var(--warning); }
+.resource-bar-fill.green  { background: var(--success); }
 
 /* ============================================================
    BUTTONS

@@ -466,16 +466,28 @@ async def get_current_resources(current_user: dict = Depends(get_current_user)):
 
 @router.get("/resources/thresholds")
 async def check_resource_thresholds(
-    cpu_threshold: float = 90.0,
-    memory_threshold: float = 85.0,
-    gpu_threshold: float = 90.0,
     current_user: dict = Depends(get_current_user)
 ):
-    """Check if current resource usage exceeds thresholds."""
+    """Check if current resource usage exceeds any enabled thresholds.
+
+    Reads the saved settings from the database to determine which
+    triggers are active and what their limits are.
+    """
+    # Load current settings
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT key, value FROM settings WHERE key LIKE 'resource_%'")
+        settings = {row[0]: row[1] for row in cursor.fetchall()}
+
     return resource_monitor.check_thresholds(
-        cpu_threshold=cpu_threshold,
-        memory_threshold=memory_threshold,
-        gpu_threshold=gpu_threshold
+        pause_on_cpu_temp=settings.get('resource_pause_on_cpu_temp', 'true').lower() == 'true',
+        cpu_temp_threshold=float(settings.get('resource_cpu_temp_threshold', '85.0')),
+        pause_on_gpu_temp=settings.get('resource_pause_on_gpu_temp', 'true').lower() == 'true',
+        gpu_temp_threshold=float(settings.get('resource_gpu_temp_threshold', '83.0')),
+        pause_on_memory=settings.get('resource_pause_on_memory', 'false').lower() == 'true',
+        memory_threshold=float(settings.get('resource_memory_threshold', '85.0')),
+        pause_on_cpu_usage=settings.get('resource_pause_on_cpu_usage', 'false').lower() == 'true',
+        cpu_usage_threshold=float(settings.get('resource_cpu_usage_threshold', '95.0')),
     )
 
 
@@ -491,14 +503,19 @@ async def get_resource_settings(current_user: dict = Depends(get_current_user)):
         """)
         settings = {row[0]: row[1] for row in cursor.fetchall()}
     
-    # Default settings if none exist
+    # Default settings if none exist — temperature-first model
     if not settings:
         settings = {
-            'resource_cpu_threshold': '90.0',
-            'resource_memory_threshold': '85.0',
-            'resource_gpu_threshold': '90.0',
+            'resource_enable_throttling': 'true',
             'resource_nice_level': '10',
-            'resource_enable_throttling': 'true'
+            'resource_pause_on_cpu_temp': 'true',
+            'resource_cpu_temp_threshold': '85.0',
+            'resource_pause_on_gpu_temp': 'true',
+            'resource_gpu_temp_threshold': '83.0',
+            'resource_pause_on_memory': 'false',
+            'resource_memory_threshold': '85.0',
+            'resource_pause_on_cpu_usage': 'false',
+            'resource_cpu_usage_threshold': '95.0',
         }
     
     return settings

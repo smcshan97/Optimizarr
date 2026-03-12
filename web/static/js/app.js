@@ -135,9 +135,27 @@ async function loadResources() {
     const resources = await apiRequest('/resources/current');
     if (!resources) return;
 
-    // Helper: set bar color class and value text color
-    function setBarColor(barEl, valueEl, percent, normalColor, normalVar) {
-        // Remove old color classes
+    // Helper: set bar color class and value text color based on temperature
+    function setTempBarColor(barEl, valueEl, tempC, normalColor, normalVar) {
+        barEl.className = barEl.className.replace(/\b(cyan|purple|orange|red|yellow)\b/g, '');
+        if (tempC === null || tempC === undefined) {
+            barEl.classList.add(normalColor);
+            valueEl.style.color = `var(--${normalVar})`;
+            return;
+        }
+        if (tempC > 90) {
+            barEl.classList.add('red');
+            valueEl.style.color = 'var(--danger)';
+        } else if (tempC > 75) {
+            barEl.classList.add('yellow');
+            valueEl.style.color = 'var(--warning)';
+        } else {
+            barEl.classList.add(normalColor);
+            valueEl.style.color = `var(--${normalVar})`;
+        }
+    }
+
+    function setPercentBarColor(barEl, valueEl, percent, normalColor, normalVar) {
         barEl.className = barEl.className.replace(/\b(cyan|purple|orange|red|yellow)\b/g, '');
         if (percent > 90) {
             barEl.classList.add('red');
@@ -151,19 +169,28 @@ async function loadResources() {
         }
     }
 
-    // CPU
-    const cpuPercent = resources.cpu.percent.toFixed(1);
-    const cpuBar = document.getElementById('cpuBar');
-    const cpuVal = document.getElementById('cpuUsage');
-    cpuVal.textContent = `${cpuPercent}%`;
-    cpuBar.style.width = `${cpuPercent}%`;
-    setBarColor(cpuBar, cpuVal, cpuPercent, 'cyan', 'accent');
-    const cpuStatus = document.getElementById('cpuStatus');
-    if (cpuStatus) {
-        cpuStatus.textContent = cpuPercent > 90 ? '⚠️ High' : cpuPercent > 75 ? '⚠️ Elevated' : '✓ Normal';
-    }
+    // CPU Temperature (primary) + usage (secondary)
+    const cpuTempC = resources.cpu.temperature_c;
+    const cpuTempEl = document.getElementById('cpuTemp');
+    const cpuTempBar = document.getElementById('cpuTempBar');
+    const cpuTempStatus = document.getElementById('cpuTempStatus');
+    const cpuUsageInfo = document.getElementById('cpuUsageInfo');
 
-    // Memory
+    if (cpuTempC !== null && cpuTempC !== undefined) {
+        cpuTempEl.textContent = `${cpuTempC.toFixed(0)}°C`;
+        // Map temp to bar width: 30°C=0%, 105°C=100%
+        const barPct = Math.min(100, Math.max(0, ((cpuTempC - 30) / 75) * 100));
+        cpuTempBar.style.width = `${barPct}%`;
+        setTempBarColor(cpuTempBar, cpuTempEl, cpuTempC, 'cyan', 'accent');
+        if (cpuTempStatus) cpuTempStatus.textContent = cpuTempC > 90 ? '⚠️ Hot' : cpuTempC > 75 ? '⚠️ Warm' : '✓ Normal';
+    } else {
+        cpuTempEl.textContent = 'N/A';
+        cpuTempBar.style.width = '0%';
+        if (cpuTempStatus) cpuTempStatus.textContent = 'Sensor unavailable';
+    }
+    if (cpuUsageInfo) cpuUsageInfo.textContent = `Usage: ${resources.cpu.percent.toFixed(0)}%  ·  ${resources.cpu.count} cores`;
+
+    // Memory (unchanged logic)
     const memPercent = resources.memory.percent.toFixed(1);
     const memUsedGB = (resources.memory.used_mb / 1024).toFixed(1);
     const memTotalGB = (resources.memory.total_mb / 1024).toFixed(1);
@@ -171,24 +198,78 @@ async function loadResources() {
     const memVal = document.getElementById('memoryUsage');
     memVal.textContent = `${memPercent}%`;
     memBar.style.width = `${memPercent}%`;
-    setBarColor(memBar, memVal, memPercent, 'purple', 'processing');
+    setPercentBarColor(memBar, memVal, memPercent, 'purple', 'processing');
     const memStatus = document.getElementById('memoryStatus');
     if (memStatus) memStatus.textContent = `${memUsedGB}/${memTotalGB} GB`;
 
-    // GPU
+    // GPU Temperature (primary) + usage (secondary)
+    const gpuTempEl = document.getElementById('gpuTemp');
+    const gpuTempBar = document.getElementById('gpuTempBar');
+    const gpuTempStatus = document.getElementById('gpuTempStatus');
+    const gpuUsageInfo = document.getElementById('gpuUsageInfo');
+    const gpuVramEl = document.getElementById('gpuVram');
+    const gpuVramBar = document.getElementById('gpuVramBar');
+    const gpuVramStatus = document.getElementById('gpuVramStatus');
+
     if (resources.gpu && resources.gpu.length > 0) {
         const gpu = resources.gpu[0];
-        const gpuPercent = gpu.utilization_percent.toFixed(1);
-        const gpuBar = document.getElementById('gpuBar');
-        const gpuVal = document.getElementById('gpuUsage');
-        gpuVal.textContent = `${gpuPercent}%`;
-        gpuBar.style.width = `${gpuPercent}%`;
-        setBarColor(gpuBar, gpuVal, gpuPercent, 'orange', 'warning');
-        const gpuStatus = document.getElementById('gpuStatus');
-        if (gpuStatus) gpuStatus.textContent = gpu.name.substring(0, 20);
+        const gpuTempC = gpu.temperature_c;
+
+        if (gpuTempC !== null && gpuTempC !== undefined) {
+            gpuTempEl.textContent = `${gpuTempC}°C`;
+            const barPct = Math.min(100, Math.max(0, ((gpuTempC - 30) / 75) * 100));
+            gpuTempBar.style.width = `${barPct}%`;
+            setTempBarColor(gpuTempBar, gpuTempEl, gpuTempC, 'orange', 'warning');
+            if (gpuTempStatus) gpuTempStatus.textContent = gpuTempC > 85 ? '⚠️ Hot' : gpuTempC > 72 ? '⚠️ Warm' : '✓ Normal';
+        } else {
+            gpuTempEl.textContent = 'N/A';
+            gpuTempBar.style.width = '0%';
+            if (gpuTempStatus) gpuTempStatus.textContent = 'Temp unavailable';
+        }
+        if (gpuUsageInfo) gpuUsageInfo.textContent = `${gpu.name.substring(0, 24)}  ·  Util: ${gpu.utilization_percent}%`;
+
+        // GPU VRAM
+        const vramUsedGB = (gpu.memory_used_mb / 1024).toFixed(1);
+        const vramTotalGB = (gpu.memory_total_mb / 1024).toFixed(1);
+        const vramPct = gpu.memory_total_mb > 0 ? ((gpu.memory_used_mb / gpu.memory_total_mb) * 100).toFixed(1) : 0;
+        gpuVramEl.textContent = `${vramPct}%`;
+        gpuVramBar.style.width = `${vramPct}%`;
+        setPercentBarColor(gpuVramBar, gpuVramEl, vramPct, 'cyan', 'accent');
+        if (gpuVramStatus) gpuVramStatus.textContent = `${vramUsedGB}/${vramTotalGB} GB`;
     } else {
-        document.getElementById('gpuUsage').textContent = 'N/A';
-        document.getElementById('gpuStatus').textContent = 'No GPU detected';
+        gpuTempEl.textContent = 'N/A';
+        gpuTempBar.style.width = '0%';
+        if (gpuTempStatus) gpuTempStatus.textContent = 'No GPU detected';
+        if (gpuUsageInfo) gpuUsageInfo.textContent = '';
+        gpuVramEl.textContent = 'N/A';
+        gpuVramBar.style.width = '0%';
+        if (gpuVramStatus) gpuVramStatus.textContent = 'No GPU detected';
+    }
+
+    // Update availability badges in settings (if settings tab is visible)
+    const cpuTempAvail = document.getElementById('cpuTempAvail');
+    if (cpuTempAvail) {
+        if (resources.cpu.temp_available) {
+            cpuTempAvail.textContent = '✓ Available';
+            cpuTempAvail.style.background = 'rgba(46,204,113,0.15)';
+            cpuTempAvail.style.color = '#2ecc71';
+        } else {
+            cpuTempAvail.textContent = '✗ Unavailable';
+            cpuTempAvail.style.background = 'rgba(231,76,60,0.15)';
+            cpuTempAvail.style.color = '#e74c3c';
+        }
+    }
+    const gpuTempAvail = document.getElementById('gpuTempAvail');
+    if (gpuTempAvail) {
+        if (resources.gpu && resources.gpu.length > 0 && resources.gpu[0].temperature_c !== null) {
+            gpuTempAvail.textContent = '✓ Available';
+            gpuTempAvail.style.background = 'rgba(46,204,113,0.15)';
+            gpuTempAvail.style.color = '#2ecc71';
+        } else {
+            gpuTempAvail.textContent = '✗ Unavailable';
+            gpuTempAvail.style.background = 'rgba(231,76,60,0.15)';
+            gpuTempAvail.style.color = '#e74c3c';
+        }
     }
 }
 
@@ -656,21 +737,34 @@ async function loadSettings() {
     // Load resource settings
     const settings = await apiRequest('/settings/resources');
     if (settings) {
-        document.getElementById('cpuThreshold').value = parseFloat(settings.resource_cpu_threshold || '90');
-        document.getElementById('memoryThreshold').value = parseFloat(settings.resource_memory_threshold || '85');
-        document.getElementById('gpuThreshold').value = parseFloat(settings.resource_gpu_threshold || '90');
-        document.getElementById('niceLevel').value = parseInt(settings.resource_nice_level || '10');
+        // Master toggle
         document.getElementById('enableThrottling').checked = (settings.resource_enable_throttling || 'true') === 'true';
+        document.getElementById('niceLevel').value = parseInt(settings.resource_nice_level || '10');
+        
+        // Trigger toggles
+        document.getElementById('pauseOnCpuTemp').checked = (settings.resource_pause_on_cpu_temp || 'true') === 'true';
+        document.getElementById('cpuTempThreshold').value = parseFloat(settings.resource_cpu_temp_threshold || '85');
+        document.getElementById('pauseOnGpuTemp').checked = (settings.resource_pause_on_gpu_temp || 'true') === 'true';
+        document.getElementById('gpuTempThreshold').value = parseFloat(settings.resource_gpu_temp_threshold || '83');
+        document.getElementById('pauseOnMemory').checked = (settings.resource_pause_on_memory || 'false') === 'true';
+        document.getElementById('memoryThreshold').value = parseFloat(settings.resource_memory_threshold || '85');
+        document.getElementById('pauseOnCpuUsage').checked = (settings.resource_pause_on_cpu_usage || 'false') === 'true';
+        document.getElementById('cpuUsageThreshold').value = parseFloat(settings.resource_cpu_usage_threshold || '95');
     }
 }
 
 async function saveResourceSettings() {
     const settings = {
-        'resource_cpu_threshold': document.getElementById('cpuThreshold').value,
-        'resource_memory_threshold': document.getElementById('memoryThreshold').value,
-        'resource_gpu_threshold': document.getElementById('gpuThreshold').value,
+        'resource_enable_throttling': document.getElementById('enableThrottling').checked ? 'true' : 'false',
         'resource_nice_level': document.getElementById('niceLevel').value,
-        'resource_enable_throttling': document.getElementById('enableThrottling').checked ? 'true' : 'false'
+        'resource_pause_on_cpu_temp': document.getElementById('pauseOnCpuTemp').checked ? 'true' : 'false',
+        'resource_cpu_temp_threshold': document.getElementById('cpuTempThreshold').value,
+        'resource_pause_on_gpu_temp': document.getElementById('pauseOnGpuTemp').checked ? 'true' : 'false',
+        'resource_gpu_temp_threshold': document.getElementById('gpuTempThreshold').value,
+        'resource_pause_on_memory': document.getElementById('pauseOnMemory').checked ? 'true' : 'false',
+        'resource_memory_threshold': document.getElementById('memoryThreshold').value,
+        'resource_pause_on_cpu_usage': document.getElementById('pauseOnCpuUsage').checked ? 'true' : 'false',
+        'resource_cpu_usage_threshold': document.getElementById('cpuUsageThreshold').value,
     };
     
     const result = await apiRequest('/settings/resources', {
@@ -691,31 +785,30 @@ async function saveResourceSettings() {
 function applyPreset(preset) {
     const presets = {
         'conservative': {
-            cpu: 70,
-            memory: 70,
-            gpu: 75,
-            nice: 15
+            cpuTemp: 75, gpuTemp: 72, memory: 80, cpuUsage: 90, nice: 15,
+            pauseCpuTemp: true, pauseGpuTemp: true, pauseMemory: true, pauseCpuUsage: false
         },
         'balanced': {
-            cpu: 85,
-            memory: 80,
-            gpu: 85,
-            nice: 10
+            cpuTemp: 85, gpuTemp: 80, memory: 85, cpuUsage: 95, nice: 10,
+            pauseCpuTemp: true, pauseGpuTemp: true, pauseMemory: false, pauseCpuUsage: false
         },
         'aggressive': {
-            cpu: 95,
-            memory: 90,
-            gpu: 95,
-            nice: 5
+            cpuTemp: 95, gpuTemp: 88, memory: 90, cpuUsage: 98, nice: 5,
+            pauseCpuTemp: true, pauseGpuTemp: true, pauseMemory: false, pauseCpuUsage: false
         }
     };
     
     const config = presets[preset];
     if (config) {
-        document.getElementById('cpuThreshold').value = config.cpu;
+        document.getElementById('cpuTempThreshold').value = config.cpuTemp;
+        document.getElementById('gpuTempThreshold').value = config.gpuTemp;
         document.getElementById('memoryThreshold').value = config.memory;
-        document.getElementById('gpuThreshold').value = config.gpu;
+        document.getElementById('cpuUsageThreshold').value = config.cpuUsage;
         document.getElementById('niceLevel').value = config.nice;
+        document.getElementById('pauseOnCpuTemp').checked = config.pauseCpuTemp;
+        document.getElementById('pauseOnGpuTemp').checked = config.pauseGpuTemp;
+        document.getElementById('pauseOnMemory').checked = config.pauseMemory;
+        document.getElementById('pauseOnCpuUsage').checked = config.pauseCpuUsage;
     }
 }
 

@@ -111,12 +111,13 @@
         <!-- Resource Monitoring -->
             <div class="resource-grid">
                 <div class="resource-card">
-                    <div class="resource-label">CPU Usage</div>
+                    <div class="resource-label">CPU Temperature</div>
                     <div class="flex items-center gap-2">
-                        <div class="resource-value" id="cpuUsage" style="color:var(--accent)">0%</div>
-                        <span style="font-size:12px;color:var(--text-muted)" id="cpuStatus"></span>
+                        <div class="resource-value" id="cpuTemp" style="color:var(--accent)">N/A</div>
+                        <span style="font-size:12px;color:var(--text-muted)" id="cpuTempStatus"></span>
                     </div>
-                    <div class="resource-bar-track"><div class="resource-bar-fill cyan" id="cpuBar" style="width:0%"></div></div>
+                    <div class="resource-bar-track"><div class="resource-bar-fill cyan" id="cpuTempBar" style="width:0%"></div></div>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:4px" id="cpuUsageInfo"></div>
                 </div>
                 <div class="resource-card">
                     <div class="resource-label">Memory Usage</div>
@@ -127,12 +128,21 @@
                     <div class="resource-bar-track"><div class="resource-bar-fill purple" id="memoryBar" style="width:0%"></div></div>
                 </div>
                 <div class="resource-card">
-                    <div class="resource-label">GPU Usage</div>
+                    <div class="resource-label">GPU Temperature</div>
                     <div class="flex items-center gap-2">
-                        <div class="resource-value" id="gpuUsage" style="color:#e67e22">N/A</div>
-                        <span style="font-size:12px;color:var(--text-muted)" id="gpuStatus"></span>
+                        <div class="resource-value" id="gpuTemp" style="color:#e67e22">N/A</div>
+                        <span style="font-size:12px;color:var(--text-muted)" id="gpuTempStatus"></span>
                     </div>
-                    <div class="resource-bar-track"><div class="resource-bar-fill orange" id="gpuBar" style="width:0%"></div></div>
+                    <div class="resource-bar-track"><div class="resource-bar-fill orange" id="gpuTempBar" style="width:0%"></div></div>
+                    <div style="font-size:11px;color:var(--text-muted);margin-top:4px" id="gpuUsageInfo"></div>
+                </div>
+                <div class="resource-card">
+                    <div class="resource-label">GPU VRAM</div>
+                    <div class="flex items-center gap-2">
+                        <div class="resource-value" id="gpuVram" style="color:#3498db">N/A</div>
+                        <span style="font-size:12px;color:var(--text-muted)" id="gpuVramStatus"></span>
+                    </div>
+                    <div class="resource-bar-track"><div class="resource-bar-fill cyan" id="gpuVramBar" style="width:0%"></div></div>
                 </div>
             </div>
 
@@ -330,106 +340,107 @@
             <div class="card">
                 <h2 class="page-title" style="margin-bottom:20px">Resource Management Settings</h2>
                 
-                <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-                    <!-- CPU Threshold -->
-                    <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">
-                            CPU Threshold (%)
-                        </label>
+                <!-- Master Enable -->
+                <div style="margin-bottom:24px;padding-bottom:20px;border-bottom:1px solid var(--border)">
+                    <label class="flex items-center gap-3 cursor-pointer">
                         <input 
-                            type="number" 
-                            id="cpuThreshold" 
-                            min="50" 
-                            max="100" 
-                            step="5"
-                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
-                            value="90"
+                            type="checkbox" 
+                            id="enableThrottling" 
+                            class="w-5 h-5 bg-gray-700 border-gray-600 rounded"
+                            checked
                         >
-                        <p class="text-sm text-gray-400 mt-1">Pause encoding if CPU usage exceeds this threshold</p>
-                    </div>
-                    
-                    <!-- Memory Threshold -->
-                    <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">
-                            Memory Threshold (%)
+                        <span style="font-size:15px;font-weight:600;color:var(--text-heading)">
+                            Enable automatic throttling
+                        </span>
+                    </label>
+                    <p class="text-sm text-gray-400 mt-1 ml-8">
+                        Automatically pause/resume encoding when triggers fire. HandBrakeCLI will peg CPU/GPU to 100% by design — temperature-based triggers prevent thermal damage without deadlocking every job.
+                    </p>
+                </div>
+
+                <!-- Pause Triggers -->
+                <h3 style="font-size:15px;font-weight:600;color:var(--text-heading);margin-bottom:16px">Pause Triggers</h3>
+                <div style="display:flex;flex-direction:column;gap:16px">
+
+                    <!-- CPU Temperature -->
+                    <div style="display:flex;align-items:center;gap:16px;padding:12px 16px;background:var(--card-inner-bg, rgba(0,0,0,0.15));border:1px solid var(--border);border-radius:8px">
+                        <label class="flex items-center gap-2 cursor-pointer" style="min-width:200px">
+                            <input type="checkbox" id="pauseOnCpuTemp" class="w-4 h-4 bg-gray-700 border-gray-600 rounded" checked>
+                            <span style="font-size:14px;color:var(--text-heading);font-weight:500">CPU Temperature</span>
                         </label>
-                        <input 
-                            type="number" 
-                            id="memoryThreshold" 
-                            min="50" 
-                            max="100" 
-                            step="5"
-                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
-                            value="85"
-                        >
-                        <p class="text-sm text-gray-400 mt-1">Pause encoding if memory usage exceeds this threshold</p>
+                        <div style="display:flex;align-items:center;gap:8px;flex:1">
+                            <input type="number" id="cpuTempThreshold" min="50" max="105" step="1" value="85"
+                                class="w-20 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center" style="font-size:14px">
+                            <span style="font-size:13px;color:var(--text-muted)">°C — pause if CPU temperature exceeds this</span>
+                        </div>
+                        <span id="cpuTempAvail" style="font-size:11px;padding:2px 8px;border-radius:4px;white-space:nowrap"></span>
                     </div>
-                    
-                    <!-- GPU Threshold -->
-                    <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">
-                            GPU Threshold (%)
+
+                    <!-- GPU Temperature -->
+                    <div style="display:flex;align-items:center;gap:16px;padding:12px 16px;background:var(--card-inner-bg, rgba(0,0,0,0.15));border:1px solid var(--border);border-radius:8px">
+                        <label class="flex items-center gap-2 cursor-pointer" style="min-width:200px">
+                            <input type="checkbox" id="pauseOnGpuTemp" class="w-4 h-4 bg-gray-700 border-gray-600 rounded" checked>
+                            <span style="font-size:14px;color:var(--text-heading);font-weight:500">GPU Temperature</span>
                         </label>
-                        <input 
-                            type="number" 
-                            id="gpuThreshold" 
-                            min="50" 
-                            max="100" 
-                            step="5"
-                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
-                            value="90"
-                        >
-                        <p class="text-sm text-gray-400 mt-1">Pause encoding if GPU usage exceeds this threshold</p>
+                        <div style="display:flex;align-items:center;gap:8px;flex:1">
+                            <input type="number" id="gpuTempThreshold" min="50" max="100" step="1" value="83"
+                                class="w-20 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center" style="font-size:14px">
+                            <span style="font-size:13px;color:var(--text-muted)">°C — pause if GPU temperature exceeds this</span>
+                        </div>
+                        <span id="gpuTempAvail" style="font-size:11px;padding:2px 8px;border-radius:4px;white-space:nowrap"></span>
                     </div>
-                    
-                    <!-- Nice Level -->
-                    <div>
-                        <label class="block text-sm font-medium text-gray-300 mb-2">
-                            Process Priority (Nice Level)
+
+                    <!-- Memory Usage -->
+                    <div style="display:flex;align-items:center;gap:16px;padding:12px 16px;background:var(--card-inner-bg, rgba(0,0,0,0.15));border:1px solid var(--border);border-radius:8px">
+                        <label class="flex items-center gap-2 cursor-pointer" style="min-width:200px">
+                            <input type="checkbox" id="pauseOnMemory" class="w-4 h-4 bg-gray-700 border-gray-600 rounded">
+                            <span style="font-size:14px;color:var(--text-heading);font-weight:500">Memory Usage</span>
                         </label>
-                        <input 
-                            type="number" 
-                            id="niceLevel" 
-                            min="0" 
-                            max="19" 
-                            step="1"
-                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white"
-                            value="10"
-                        >
-                        <p class="text-sm text-gray-400 mt-1">Higher = lower priority (0-19)</p>
+                        <div style="display:flex;align-items:center;gap:8px;flex:1">
+                            <input type="number" id="memoryThreshold" min="50" max="100" step="5" value="85"
+                                class="w-20 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center" style="font-size:14px">
+                            <span style="font-size:13px;color:var(--text-muted)">% — pause if RAM usage exceeds this</span>
+                        </div>
                     </div>
-                    
-                    <!-- Enable Throttling -->
-                    <div class="md:col-span-2">
-                        <label class="flex items-center gap-3 cursor-pointer">
-                            <input 
-                                type="checkbox" 
-                                id="enableThrottling" 
-                                class="w-5 h-5 bg-gray-700 border-gray-600 rounded"
-                                checked
-                            >
-                            <span class="text-sm font-medium text-gray-300">
-                                Enable automatic resource throttling
-                            </span>
+
+                    <!-- CPU Usage (optional legacy) -->
+                    <div style="display:flex;align-items:center;gap:16px;padding:12px 16px;background:var(--card-inner-bg, rgba(0,0,0,0.15));border:1px solid var(--border);border-radius:8px">
+                        <label class="flex items-center gap-2 cursor-pointer" style="min-width:200px">
+                            <input type="checkbox" id="pauseOnCpuUsage" class="w-4 h-4 bg-gray-700 border-gray-600 rounded">
+                            <span style="font-size:14px;color:var(--text-heading);font-weight:500">CPU Usage</span>
                         </label>
-                        <p class="text-sm text-gray-400 mt-1 ml-8">
-                            Automatically pause/resume encoding based on system resource usage
-                        </p>
+                        <div style="display:flex;align-items:center;gap:8px;flex:1">
+                            <input type="number" id="cpuUsageThreshold" min="50" max="100" step="5" value="95"
+                                class="w-20 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center" style="font-size:14px">
+                            <span style="font-size:13px;color:var(--text-muted)">% — ⚠️ encoding pegs CPU to 100%; this will pause most jobs</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Process Priority -->
+                <div style="margin-top:20px">
+                    <label style="font-size:14px;font-weight:500;color:var(--text-heading);display:block;margin-bottom:6px">
+                        Process Priority (Nice Level)
+                    </label>
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <input type="number" id="niceLevel" min="0" max="19" step="1" value="10"
+                            class="w-20 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center" style="font-size:14px">
+                        <span style="font-size:13px;color:var(--text-muted)">Higher = lower priority (0–19)</span>
                     </div>
                 </div>
                 
                 <!-- Preset Buttons -->
                 <div class="mt-8 pt-6 border-t border-gray-700">
-                    <h3 style="font-size:17px;font-weight:600;color:var(--text-heading);margin-bottom:14px">Quick Presets</h3>
-                    <div class="flex gap-3">
+                    <h3 style="font-size:15px;font-weight:600;color:var(--text-heading);margin-bottom:14px">Quick Presets</h3>
+                    <div class="flex gap-3 flex-wrap">
                         <button onclick="applyPreset('conservative')" class="btn btn-secondary">
-                            Conservative (CPU: 70%, Mem: 70%, Nice: 15)
+                            Conservative (CPU 75°C, GPU 72°C, Mem 80%)
                         </button>
                         <button onclick="applyPreset('balanced')" class="btn btn-secondary">
-                            Balanced (CPU: 85%, Mem: 80%, Nice: 10)
+                            Balanced (CPU 85°C, GPU 80°C)
                         </button>
                         <button onclick="applyPreset('aggressive')" class="btn btn-secondary">
-                            Aggressive (CPU: 95%, Mem: 90%, Nice: 5)
+                            Aggressive (CPU 95°C, GPU 88°C)
                         </button>
                     </div>
                 </div>

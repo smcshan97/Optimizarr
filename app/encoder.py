@@ -31,13 +31,20 @@ class EncodingJob:
         self.monitoring_thread = None
         self.stop_monitoring = False
         
-        # Resource limits
+        # Resource limits — temperature-first defaults
         self.resource_limits = resource_limits or {
-            'cpu_threshold': 90.0,
-            'memory_threshold': 85.0,
-            'gpu_threshold': 90.0,
+            'enable_throttling': True,
             'nice_level': 10,
-            'enable_throttling': True
+            # Primary triggers (temperature)
+            'pause_on_cpu_temp': True,
+            'cpu_temp_threshold': 85.0,
+            'pause_on_gpu_temp': True,
+            'gpu_temp_threshold': 83.0,
+            # Secondary triggers (optional)
+            'pause_on_memory': False,
+            'memory_threshold': 85.0,
+            'pause_on_cpu_usage': False,
+            'cpu_usage_threshold': 95.0,
         }
         
         # Get queue item details
@@ -317,12 +324,20 @@ class EncodingJob:
             if not self.resource_limits.get('enable_throttling'):
                 continue
             
+            # Build kwargs matching ResourceMonitor.check_thresholds() signature
+            throttle_kwargs = {
+                'pause_on_cpu_temp':    self.resource_limits.get('pause_on_cpu_temp', True),
+                'cpu_temp_threshold':   self.resource_limits.get('cpu_temp_threshold', 85.0),
+                'pause_on_gpu_temp':    self.resource_limits.get('pause_on_gpu_temp', True),
+                'gpu_temp_threshold':   self.resource_limits.get('gpu_temp_threshold', 83.0),
+                'pause_on_memory':      self.resource_limits.get('pause_on_memory', False),
+                'memory_threshold':     self.resource_limits.get('memory_threshold', 85.0),
+                'pause_on_cpu_usage':   self.resource_limits.get('pause_on_cpu_usage', False),
+                'cpu_usage_threshold':  self.resource_limits.get('cpu_usage_threshold', 95.0),
+            }
+            
             # Check if we should pause
-            should_pause, reason = resource_throttler.should_pause_encoding(
-                cpu_threshold=self.resource_limits['cpu_threshold'],
-                memory_threshold=self.resource_limits['memory_threshold'],
-                gpu_threshold=self.resource_limits['gpu_threshold']
-            )
+            should_pause, reason = resource_throttler.should_pause_encoding(**throttle_kwargs)
             
             if should_pause and not self.is_paused:
                 print(f"\n⏸ Pausing encoding: {reason}")
@@ -825,23 +840,35 @@ class EncoderPool:
                 """)
                 settings = {row[0]: row[1] for row in cursor.fetchall()}
             
-            # Parse settings with defaults
+            # Parse settings with defaults — temperature-first model
             return {
-                'cpu_threshold': float(settings.get('resource_cpu_threshold', '90.0')),
-                'memory_threshold': float(settings.get('resource_memory_threshold', '85.0')),
-                'gpu_threshold': float(settings.get('resource_gpu_threshold', '90.0')),
+                'enable_throttling': settings.get('resource_enable_throttling', 'true').lower() == 'true',
                 'nice_level': int(settings.get('resource_nice_level', '10')),
-                'enable_throttling': settings.get('resource_enable_throttling', 'true').lower() == 'true'
+                # Primary triggers (temperature)
+                'pause_on_cpu_temp': settings.get('resource_pause_on_cpu_temp', 'true').lower() == 'true',
+                'cpu_temp_threshold': float(settings.get('resource_cpu_temp_threshold', '85.0')),
+                'pause_on_gpu_temp': settings.get('resource_pause_on_gpu_temp', 'true').lower() == 'true',
+                'gpu_temp_threshold': float(settings.get('resource_gpu_temp_threshold', '83.0')),
+                # Secondary triggers (optional)
+                'pause_on_memory': settings.get('resource_pause_on_memory', 'false').lower() == 'true',
+                'memory_threshold': float(settings.get('resource_memory_threshold', '85.0')),
+                'pause_on_cpu_usage': settings.get('resource_pause_on_cpu_usage', 'false').lower() == 'true',
+                'cpu_usage_threshold': float(settings.get('resource_cpu_usage_threshold', '95.0')),
             }
         except Exception as e:
             print(f"⚠️ Error loading resource settings: {e}")
             # Return defaults
             return {
-                'cpu_threshold': 90.0,
-                'memory_threshold': 85.0,
-                'gpu_threshold': 90.0,
+                'enable_throttling': True,
                 'nice_level': 10,
-                'enable_throttling': True
+                'pause_on_cpu_temp': True,
+                'cpu_temp_threshold': 85.0,
+                'pause_on_gpu_temp': True,
+                'gpu_temp_threshold': 83.0,
+                'pause_on_memory': False,
+                'memory_threshold': 85.0,
+                'pause_on_cpu_usage': False,
+                'cpu_usage_threshold': 95.0,
             }
     
     def stop(self):
