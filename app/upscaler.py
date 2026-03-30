@@ -120,7 +120,8 @@ def _get_binary_version(binary_path: str) -> str:
     try:
         result = subprocess.run(
             [binary_path, "--help"],
-            capture_output=True, text=True, timeout=5
+            capture_output=True, text=True, timeout=5,
+            encoding='utf-8', errors='replace'
         )
         output = result.stdout + result.stderr
         for line in output.split("\n")[:8]:
@@ -496,6 +497,7 @@ def _get_video_info(input_path: str) -> Dict:
                 "-show_streams", "-select_streams", "v:0", input_path,
             ],
             capture_output=True, text=True, timeout=30,
+            encoding='utf-8', errors='replace',
         )
         import json as _json
         data = _json.loads(result.stdout)
@@ -633,7 +635,8 @@ def run_upscale_pipeline(
             "-y",
         ]
         result = subprocess.run(
-            extract_cmd, capture_output=True, text=True, timeout=3600
+            extract_cmd, capture_output=True, text=True, timeout=3600,
+            encoding='utf-8', errors='replace'
         )
         if result.returncode != 0:
             optimizarr_logger.app_logger.error(
@@ -670,6 +673,8 @@ def run_upscale_pipeline(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            encoding='utf-8',
+            errors='replace',
         )
 
         # Parse per-frame progress from upscaler output
@@ -716,7 +721,8 @@ def run_upscale_pipeline(
             "-y",
         ]
         result = subprocess.run(
-            reassemble_cmd, capture_output=True, text=True, timeout=3600
+            reassemble_cmd, capture_output=True, text=True, timeout=3600,
+            encoding='utf-8', errors='replace'
         )
         if result.returncode != 0:
             optimizarr_logger.app_logger.error(

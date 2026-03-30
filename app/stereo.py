@@ -113,6 +113,7 @@ def detect_iw3() -> Dict:
             result = subprocess.run(
                 [python_cmd, "-m", "iw3", "--help"],
                 capture_output=True, text=True, timeout=15,
+                encoding='utf-8', errors='replace',
             )
             if result.returncode == 0 or "usage" in (result.stdout + result.stderr).lower():
                 info["available"] = True
@@ -144,6 +145,7 @@ def _get_python_cmd() -> Optional[str]:
             result = subprocess.run(
                 [cmd, "-m", "iw3", "--help"],
                 capture_output=True, text=True, timeout=10,
+                encoding='utf-8', errors='replace',
             )
             if result.returncode == 0 or "usage" in (result.stdout + result.stderr).lower():
                 return cmd
@@ -205,6 +207,8 @@ def _run_iw3(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            encoding='utf-8',
+            errors='replace',
         )
 
         # iw3 prints progress like "Processing: 50/200 frames"
@@ -284,6 +288,8 @@ def _run_3d_to_2d(
             stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
+            encoding='utf-8',
+            errors='replace',
         )
 
         # ffmpeg prints "frame=  500" style progress

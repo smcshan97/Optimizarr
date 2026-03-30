@@ -29,7 +29,8 @@ class MediaScanner:
             print(f"⚠ {name} not found in PATH")
             return False
         try:
-            subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            subprocess.run(cmd, capture_output=True, text=True, timeout=5,
+                           encoding='utf-8', errors='replace')
             print(f"✓ {name} is available")
             return True
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
@@ -75,7 +76,8 @@ class MediaScanner:
             result = subprocess.run(
                 ['ffprobe', '-v', 'quiet', '-print_format', 'json',
                  '-show_streams', '-show_format', file_path],
-                capture_output=True, text=True, timeout=30
+                capture_output=True, text=True, timeout=30,
+                encoding='utf-8', errors='replace'
             )
             if result.returncode != 0 or not result.stdout.strip():
                 return None
@@ -135,7 +137,8 @@ class MediaScanner:
         try:
             result = subprocess.run(
                 ['HandBrakeCLI', '--scan', '--json', '-i', file_path],
-                capture_output=True, text=True, timeout=60
+                capture_output=True, text=True, timeout=60,
+                encoding='utf-8', errors='replace'
             )
             stderr = result.stderr or ''
             json_match = re.search(r'\{\s*"JSON Title Set"', stderr)

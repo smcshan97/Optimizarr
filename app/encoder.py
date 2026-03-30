@@ -526,6 +526,8 @@ class EncodingJob:
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                encoding='utf-8',
+                errors='replace',
             )
 
             if self.resource_limits.get('nice_level'):
@@ -896,7 +898,9 @@ def detect_hardware_acceleration() -> Dict:
             ["HandBrakeCLI", "--help"],
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=10,
+            encoding='utf-8',
+            errors='replace'
         )
         
         output = result.stdout.lower() + result.stderr.lower()

@@ -70,7 +70,8 @@ class ResourceMonitor:
         try:
             result = subprocess.run(
                 ['nvidia-smi', '--query-gpu=name', '--format=csv,noheader,nounits'],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, text=True, timeout=5,
+                encoding='utf-8', errors='replace'
             )
             if result.returncode == 0 and result.stdout.strip():
                 gpu_names = result.stdout.strip().split('\n')
@@ -112,6 +113,7 @@ class ResourceMonitor:
                      '-Namespace root/WMI -ErrorAction Stop '
                      '| Select-Object -First 1 -ExpandProperty CurrentTemperature'],
                     capture_output=True, text=True, timeout=5,
+                    encoding='utf-8', errors='replace',
                     creationflags=creation_flags
                 )
                 if result.returncode == 0 and result.stdout.strip():
@@ -177,6 +179,7 @@ class ResourceMonitor:
                  '-Namespace root/WMI -ErrorAction Stop '
                  '| Select-Object -ExpandProperty CurrentTemperature'],
                 capture_output=True, text=True, timeout=5,
+                encoding='utf-8', errors='replace',
                 creationflags=creation_flags
             )
             if result.returncode != 0 or not result.stdout.strip():
@@ -307,7 +310,8 @@ class ResourceMonitor:
                     'memory.used,memory.total,temperature.gpu,power.draw,power.limit',
                     '--format=csv,noheader,nounits'
                 ],
-                capture_output=True, text=True, timeout=5
+                capture_output=True, text=True, timeout=5,
+                encoding='utf-8', errors='replace'
             )
             if result.returncode != 0:
                 return None
