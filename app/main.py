@@ -207,11 +207,13 @@ def _seed_default_profiles():
 
 def main():
     """Main entry point for running the application."""
+    import os
+    is_production = os.environ.get("OPTIMIZARR_ENV", "").lower() == "production"
     uvicorn.run(
         "app.main:app",
         host=settings.host,
         port=settings.port,
-        reload=True,
+        reload=not is_production,
         log_level=settings.log_level.lower()
     )
 

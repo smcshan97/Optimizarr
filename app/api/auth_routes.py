@@ -52,7 +52,8 @@ async def login(credentials: LoginRequest):
             "id": user['id'],
             "username": user['username'],
             "email": user.get('email'),
-            "is_admin": user['is_admin']
+            "is_admin": user['is_admin'],
+            "must_change_password": bool(user.get('must_change_password', False)),
         }
     )
 
@@ -134,11 +135,11 @@ async def change_password(
     # Hash new password
     new_password_hash = auth.hash_password(request.new_password)
     
-    # Update password in database
+    # Update password in database and clear must_change_password flag
     with db.get_connection() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "UPDATE users SET password_hash = ? WHERE id = ?",
+            "UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?",
             (new_password_hash, current_user['id'])
         )
     

@@ -3,16 +3,46 @@ Configuration module for Optimizarr.
 Loads settings from environment variables with sensible defaults.
 """
 import os
+import secrets
 from pathlib import Path
 from pydantic_settings import BaseSettings
 from typing import Optional
+
+_DEFAULT_SECRET = "insecure-default-key-change-in-production"
+_SECRET_FILE = Path("data") / ".secret_key"
+
+
+def _resolve_secret_key() -> str:
+    """Return a stable secret key, auto-generating one on first run.
+
+    Priority:
+      1. OPTIMIZARR_SECRET_KEY env var (if set and not the default)
+      2. data/.secret_key file (persists across restarts)
+      3. Generate a new random key → write to data/.secret_key
+    """
+    env_val = os.environ.get("OPTIMIZARR_SECRET_KEY", "").strip()
+    if env_val and env_val != _DEFAULT_SECRET:
+        return env_val
+
+    # Try reading from persisted file
+    if _SECRET_FILE.exists():
+        stored = _SECRET_FILE.read_text().strip()
+        if stored and stored != _DEFAULT_SECRET:
+            return stored
+
+    # Generate and persist
+    _SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
+    new_key = secrets.token_hex(32)
+    _SECRET_FILE.write_text(new_key)
+    print(f"✓ Generated new SECRET_KEY → {_SECRET_FILE}")
+    return new_key
 
 
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
     
     # Security
-    secret_key: str = "insecure-default-key-change-in-production"
+    secret_key: str = _DEFAULT_SECRET
     admin_username: str = "admin"
     admin_password: str = "admin"
     
@@ -42,6 +72,10 @@ class Settings(BaseSettings):
 
 # Global settings instance
 settings = Settings()
+
+# Override secret key if still the insecure default
+if settings.secret_key == _DEFAULT_SECRET:
+    settings.secret_key = _resolve_secret_key()
 
 
 def ensure_data_directories():

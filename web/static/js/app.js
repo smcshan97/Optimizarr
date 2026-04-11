@@ -709,6 +709,14 @@ document.addEventListener('DOMContentLoaded', () => {
     const sidebarUser = document.getElementById('sidebarUser');
     if (sidebarUser) sidebarUser.textContent = user.username || 'admin';
     
+    // Force password change if flagged (default admin on first login)
+    if (user.must_change_password) {
+        showTab('settings');
+        setTimeout(() => {
+            alert('⚠️ Your account is using the default password. Please change it now in Settings → Account.');
+        }, 300);
+    }
+    
     // Load initial data
     loadStats();
     loadResources();
@@ -888,11 +896,11 @@ async function loadProfiles() {
                 </div>
                 <div class="flex gap-2">
                     <button onclick="editProfile(${p.id})" 
-                        class="bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-sm">
+                        class="btn btn-primary btn-sm">
                         Edit
                     </button>
                     <button onclick="deleteProfile(${p.id}, '${p.name}')" 
-                        class="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-sm">
+                        class="btn btn-danger btn-sm">
                         Delete
                     </button>
                 </div>
@@ -1105,15 +1113,15 @@ async function loadScanRoots() {
                 </div>
                 <div class="flex gap-2">
                     <button onclick="scanSingleRoot(${r.id})" 
-                        class="bg-green-600 hover:bg-green-700 px-3 py-1 rounded text-sm">
+                        class="btn btn-success btn-sm">
                         Scan Now
                     </button>
                     <button onclick="editScanRoot(${r.id})" 
-                        class="bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-sm">
+                        class="btn btn-primary btn-sm">
                         Edit
                     </button>
                     <button onclick="deleteScanRoot(${r.id}, '${r.path}')" 
-                        class="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-sm">
+                        class="btn btn-danger btn-sm">
                         Delete
                     </button>
                 </div>
@@ -1559,7 +1567,7 @@ async function loadDirectoryListing(path) {
                     <span class="text-yellow-400">📁</span>
                     <span class="flex-1" onclick="loadDirectoryListing('${escapedPath}')">${dir.name}</span>
                     <button onclick="event.stopPropagation(); selectBrowsedFolder('${escapedPath}')"
-                        class="hidden group-hover:block bg-blue-600 hover:bg-blue-700 px-2 py-1 rounded text-xs">
+                        class="hidden group-hover:block btn btn-primary btn-xs">
                         Select
                     </button>
                 </div>
@@ -1624,6 +1632,14 @@ async function changePassword() {
         document.getElementById('currentPassword').value = '';
         document.getElementById('newPassword').value = '';
         document.getElementById('confirmPassword').value = '';
+        // Clear the must_change_password flag in localStorage
+        try {
+            const user = JSON.parse(localStorage.getItem('user') || '{}');
+            if (user.must_change_password) {
+                user.must_change_password = false;
+                localStorage.setItem('user', JSON.stringify(user));
+            }
+        } catch (e) { /* ignore */ }
     }
 }
 
@@ -1998,8 +2014,8 @@ async function loadWatches() {
                     <div class="mt-1 text-xs text-gray-500">Extensions: ${w.extensions}</div>
                 </div>
                 <div class="flex gap-2">
-                    <button onclick='editWatch(${JSON.stringify(w)})' class="bg-gray-600 hover:bg-gray-500 px-3 py-1 rounded text-sm">Edit</button>
-                    <button onclick="deleteWatch(${w.id})" class="bg-red-600 hover:bg-red-700 px-3 py-1 rounded text-sm">Delete</button>
+                    <button onclick='editWatch(${JSON.stringify(w)})' class="btn btn-secondary btn-sm">Edit</button>
+                    <button onclick="deleteWatch(${w.id})" class="btn btn-danger btn-sm">Delete</button>
                 </div>
             </div>
         </div>
@@ -2561,13 +2577,13 @@ function renderUpscalerCards(info) {
                 <div class="mt-2">
                     <p class="text-xs text-red-400">${dl.error || 'Download failed'}</p>
                     <button onclick="startUpscalerDownload('${key}')"
-                        class="mt-1 bg-blue-600 hover:bg-blue-700 px-3 py-1 rounded text-xs">Retry</button>
+                        class="mt-1 btn btn-primary btn-xs">Retry</button>
                 </div>`;
         } else {
             actionBtn = `
                 <div class="mt-2">
                     <button onclick="startUpscalerDownload('${key}')"
-                        class="bg-blue-600 hover:bg-blue-700 px-3 py-1.5 rounded text-sm font-medium">
+                        class="btn btn-primary btn-sm">
                         ⬇ Download
                     </button>
                     <a href="${up.download_url}" target="_blank"

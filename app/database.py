@@ -370,6 +370,15 @@ class Database:
                 cursor.execute("ALTER TABLE queue ADD COLUMN stereo_plan TEXT")
                 print("  ↳ Migrated: added 'stereo_plan' to queue")
 
+            # Security: must_change_password flag for default admin
+            try:
+                cursor.execute("SELECT must_change_password FROM users LIMIT 1")
+            except Exception:
+                cursor.execute("ALTER TABLE users ADD COLUMN must_change_password BOOLEAN DEFAULT 0")
+                # Flag the default admin to force a password change
+                cursor.execute("UPDATE users SET must_change_password = 1 WHERE username = 'admin'")
+                print("  ↳ Migrated: added 'must_change_password' to users")
+
             # Enforce single default profile — keep only the lowest-id one
             cursor.execute("SELECT id FROM profiles WHERE is_default = 1 ORDER BY id")
             default_rows = cursor.fetchall()
