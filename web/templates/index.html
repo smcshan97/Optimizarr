@@ -492,6 +492,24 @@
                 </div>
             </div>
 
+            <!-- Notification Webhooks Section -->
+            <div class="card" style="margin-top:24px">
+                <div class="flex justify-between items-center mb-2">
+                    <div>
+                        <h2 class="page-title">🔔 Notification Webhooks</h2>
+                        <p class="text-sm text-gray-400 mt-1">
+                            Receive notifications on Discord, Slack, or any webhook URL when encodes complete, fail, or the queue empties.
+                        </p>
+                    </div>
+                    <button onclick="showAddNotificationModal()" class="btn btn-primary btn-sm">
+                        + Add Webhook
+                    </button>
+                </div>
+                <div id="notificationsList" class="space-y-3 mt-4">
+                    <p class="text-gray-500 text-sm">Loading…</p>
+                </div>
+            </div>
+
             <!-- Backup & Restore Section -->
             <div class="card" style="margin-top:24px">
                 <h2 class="page-title" style="margin-bottom:4px">💾 Backup & Restore</h2>

@@ -212,6 +212,19 @@ class Database:
                 )
             """)
             
+            # Notification webhooks table
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    webhook_url TEXT NOT NULL,
+                    webhook_type TEXT DEFAULT 'discord',
+                    events TEXT DEFAULT '["encode_complete","encode_failed","queue_empty"]',
+                    enabled BOOLEAN DEFAULT 1,
+                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            
             # Insert default schedule if none exists
             cursor.execute("SELECT COUNT(*) FROM schedule")
             if cursor.fetchone()[0] == 0:

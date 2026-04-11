@@ -580,6 +580,11 @@ class EncodingJob:
                     status='failed',
                     error_message=f"HandBrakeCLI exited with code {return_code}: {tail[:200]}"
                 )
+                try:
+                    from app.notifications import notify_encode_failed
+                    notify_encode_failed(original_input, f"Exit code {return_code}", self.profile.get('name', ''))
+                except Exception:
+                    pass
                 return False
 
         except Exception as e:
@@ -589,6 +594,11 @@ class EncodingJob:
                 status='failed',
                 error_message=str(e)
             )
+            try:
+                from app.notifications import notify_encode_failed
+                notify_encode_failed(original_input, str(e), self.profile.get('name', ''))
+            except Exception:
+                pass
             return False
 
         finally:
@@ -688,6 +698,16 @@ class EncodingJob:
                 "savings_percent": savings_pct,
                 "duration_seconds": encoding_time,
             })
+
+            # Fire notification
+            try:
+                from app.notifications import notify_encode_complete
+                notify_encode_complete(
+                    str(input_path), original_size, new_size,
+                    savings, encoding_time, self.profile['name']
+                )
+            except Exception:
+                pass
 
         except Exception as e:
             optimizarr_logger.log_handbrake_error(str(input_path), str(e))
@@ -825,6 +845,11 @@ class EncoderPool:
                 else:
                     # No more pending items
                     print("✓ Queue is empty")
+                    try:
+                        from app.notifications import notify_queue_empty
+                        notify_queue_empty()
+                    except Exception:
+                        pass
                     break
             
             time.sleep(1)

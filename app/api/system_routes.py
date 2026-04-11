@@ -613,3 +613,121 @@ async def get_windows_active_hours(current_user: dict = Depends(get_current_user
     return {"available": True, **hours}
 
 
+
+# ============================================================
+# NOTIFICATION WEBHOOK ENDPOINTS
+# ============================================================
+
+@router.get("/notifications")
+async def list_notifications(current_user: dict = Depends(get_current_user)):
+    """List all notification webhooks."""
+    import json as _json
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM notifications ORDER BY created_at DESC")
+        cols = [d[0] for d in cursor.description]
+        rows = [dict(zip(cols, row)) for row in cursor.fetchall()]
+    for r in rows:
+        r['events'] = _json.loads(r['events']) if r.get('events') else []
+    return rows
+
+
+@router.post("/notifications", status_code=201)
+async def create_notification(
+    data: dict,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Create a notification webhook."""
+    import json as _json
+    name = data.get('name', '').strip()
+    url = data.get('webhook_url', '').strip()
+    wtype = data.get('webhook_type', 'discord')
+    events = data.get('events', ['encode_complete', 'encode_failed', 'queue_empty'])
+    enabled = data.get('enabled', True)
+
+    if not name or not url:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=400, detail="Name and webhook_url are required")
+
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO notifications (name, webhook_url, webhook_type, events, enabled)
+            VALUES (?, ?, ?, ?, ?)
+        """, (name, url, wtype, _json.dumps(events), 1 if enabled else 0))
+        new_id = cursor.lastrowid
+
+    return {"id": new_id, "message": f"Notification '{name}' created"}
+
+
+@router.put("/notifications/{notif_id}")
+async def update_notification(
+    notif_id: int,
+    data: dict,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Update a notification webhook."""
+    import json as _json
+    fields = []
+    values = []
+    for key in ('name', 'webhook_url', 'webhook_type', 'enabled'):
+        if key in data:
+            fields.append(f"{key} = ?")
+            val = data[key]
+            if key == 'enabled':
+                val = 1 if val else 0
+            values.append(val)
+    if 'events' in data:
+        fields.append("events = ?")
+        values.append(_json.dumps(data['events']))
+
+    if not fields:
+        return MessageResponse(message="Nothing to update")
+
+    values.append(notif_id)
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"UPDATE notifications SET {', '.join(fields)} WHERE id = ?", values)
+
+    return MessageResponse(message="Notification updated")
+
+
+@router.delete("/notifications/{notif_id}")
+async def delete_notification(
+    notif_id: int,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Delete a notification webhook."""
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM notifications WHERE id = ?", (notif_id,))
+
+    return MessageResponse(message="Notification deleted")
+
+
+@router.post("/notifications/{notif_id}/test")
+async def test_notification(
+    notif_id: int,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Send a test notification to verify webhook connectivity."""
+    import json as _json
+    with db.get_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM notifications WHERE id = ?", (notif_id,))
+        row = cursor.fetchone()
+        if not row:
+            from fastapi import HTTPException
+            raise HTTPException(status_code=404, detail="Notification not found")
+        cols = [d[0] for d in cursor.description]
+        webhook = dict(zip(cols, row))
+
+    from app.notifications import _send_webhook
+    payload = {
+        'event': 'test',
+        'title': '🔔 Test Notification',
+        'message': f"This is a test from Optimizarr webhook **{webhook['name']}**.",
+        'fields': {'Status': 'Working!', 'Type': webhook['webhook_type']},
+    }
+    _send_webhook(webhook, payload)
+    return MessageResponse(message="Test notification sent")

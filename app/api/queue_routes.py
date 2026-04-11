@@ -281,3 +281,23 @@ async def clear_completed_queue(
     return {"message": f"Cleared {count} completed item(s)", "count": count}
 
 
+@router.post("/queue/reorder", response_model=MessageResponse)
+async def reorder_queue(
+    data: dict,
+    current_user: dict = Depends(get_current_user)
+):
+    """Batch-update queue item priorities after a drag-and-drop reorder.
+
+    Body: { "items": [ {"id": 1, "priority": 90}, {"id": 2, "priority": 80}, ... ] }
+    """
+    items = data.get('items', [])
+    if not items:
+        raise HTTPException(status_code=400, detail="No items provided")
+
+    for entry in items:
+        item_id = entry.get('id')
+        priority = entry.get('priority')
+        if item_id is not None and priority is not None:
+            db.update_queue_item(int(item_id), priority=int(priority))
+
+    return MessageResponse(message=f"Reordered {len(items)} items")

@@ -532,6 +532,7 @@ function displayQueueItems(items) {
                     <th class="w-8" style="cursor:default">
                         <input type="checkbox" id="selectAllCheckbox" onchange="toggleSelectAll(this)" title="Select All">
                     </th>
+                    <th class="w-6" style="cursor:default" title="Drag to reorder">⠿</th>
                     <th onclick="toggleSort('file')">File ${sortArrow('file')}</th>
                     <th onclick="toggleSort('codec')">Codec ${sortArrow('codec')}</th>
                     <th onclick="toggleSort('resolution')">Resolution ${sortArrow('resolution')}</th>
@@ -642,12 +643,13 @@ function displayQueueItems(items) {
         const tooltip = `Path: ${item.file_path}\nCodec: ${codec}\nResolution: ${resolution}\nFPS: ${fps}\nBitrate: ${bitrate}`;
 
         html += `
-            <tr class="border-b border-gray-700 hover:bg-gray-750 ${isSelected ? 'bg-gray-700' : ''}">
+            <tr class="border-b border-gray-700 hover:bg-gray-750 ${isSelected ? 'bg-gray-700' : ''}" draggable="true" data-queue-id="${item.id}">
                 <td class="py-2 px-1">
                     <input type="checkbox" class="queue-row-checkbox" data-id="${item.id}" 
                         ${isSelected ? 'checked' : ''}
                         onchange="toggleRowSelect(this, ${item.id})">
                 </td>
+                <td class="py-2 px-1 cursor-grab text-gray-500 text-center drag-handle" title="Drag to reorder">⠿</td>
                 <td class="py-2 px-2 max-w-[220px] truncate" title="${tooltip}">
                     <span class="text-gray-100">${fileName}</span>${item.upscale_plan ? ' <span class="text-blue-400 text-xs" title="AI upscaling queued">🔼</span>' : ''}${item.stereo_plan ? ' <span class="text-purple-400 text-xs" title="3D conversion queued">🎥</span>' : ''}
                 </td>
@@ -680,6 +682,63 @@ function displayQueueItems(items) {
         selectAllBox.indeterminate = selectedQueueIds.size > 0 && selectedQueueIds.size < allBoxes.length;
     }
     updateBulkBar();
+
+    // ── Queue drag-and-drop reorder ──────────────────────────────
+    initQueueDragDrop();
+}
+
+function initQueueDragDrop() {
+    const tbody = document.querySelector('#content-queue tbody');
+    if (!tbody) return;
+
+    let dragRow = null;
+
+    tbody.addEventListener('dragstart', (e) => {
+        const tr = e.target.closest('tr[data-queue-id]');
+        if (!tr) return;
+        dragRow = tr;
+        tr.style.opacity = '0.4';
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('text/plain', tr.dataset.queueId);
+    });
+
+    tbody.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        const tr = e.target.closest('tr[data-queue-id]');
+        if (tr && tr !== dragRow) {
+            const rect = tr.getBoundingClientRect();
+            const midY = rect.top + rect.height / 2;
+            if (e.clientY < midY) {
+                tbody.insertBefore(dragRow, tr);
+            } else {
+                tbody.insertBefore(dragRow, tr.nextSibling);
+            }
+        }
+    });
+
+    tbody.addEventListener('dragend', (e) => {
+        if (dragRow) {
+            dragRow.style.opacity = '1';
+            dragRow = null;
+        }
+        // Collect new order and push to server
+        const rows = tbody.querySelectorAll('tr[data-queue-id]');
+        const items = [];
+        const total = rows.length;
+        rows.forEach((row, index) => {
+            items.push({
+                id: parseInt(row.dataset.queueId),
+                priority: (total - index) * 10
+            });
+        });
+        if (items.length > 0) {
+            apiRequest('/queue/reorder', {
+                method: 'POST',
+                body: JSON.stringify({ items })
+            }).then(() => loadQueue());
+        }
+    });
 }
 
 // Start/Stop encoding
@@ -741,6 +800,9 @@ document.addEventListener('DOMContentLoaded', () => {
 async function loadSettings() {
     // Load account info
     loadAccountInfo();
+    
+    // Load notifications
+    loadNotifications();
     
     // Load resource settings
     const settings = await apiRequest('/settings/resources');
@@ -817,6 +879,154 @@ function applyPreset(preset) {
         document.getElementById('pauseOnGpuTemp').checked = config.pauseGpuTemp;
         document.getElementById('pauseOnMemory').checked = config.pauseMemory;
         document.getElementById('pauseOnCpuUsage').checked = config.pauseCpuUsage;
+    }
+}
+
+// ============================================================
+// NOTIFICATION WEBHOOK MANAGEMENT
+// ============================================================
+
+async function loadNotifications() {
+    const container = document.getElementById('notificationsList');
+    if (!container) return;
+
+    const notifs = await apiRequest('/notifications');
+    if (!notifs || notifs.length === 0) {
+        container.innerHTML = '<p class="text-gray-500 text-sm">No notification webhooks configured. Click "+ Add Webhook" to get started.</p>';
+        return;
+    }
+
+    container.innerHTML = notifs.map(n => {
+        const events = (n.events || []).map(e => {
+            const labels = { encode_complete: '✅ Complete', encode_failed: '❌ Failed', queue_empty: '🏁 Queue Empty' };
+            return `<span class="px-2 py-0.5 bg-gray-600 text-gray-300 text-xs rounded">${labels[e] || e}</span>`;
+        }).join(' ');
+        const typeBadge = {
+            discord: '<span class="px-2 py-0.5 bg-purple-900 text-purple-300 text-xs rounded">Discord</span>',
+            slack: '<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">Slack</span>',
+            generic: '<span class="px-2 py-0.5 bg-gray-600 text-gray-300 text-xs rounded">Generic</span>',
+        }[n.webhook_type] || '';
+        const enabledBadge = n.enabled
+            ? '<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">Active</span>'
+            : '<span class="px-2 py-0.5 bg-gray-600 text-gray-400 text-xs rounded">Disabled</span>';
+
+        return `
+            <div class="p-4 rounded-lg border border-gray-700" style="background:var(--card-inner-bg, rgba(0,0,0,0.15))">
+                <div class="flex justify-between items-start">
+                    <div>
+                        <div class="flex items-center gap-2 mb-2">
+                            <span class="font-medium text-gray-100">${n.name}</span>
+                            ${typeBadge} ${enabledBadge}
+                        </div>
+                        <div class="text-xs text-gray-500 mb-2 truncate max-w-[400px]" title="${n.webhook_url}">${n.webhook_url}</div>
+                        <div class="flex gap-1 flex-wrap">${events}</div>
+                    </div>
+                    <div class="flex gap-2">
+                        <button onclick="testNotification(${n.id})" class="btn btn-secondary btn-xs">Test</button>
+                        <button onclick="toggleNotification(${n.id}, ${n.enabled ? 'false' : 'true'})" class="btn btn-secondary btn-xs">${n.enabled ? 'Disable' : 'Enable'}</button>
+                        <button onclick="deleteNotification(${n.id}, '${n.name}')" class="btn btn-danger btn-xs">Delete</button>
+                    </div>
+                </div>
+            </div>`;
+    }).join('');
+}
+
+function showAddNotificationModal() {
+    const html = `
+        <div class="modal-backdrop" id="notifModal" onclick="if(event.target===this)this.remove()">
+            <div class="modal-panel" style="max-width:500px">
+                <div class="modal-header">
+                    <h3 class="modal-title">Add Notification Webhook</h3>
+                    <button class="modal-close" onclick="document.getElementById('notifModal').remove()">✕</button>
+                </div>
+                <div class="modal-body space-y-4">
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-1">Name</label>
+                        <input id="notifName" type="text" placeholder="My Discord Server" class="form-input w-full">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-1">Webhook URL</label>
+                        <input id="notifUrl" type="url" placeholder="https://discord.com/api/webhooks/..." class="form-input w-full">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-1">Type</label>
+                        <select id="notifType" class="form-select w-full">
+                            <option value="discord">Discord</option>
+                            <option value="slack">Slack</option>
+                            <option value="generic">Generic JSON</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">Events</label>
+                        <div class="space-y-2">
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" id="notifEvtComplete" checked class="w-4 h-4"> 
+                                <span class="text-sm text-gray-300">Encode Complete</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" id="notifEvtFailed" checked class="w-4 h-4"> 
+                                <span class="text-sm text-gray-300">Encode Failed</span>
+                            </label>
+                            <label class="flex items-center gap-2 cursor-pointer">
+                                <input type="checkbox" id="notifEvtEmpty" checked class="w-4 h-4"> 
+                                <span class="text-sm text-gray-300">Queue Empty</span>
+                            </label>
+                        </div>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button onclick="document.getElementById('notifModal').remove()" class="btn btn-secondary">Cancel</button>
+                    <button onclick="saveNotification()" class="btn btn-primary">Save</button>
+                </div>
+            </div>
+        </div>`;
+    document.body.insertAdjacentHTML('beforeend', html);
+}
+
+async function saveNotification() {
+    const name = document.getElementById('notifName').value.trim();
+    const url = document.getElementById('notifUrl').value.trim();
+    const type = document.getElementById('notifType').value;
+    const events = [];
+    if (document.getElementById('notifEvtComplete').checked) events.push('encode_complete');
+    if (document.getElementById('notifEvtFailed').checked) events.push('encode_failed');
+    if (document.getElementById('notifEvtEmpty').checked) events.push('queue_empty');
+
+    if (!name || !url) {
+        showMessage('Name and URL are required', 'error');
+        return;
+    }
+
+    const result = await apiRequest('/notifications', {
+        method: 'POST',
+        body: JSON.stringify({ name, webhook_url: url, webhook_type: type, events })
+    });
+    if (result) {
+        document.getElementById('notifModal').remove();
+        showMessage('Webhook added', 'success');
+        loadNotifications();
+    }
+}
+
+async function testNotification(id) {
+    const result = await apiRequest(`/notifications/${id}/test`, { method: 'POST' });
+    if (result) showMessage('Test notification sent', 'success');
+}
+
+async function toggleNotification(id, enabled) {
+    await apiRequest(`/notifications/${id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ enabled })
+    });
+    loadNotifications();
+}
+
+async function deleteNotification(id, name) {
+    if (!confirm(`Delete webhook "${name}"?`)) return;
+    const result = await apiRequest(`/notifications/${id}`, { method: 'DELETE' });
+    if (result) {
+        showMessage('Webhook deleted', 'success');
+        loadNotifications();
     }
 }
 
