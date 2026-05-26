@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, status, Query, UploadFile
 from fastapi.responses import FileResponse
 from typing import List, Optional
 from pathlib import Path
+import asyncio
 import os
 
 from app.api.models import MessageResponse
@@ -16,8 +17,29 @@ router = APIRouter()
 
 @router.get("/resources/current")
 async def get_current_resources(current_user: dict = Depends(get_current_user)):
-    """Get current system resource usage."""
-    return resource_monitor.get_all_resources()
+    """Get current system resource usage.
+
+    Runs in a thread executor so blocking psutil / pynvml calls never
+    stall the FastAPI event loop.  If the call takes longer than 8s
+    (e.g. hung WMI or pynvml), return a degraded snapshot.
+    """
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(resource_monitor.get_all_resources),
+            timeout=8.0
+        )
+    except asyncio.TimeoutError:
+        # Return a degraded response so the dashboard doesn't break
+        return {
+            'timestamp': None,
+            'cpu': {'percent': 0, 'per_core': [], 'count': 0,
+                    'temperature_c': None, 'temp_available': False},
+            'memory': {'total_mb': 0, 'available_mb': 0, 'used_mb': 0, 'percent': 0},
+            'disk_io': {'read_bytes': 0, 'write_bytes': 0, 'read_count': 0, 'write_count': 0},
+            'gpu': None,
+            '_degraded': True,
+            '_error': 'Resource monitoring timed out — GPU driver may need reinit'
+        }
 
 
 @router.get("/resources/thresholds")
@@ -28,6 +50,9 @@ async def check_resource_thresholds(
 
     Reads the saved settings from the database to determine which
     triggers are active and what their limits are.
+
+    Runs in a thread executor because check_thresholds calls pynvml /
+    nvidia-smi / psutil which can block.
     """
     # Load current settings
     with db.get_connection() as conn:
@@ -35,16 +60,32 @@ async def check_resource_thresholds(
         cursor.execute("SELECT key, value FROM settings WHERE key LIKE 'resource_%'")
         settings = {row[0]: row[1] for row in cursor.fetchall()}
 
-    return resource_monitor.check_thresholds(
-        pause_on_cpu_temp=settings.get('resource_pause_on_cpu_temp', 'true').lower() == 'true',
-        cpu_temp_threshold=float(settings.get('resource_cpu_temp_threshold', '85.0')),
-        pause_on_gpu_temp=settings.get('resource_pause_on_gpu_temp', 'true').lower() == 'true',
-        gpu_temp_threshold=float(settings.get('resource_gpu_temp_threshold', '83.0')),
-        pause_on_memory=settings.get('resource_pause_on_memory', 'false').lower() == 'true',
-        memory_threshold=float(settings.get('resource_memory_threshold', '85.0')),
-        pause_on_cpu_usage=settings.get('resource_pause_on_cpu_usage', 'false').lower() == 'true',
-        cpu_usage_threshold=float(settings.get('resource_cpu_usage_threshold', '95.0')),
-    )
+    def _check():
+        return resource_monitor.check_thresholds(
+            pause_on_cpu_temp=settings.get('resource_pause_on_cpu_temp', 'true').lower() == 'true',
+            cpu_temp_threshold=float(settings.get('resource_cpu_temp_threshold', '85.0')),
+            pause_on_gpu_temp=settings.get('resource_pause_on_gpu_temp', 'true').lower() == 'true',
+            gpu_temp_threshold=float(settings.get('resource_gpu_temp_threshold', '83.0')),
+            pause_on_memory=settings.get('resource_pause_on_memory', 'false').lower() == 'true',
+            memory_threshold=float(settings.get('resource_memory_threshold', '85.0')),
+            pause_on_cpu_usage=settings.get('resource_pause_on_cpu_usage', 'false').lower() == 'true',
+            cpu_usage_threshold=float(settings.get('resource_cpu_usage_threshold', '95.0')),
+        )
+
+    return await asyncio.to_thread(_check)
+
+
+@router.post("/resources/reinit-gpu", response_model=MessageResponse)
+async def reinit_gpu(current_user: dict = Depends(get_current_user)):
+    """Re-initialize GPU monitoring after a driver update or failure.
+
+    Resets the circuit breaker, creates a fresh thread pool, and retries
+    pynvml / nvidia-smi detection.
+    """
+    success = await asyncio.to_thread(resource_monitor.reinit_gpu)
+    if success:
+        return MessageResponse(message=f"GPU monitoring re-initialized ({resource_monitor._gpu_method})")
+    return MessageResponse(message="GPU monitoring not available — no NVIDIA GPU detected", success=False)
 
 
 # Settings Endpoints

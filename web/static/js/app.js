@@ -135,6 +135,15 @@ async function loadResources() {
     const resources = await apiRequest('/resources/current');
     if (!resources) return;
 
+    // Handle degraded response (resource monitoring timed out)
+    if (resources._degraded) {
+        console.warn('Resource monitoring degraded:', resources._error);
+        // Show warning in GPU status areas
+        const gpuTempStatus = document.getElementById('gpuTempStatus');
+        if (gpuTempStatus) gpuTempStatus.innerHTML = '<span style="color:var(--danger)">⚠️ Monitoring timeout</span>';
+        return;
+    }
+
     // Helper: set bar color class and value text color based on temperature
     function setTempBarColor(barEl, valueEl, tempC, normalColor, normalVar) {
         barEl.className = barEl.className.replace(/\b(cyan|purple|orange|red|yellow)\b/g, '');
@@ -239,11 +248,11 @@ async function loadResources() {
     } else {
         gpuTempEl.textContent = 'N/A';
         gpuTempBar.style.width = '0%';
-        if (gpuTempStatus) gpuTempStatus.textContent = 'No GPU detected';
+        if (gpuTempStatus) gpuTempStatus.innerHTML = 'No GPU detected <button onclick="reinitGpu()" class="btn btn-primary btn-xs ml-2" style="font-size:10px">Reinit</button>';
         if (gpuUsageInfo) gpuUsageInfo.textContent = '';
         gpuVramEl.textContent = 'N/A';
         gpuVramBar.style.width = '0%';
-        if (gpuVramStatus) gpuVramStatus.textContent = 'No GPU detected';
+        if (gpuVramStatus) gpuVramStatus.textContent = '';
     }
 
     // Update availability badges in settings (if settings tab is visible)
@@ -795,6 +804,15 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }, 5000);
 });
+
+async function reinitGpu() {
+    showMessage('Re-initializing GPU monitoring...', 'info');
+    const result = await apiRequest('/resources/reinit-gpu', { method: 'POST' });
+    if (result) {
+        showMessage(result.message, result.success !== false ? 'success' : 'warning');
+        loadResources();
+    }
+}
 
 // Settings functions
 async function loadSettings() {
@@ -2637,7 +2655,7 @@ async function importProfiles(event) {
 async function downloadBackup() {
     try {
         // Use a direct link so the browser triggers a file download
-        const token = localStorage.getItem('auth_token');
+        const token = localStorage.getItem('token');
         const resp  = await fetch('/api/backup', {
             headers: token ? { 'Authorization': 'Bearer ' + token } : {}
         });
@@ -2678,7 +2696,7 @@ async function restoreBackup(event) {
     if (statusEl) { statusEl.className = 'mt-3 text-xs text-yellow-400'; statusEl.textContent = '⏳ Uploading…'; }
 
     try {
-        const token = localStorage.getItem('auth_token');
+        const token = localStorage.getItem('token');
         const form  = new FormData();
         form.append('file', file);
         const resp = await fetch('/api/restore-upload', {

@@ -20,6 +20,7 @@ import psutil
 import subprocess
 import json
 import time
+import concurrent.futures
 from typing import Dict, Optional, List, Tuple
 from datetime import datetime
 
@@ -29,9 +30,21 @@ class ResourceMonitor:
 
     def __init__(self):
         self._gpu_method = None  # 'pynvml' or 'nvidia-smi' or None
+        self._gpu_fail_count = 0          # consecutive pynvml failures
+        self._GPU_MAX_FAILURES = 3        # disable pynvml after this many
+        self._gpu_timeout_sec = 3.0       # max seconds to wait for pynvml
+        # Persistent thread pool for GPU queries — NEVER use 'with' on this.
+        # If pynvml hangs, 'with' context-manager calls shutdown(wait=True)
+        # which blocks forever waiting for the hung thread.  A persistent
+        # pool lets us time-out and walk away; hung threads die with the
+        # process.
+        self._gpu_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='gpu-monitor')
         self.gpu_available = self._init_gpu_monitoring()
         self.monitoring_interval = 2.0  # seconds
         self._last_sample = None
+        self._last_cpu_percent = 0.0     # cached non-blocking CPU reading
+        self._last_cpu_per_core = []     # cached non-blocking per-core reading
         self._cpu_temp_method = self._detect_cpu_temp_method()
 
     # ------------------------------------------------------------------
@@ -85,6 +98,25 @@ class ResourceMonitor:
 
         print("GPU monitoring not available: no NVIDIA GPU detected or drivers not installed")
         return False
+
+    def reinit_gpu(self) -> bool:
+        """Re-initialize GPU monitoring after a driver update or failure.
+
+        Resets the circuit breaker, creates a fresh thread pool (the old
+        one may have a hung thread), and retries pynvml / nvidia-smi
+        detection.
+        """
+        print("🔄 Re-initializing GPU monitoring...")
+        self._gpu_fail_count = 0
+        self._gpu_method = None
+        # Replace the pool — old one may have a stuck pynvml thread
+        old_pool = self._gpu_pool
+        self._gpu_pool = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix='gpu-monitor')
+        # Shutdown old pool non-blocking (don't wait for hung threads)
+        old_pool.shutdown(wait=False)
+        self.gpu_available = self._init_gpu_monitoring()
+        return self.gpu_available
 
     # ------------------------------------------------------------------
     # CPU temperature
@@ -207,9 +239,9 @@ class ResourceMonitor:
         """Get current CPU usage percentage (0-100)."""
         return psutil.cpu_percent(interval=interval)
 
-    def get_cpu_per_core(self) -> List[float]:
+    def get_cpu_per_core(self, interval: float = 1.0) -> List[float]:
         """Get CPU usage per core."""
-        return psutil.cpu_percent(interval=1.0, percpu=True)
+        return psutil.cpu_percent(interval=interval, percpu=True)
 
     # ------------------------------------------------------------------
     # Memory
@@ -243,17 +275,58 @@ class ResourceMonitor:
     # GPU (NVIDIA)
     # ------------------------------------------------------------------
     def get_gpu_usage(self) -> Optional[List[Dict]]:
-        """Get GPU usage for all NVIDIA GPUs."""
+        """Get GPU usage for all NVIDIA GPUs.
+
+        Uses pynvml when available, with a timeout guard so a hung
+        driver never blocks the calling thread indefinitely.  After
+        ``_GPU_MAX_FAILURES`` consecutive pynvml failures the method
+        permanently falls back to nvidia-smi (subprocess with its own
+        built-in timeout).
+        """
         if not self.gpu_available:
             return None
         if self._gpu_method == 'pynvml':
-            return self._get_gpu_usage_pynvml()
+            result = self._get_gpu_usage_pynvml_safe()
+            if result is not None:
+                self._gpu_fail_count = 0
+                return result
+            # pynvml failed — try nvidia-smi this time
+            self._gpu_fail_count += 1
+            if self._gpu_fail_count >= self._GPU_MAX_FAILURES:
+                print(f"⚠️ pynvml failed {self._gpu_fail_count}× consecutively "
+                      f"— switching to nvidia-smi permanently")
+                self._gpu_method = 'nvidia-smi'
+            return self._get_gpu_usage_smi()
         elif self._gpu_method == 'nvidia-smi':
             return self._get_gpu_usage_smi()
         return None
 
-    def _get_gpu_usage_pynvml(self) -> Optional[List[Dict]]:
-        """Get GPU stats via pynvml."""
+    def _get_gpu_usage_pynvml_safe(self) -> Optional[List[Dict]]:
+        """Run pynvml queries inside a thread with a timeout.
+
+        If the NVIDIA driver is mid-update or hung, pynvml calls can
+        block forever.  We submit to a persistent thread pool and wait
+        with a timeout.  If it times out, the hung thread stays in the
+        pool but we stop sending new work after the circuit breaker trips.
+
+        CRITICAL: Do NOT use ``with ThreadPoolExecutor() as pool:`` here.
+        The context manager's __exit__ calls shutdown(wait=True) which
+        blocks forever waiting for the hung thread — defeating the
+        entire purpose of the timeout.
+        """
+        try:
+            future = self._gpu_pool.submit(self._get_gpu_usage_pynvml_inner)
+            return future.result(timeout=self._gpu_timeout_sec)
+        except concurrent.futures.TimeoutError:
+            print(f"⚠️ pynvml timed out after {self._gpu_timeout_sec}s "
+                  f"(fail #{self._gpu_fail_count + 1}/{self._GPU_MAX_FAILURES})")
+            return None
+        except Exception as e:
+            print(f"⚠️ pynvml wrapper error: {e}")
+            return None
+
+    def _get_gpu_usage_pynvml_inner(self) -> Optional[List[Dict]]:
+        """Actual pynvml calls — runs inside a timeout-guarded thread."""
         try:
             import pynvml
             device_count = pynvml.nvmlDeviceGetCount()
@@ -297,8 +370,7 @@ class ResourceMonitor:
 
         except Exception as e:
             print(f"Error getting GPU stats via pynvml: {e}")
-            self._gpu_method = 'nvidia-smi'
-            return self._get_gpu_usage_smi()
+            return None
 
     def _get_gpu_usage_smi(self) -> Optional[List[Dict]]:
         """Get GPU stats via nvidia-smi command (fallback)."""
@@ -369,15 +441,21 @@ class ResourceMonitor:
     # Full snapshot (consumed by /api/resources/current)
     # ------------------------------------------------------------------
     def get_all_resources(self) -> Dict:
-        """Get complete resource snapshot including temperatures."""
+        """Get complete resource snapshot including temperatures.
+
+        Uses non-blocking CPU sampling (interval=0) so this method
+        returns in milliseconds rather than blocking for 1.5+ seconds.
+        The ``interval=0`` mode returns usage since the previous sample,
+        which is accurate enough when the dashboard polls every 5 s.
+        """
         cpu_temp = self.get_cpu_temperature()
         gpu_data = self.get_gpu_usage()
 
         return {
             'timestamp': datetime.utcnow().isoformat(),
             'cpu': {
-                'percent': self.get_cpu_usage(interval=0.5),
-                'per_core': self.get_cpu_per_core(),
+                'percent': self.get_cpu_usage(interval=0),
+                'per_core': self.get_cpu_per_core(interval=0),
                 'count': psutil.cpu_count(),
                 'temperature_c': cpu_temp,
                 'temp_available': cpu_temp is not None,
@@ -449,7 +527,7 @@ class ResourceMonitor:
             reasons.append(f"Memory {mem_pct:.1f}% > {memory_threshold:.0f}%")
 
         # --- CPU usage % (optional legacy trigger) ---
-        cpu_pct = self.get_cpu_usage(interval=0.5)
+        cpu_pct = self.get_cpu_usage(interval=0)
         result['cpu_usage'] = cpu_pct
         if pause_on_cpu_usage and cpu_pct > cpu_usage_threshold:
             result['cpu_usage_exceeded'] = True
