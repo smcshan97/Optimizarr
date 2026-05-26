@@ -287,22 +287,43 @@ async function loadResources() {
 // ============================================================
 
 // Queue state
-let allQueueItems = [];
+let allQueueItems = [];      // current page items only
 let selectedQueueIds = new Set();
-let queueSortField = 'created_at';
+let queueSortField = 'priority';
 let queueSortDir = 'desc'; // 'asc' or 'desc'
+let queuePage = 1;
+let queuePageSize = parseInt(localStorage.getItem('queuePageSize') || '50');
+let queueTotalPages = 1;
+let queueTotal = 0;
+let queueCounts = {};        // per-status totals across ENTIRE queue
+let queueSearchTerm = '';
+let queueStatusFilter = '';
 
-// Load queue from API → store → filter → display
+// Load queue from API → display current page
 async function loadQueue() {
     // Ensure profiles are cached so queue rows can render profile names
     if (Object.keys(_profilesMap).length === 0) {
         const profiles = await apiRequest('/profiles');
         if (profiles) profiles.forEach(p => { _profilesMap[p.id] = p; });
     }
-    const items = await apiRequest('/queue');
-    if (items) {
-        allQueueItems = items;
-        filterQueue();
+
+    const params = new URLSearchParams({
+        page: queuePage,
+        page_size: queuePageSize,
+        sort: queueSortField,
+        dir: queueSortDir,
+    });
+    if (queueStatusFilter) params.set('status', queueStatusFilter);
+    if (queueSearchTerm) params.set('search', queueSearchTerm);
+
+    const data = await apiRequest('/queue?' + params.toString());
+    if (data && data.items) {
+        allQueueItems = data.items;
+        queueTotal = data.total;
+        queueTotalPages = data.total_pages;
+        queuePage = data.page;
+        queueCounts = data.counts || {};
+        displayQueueItems(allQueueItems);
     }
 }
 
@@ -315,27 +336,15 @@ function debounce(fn, delay) {
     };
 }
 
-const debouncedFilter = debounce(filterQueue, 300);
-
-// Filter queue by search and status, then sort and display
+// Called when search input or status dropdown changes
 function filterQueue() {
-    const searchTerm = (document.getElementById('queueSearch')?.value || '').toLowerCase();
-    const statusFilter = document.getElementById('queueStatusFilter')?.value || '';
-    
-    let filtered = allQueueItems;
-    
-    if (searchTerm) {
-        filtered = filtered.filter(item => item.file_path.toLowerCase().includes(searchTerm));
-    }
-    if (statusFilter) {
-        filtered = filtered.filter(item => item.status === statusFilter);
-    }
-    
-    // Apply sort
-    filtered = sortQueueItems(filtered, queueSortField, queueSortDir);
-    
-    displayQueueItems(filtered);
+    queueSearchTerm = (document.getElementById('queueSearch')?.value || '').trim();
+    queueStatusFilter = document.getElementById('queueStatusFilter')?.value || '';
+    queuePage = 1; // Reset to first page on filter change
+    loadQueue();
 }
+
+const debouncedFilter = debounce(filterQueue, 300);
 
 // Sort queue items by any field
 function sortQueueItems(items, field, dir) {
@@ -400,7 +409,8 @@ function toggleSort(field) {
         queueSortField = field;
         queueSortDir = 'asc';
     }
-    filterQueue();
+    queuePage = 1;
+    loadQueue();
 }
 
 // Get sort arrow indicator
@@ -409,6 +419,20 @@ function sortArrow(field) {
     return queueSortDir === 'asc' 
         ? '<span style="color:var(--accent);margin-left:4px">▲</span>' 
         : '<span style="color:var(--accent);margin-left:4px">▼</span>';
+}
+
+// Pagination controls
+function goToPage(page) {
+    if (page < 1 || page > queueTotalPages || page === queuePage) return;
+    queuePage = page;
+    loadQueue();
+}
+
+function changePageSize(size) {
+    queuePageSize = parseInt(size);
+    localStorage.setItem('queuePageSize', queuePageSize);
+    queuePage = 1;
+    loadQueue();
 }
 
 // Extract spec value from current_specs JSON
@@ -513,27 +537,19 @@ function displayQueueItems(items) {
         return;
     }
 
-    // Count statuses for summary
-    const counts = { pending: 0, processing: 0, completed: 0, failed: 0, paused: 0 };
-    let totalSize = 0, totalSavings = 0;
-    items.forEach(item => { 
-        counts[item.status] = (counts[item.status] || 0) + 1;
-        totalSize += item.file_size_bytes || 0;
-        totalSavings += item.estimated_savings_bytes || 0;
-    });
-
-    const savingsPct = totalSize > 0 ? ((totalSavings / totalSize) * 100).toFixed(1) : 0;
+    // Use server-side counts for the full queue (not just current page)
+    const counts = queueCounts;
+    const totalAll = Object.values(counts).reduce((s, n) => s + n, 0);
 
     let html = `
         <div class="flex gap-4 mb-4 flex-wrap" style="font-size:12px;color:var(--text-muted)">
-            <span>Total: <strong style="color:var(--text-primary)">${items.length}</strong></span>
+            <span>Total: <strong style="color:var(--text-primary)">${totalAll}</strong></span>
             ${counts.processing ? `<span style="color:var(--info)">⚙️ Processing: ${counts.processing}</span>` : ''}
             ${counts.pending ? `<span style="color:var(--warning)">⏳ Pending: ${counts.pending}</span>` : ''}
             ${counts.completed ? `<span style="color:var(--success)">✅ Completed: ${counts.completed}</span>` : ''}
             ${counts.failed ? `<span style="color:var(--danger)">❌ Failed: ${counts.failed}</span>` : ''}
             ${counts.paused ? `<span style="color:#e67e22">⏸️ Paused: ${counts.paused}</span>` : ''}
-            <span style="margin-left:auto">Size: <strong style="color:var(--text-primary)">${formatSize(totalSize)}</strong></span>
-            <span>Projected Savings: <strong style="color:var(--success)">${formatSize(totalSavings)} (${savingsPct}%)</strong></span>
+            <span style="margin-left:auto">Showing: <strong style="color:var(--text-primary)">${items.length}</strong> of ${queueTotal}</span>
         </div>
         <table class="tbl">
             <thead>
@@ -681,6 +697,44 @@ function displayQueueItems(items) {
     });
 
     html += '</tbody></table>';
+
+    // ── Pagination controls ──
+    if (queueTotalPages > 1 || queuePageSize < queueTotal) {
+        html += `<div class="flex items-center justify-between mt-4" style="font-size:12px;color:var(--text-muted)">`;
+
+        // Page size selector
+        html += `<div class="flex items-center gap-2">
+            <span>Per page:</span>
+            <select onchange="changePageSize(this.value)" style="background:var(--card-bg);color:var(--text-primary);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:12px">
+                ${[25, 50, 100, 200].map(n =>
+                    `<option value="${n}" ${n === queuePageSize ? 'selected' : ''}>${n}</option>`
+                ).join('')}
+            </select>
+        </div>`;
+
+        // Page navigation
+        html += `<div class="flex items-center gap-1">`;
+        html += `<button onclick="goToPage(1)" class="btn btn-secondary btn-xs" ${queuePage <= 1 ? 'disabled style="opacity:0.3"' : ''}>«</button>`;
+        html += `<button onclick="goToPage(${queuePage - 1})" class="btn btn-secondary btn-xs" ${queuePage <= 1 ? 'disabled style="opacity:0.3"' : ''}>‹</button>`;
+
+        const startPage = Math.max(1, queuePage - 3);
+        const endPage = Math.min(queueTotalPages, startPage + 6);
+        for (let p = startPage; p <= endPage; p++) {
+            if (p === queuePage) {
+                html += `<button class="btn btn-primary btn-xs" style="min-width:28px">${p}</button>`;
+            } else {
+                html += `<button onclick="goToPage(${p})" class="btn btn-secondary btn-xs" style="min-width:28px">${p}</button>`;
+            }
+        }
+
+        html += `<button onclick="goToPage(${queuePage + 1})" class="btn btn-secondary btn-xs" ${queuePage >= queueTotalPages ? 'disabled style="opacity:0.3"' : ''}>›</button>`;
+        html += `<button onclick="goToPage(${queueTotalPages})" class="btn btn-secondary btn-xs" ${queuePage >= queueTotalPages ? 'disabled style="opacity:0.3"' : ''}>»</button>`;
+        html += `</div>`;
+
+        html += `<span>Page ${queuePage} of ${queueTotalPages}</span>`;
+        html += `</div>`;
+    }
+
     container.innerHTML = html;
     
     // Restore selection state on select-all checkbox

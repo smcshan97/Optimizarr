@@ -12,12 +12,34 @@ from app.logger import optimizarr_logger
 router = APIRouter()
 
 
-@router.get("/queue", response_model=List[QueueItemResponse])
+@router.get("/queue")
 async def list_queue(
     status: Optional[str] = None,
+    search: Optional[str] = None,
+    sort: Optional[str] = None,
+    dir: Optional[str] = None,
+    page: Optional[int] = Query(None, ge=1),
+    page_size: Optional[int] = Query(None, ge=1, le=500),
     current_user: dict = Depends(get_current_user)
 ):
-    """Get queue items, optionally filtered by status."""
+    """Get queue items with optional pagination, filtering, and sorting.
+
+    When ``page`` is provided, returns a paginated envelope::
+
+        {items: [...], total, page, page_size, total_pages, counts}
+
+    When ``page`` is omitted, returns a flat list (backward compat).
+    """
+    if page is not None:
+        return db.get_queue_items_paginated(
+            status=status,
+            search=search,
+            sort_field=sort or 'priority',
+            sort_dir=dir or 'desc',
+            page=page,
+            page_size=page_size or 50,
+        )
+    # Backward compatible — flat list for internal callers
     items = db.get_queue_items(status=status)
     return items
 

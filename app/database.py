@@ -657,7 +657,94 @@ class Database:
                     item['target_specs'] = json.loads(item['target_specs'])
                 items.append(item)
             return items
-    
+
+    def get_queue_items_paginated(
+        self,
+        status: Optional[str] = None,
+        search: Optional[str] = None,
+        sort_field: str = 'priority',
+        sort_dir: str = 'desc',
+        page: int = 1,
+        page_size: int = 50,
+    ) -> Dict:
+        """Get queue items with server-side filtering, sorting, and pagination.
+
+        Returns dict with keys: items, total, page, page_size, total_pages, counts.
+        ``counts`` gives per-status totals across the ENTIRE queue (unfiltered)
+        so the summary bar can display accurate totals regardless of page/filter.
+        """
+        # Whitelist sortable columns to prevent SQL injection
+        allowed_sorts = {
+            'file': 'file_path',
+            'file_path': 'file_path',
+            'status': 'status',
+            'priority': 'priority',
+            'progress': 'progress',
+            'size': 'file_size_bytes',
+            'file_size_bytes': 'file_size_bytes',
+            'savings': 'estimated_savings_bytes',
+            'estimated_savings_bytes': 'estimated_savings_bytes',
+            'created_at': 'created_at',
+        }
+        db_sort_col = allowed_sorts.get(sort_field, 'priority')
+        db_sort_dir = 'ASC' if sort_dir.lower() == 'asc' else 'DESC'
+        # Secondary sort for deterministic ordering
+        secondary = ', created_at ASC' if db_sort_col != 'created_at' else ''
+
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+
+            # ── Total counts per status (unfiltered) ──
+            cursor.execute(
+                "SELECT status, COUNT(*) as cnt FROM queue GROUP BY status"
+            )
+            counts = {row['status']: row['cnt'] for row in cursor.fetchall()}
+
+            # ── Build WHERE clause ──
+            conditions = []
+            params = []
+            if status:
+                conditions.append("status = ?")
+                params.append(status)
+            if search:
+                conditions.append("file_path LIKE ?")
+                params.append(f"%{search}%")
+
+            where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+            # ── Count matching rows ──
+            cursor.execute(f"SELECT COUNT(*) FROM queue {where}", params)
+            total = cursor.fetchone()[0]
+
+            # ── Fetch page ──
+            offset = (max(1, page) - 1) * page_size
+            cursor.execute(
+                f"SELECT * FROM queue {where} "
+                f"ORDER BY {db_sort_col} {db_sort_dir}{secondary} "
+                f"LIMIT ? OFFSET ?",
+                params + [page_size, offset]
+            )
+
+            items = []
+            for row in cursor.fetchall():
+                item = dict(row)
+                if item.get('current_specs'):
+                    item['current_specs'] = json.loads(item['current_specs'])
+                if item.get('target_specs'):
+                    item['target_specs'] = json.loads(item['target_specs'])
+                items.append(item)
+
+            total_pages = max(1, -(-total // page_size))  # ceil division
+
+            return {
+                'items': items,
+                'total': total,
+                'page': page,
+                'page_size': page_size,
+                'total_pages': total_pages,
+                'counts': counts,
+            }
+
     def get_queue_item(self, item_id: int) -> Optional[Dict]:
         """Get a single queue item by ID."""
         with self.get_connection() as conn:
