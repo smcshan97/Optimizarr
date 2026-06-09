@@ -36,6 +36,12 @@ async def lifespan(app: FastAPI):
 
     auth.create_default_admin()
 
+    # Recover from an unclean shutdown: any item still marked 'processing' or
+    # 'paused' has no live encode behind it — re-queue it as 'pending'.
+    recovered = db.reset_stale_processing()
+    if recovered:
+        print(f"  Recovered {recovered} interrupted item(s) → pending")
+
     # Seed default profiles on first run
     if not db.get_profiles():
         print("Seeding default encoding profiles…")
@@ -66,9 +72,13 @@ async def lifespan(app: FastAPI):
     # ---- SHUTDOWN ----
     from app.logger import optimizarr_logger as _log
     from app.watcher import folder_watcher as _fw
+    from app.encoder import encoder_pool as _ep
     _log.log_shutdown()
-    _fw.stop()
     print("\nShutting down Optimizarr...")
+    # Kill any active HandBrakeCLI process tree so it doesn't orphan.
+    # mark_cancelled=False leaves the item recoverable on next startup.
+    _ep.stop(mark_cancelled=False)
+    _fw.stop()
     shutdown_scheduler()
 
 

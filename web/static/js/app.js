@@ -707,7 +707,7 @@ function displayQueueItems(items) {
                 </td>
                 <td class="py-2 px-1 cursor-grab text-gray-500 text-center drag-handle" title="Drag to reorder">⠿</td>
                 <td class="py-2 px-2 max-w-[220px] truncate" title="${tooltip}">
-                    <span class="text-gray-100">${fileName}</span>${item.upscale_plan ? ' <span class="text-blue-400 text-xs" title="AI upscaling queued">🔼</span>' : ''}${item.stereo_plan ? ' <span class="text-purple-400 text-xs" title="3D conversion queued">🎥</span>' : ''}
+                    <span class="text-gray-100">${fileName}</span>${item.upscale_plan ? ' <span class="text-blue-400 text-xs" title="AI upscaling queued">🔼</span>' : ''}${item.stereo_plan ? ' <span class="text-purple-400 text-xs" title="3D conversion queued">🎥</span>' : ''}${item.retry_count > 0 ? ` <span class="text-xs" style="color:var(--warning)" title="Retried ${item.retry_count} time(s)">↻${item.retry_count}</span>` : ''}
                 </td>
                 <td class="py-2 px-2"><span class="${codecColor} text-xs font-medium">${codec.toUpperCase()}</span></td>
                 <td class="py-2 px-2 text-xs text-gray-300">${resolution}${fps !== '-' ? ` <span class="text-gray-500">@ ${fps}fps</span>` : ''}</td>
@@ -721,6 +721,9 @@ function displayQueueItems(items) {
                     ${buildProfileSelect(item)}
                 </td>
                 <td class="py-2 px-2">
+                    ${(item.status === 'failed' || item.status === 'cancelled')
+                        ? `<button onclick="retryQueueItem(${item.id})" class="btn btn-secondary btn-xs" title="Re-queue this item">↻ Retry</button> `
+                        : ''}
                     <button onclick="deleteQueueItem(${item.id})"
                         class="btn btn-danger btn-xs">Delete</button>
                 </td>
@@ -925,6 +928,12 @@ async function loadSettings() {
         document.getElementById('pauseOnCpuUsage').checked = (settings.resource_pause_on_cpu_usage || 'false') === 'true';
         document.getElementById('cpuUsageThreshold').value = parseFloat(settings.resource_cpu_usage_threshold || '95');
     }
+
+    // Load general encoding settings (retry behavior)
+    const encSettings = await apiRequest('/settings/encoding');
+    if (encSettings) {
+        document.getElementById('maxRetries').value = parseInt(encSettings.max_retries || '3');
+    }
 }
 
 async function saveResourceSettings() {
@@ -945,7 +954,13 @@ async function saveResourceSettings() {
         method: 'POST',
         body: JSON.stringify(settings)
     });
-    
+
+    // Save general encoding settings (retry behavior)
+    await apiRequest('/settings/encoding', {
+        method: 'POST',
+        body: JSON.stringify({ max_retries: document.getElementById('maxRetries').value })
+    });
+
     if (result) {
         const msgEl = document.getElementById('settingsMessage');
         msgEl.textContent = '✓ Settings saved successfully';
@@ -2040,6 +2055,28 @@ async function deleteQueueItem(id) {
     if (result) {
         selectedQueueIds.delete(id);
         showMessage('Item deleted from queue', 'success');
+        loadQueue();
+    }
+}
+
+async function retryQueueItem(id) {
+    const result = await apiRequest(`/queue/${id}/retry`, { method: 'POST' });
+    if (result) {
+        showMessage(result.message || 'Item re-queued', result.success === false ? 'error' : 'success');
+        loadQueue();
+    }
+}
+
+async function retryAllFailed() {
+    const failedCount = queueCounts.failed || 0;
+    if (failedCount === 0) {
+        showMessage('No failed items to retry', 'info');
+        return;
+    }
+    if (!confirm(`Re-queue all ${failedCount} failed item(s)?`)) return;
+    const result = await apiRequest('/queue/retry-failed', { method: 'POST' });
+    if (result) {
+        showMessage(result.message || 'Failed items re-queued', 'success');
         loadQueue();
     }
 }

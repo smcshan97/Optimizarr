@@ -343,3 +343,46 @@ class TestStereoPlan:
         """stereo_plan=None means no 3D conversion — should be handled."""
         plan = None
         assert plan is None  # No conversion, encoder skips stereo phase
+
+
+# ---------------------------------------------------------------------------
+# Retry logic + startup recovery (Patch 27)
+# ---------------------------------------------------------------------------
+
+class TestRetryAndRecovery:
+    def test_queue_has_retry_count_column(self, fresh_db):
+        """The retry_count column should exist on queue and default to 0."""
+        with fresh_db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(queue)")
+            columns = {row[1] for row in cursor.fetchall()}
+        assert 'retry_count' in columns
+
+        qid = fresh_db.add_to_queue(file_path="/x/a.mkv", profile_id=1)
+        assert fresh_db.get_queue_item(qid)['retry_count'] == 0
+
+    def test_setting_get_default_and_roundtrip(self, fresh_db):
+        """get_setting returns default when unset, and set/get round-trips."""
+        assert fresh_db.get_setting('max_retries', '3') == '3'
+        assert fresh_db.get_setting('does_not_exist') is None
+        fresh_db.set_setting('max_retries', '5')
+        assert fresh_db.get_setting('max_retries') == '5'
+        # Upsert overwrites rather than duplicating
+        fresh_db.set_setting('max_retries', '7')
+        assert fresh_db.get_setting('max_retries') == '7'
+
+    def test_reset_stale_processing(self, fresh_db):
+        """processing/paused items reset to pending; retry_count preserved."""
+        a = fresh_db.add_to_queue(file_path="/x/a.mkv", profile_id=1, status='processing')
+        b = fresh_db.add_to_queue(file_path="/x/b.mkv", profile_id=1, status='paused')
+        c = fresh_db.add_to_queue(file_path="/x/c.mkv", profile_id=1, status='completed')
+        fresh_db.update_queue_item(a, retry_count=2)
+
+        reset = fresh_db.reset_stale_processing()
+        assert reset == 2  # a + b, not the completed c
+
+        assert fresh_db.get_queue_item(a)['status'] == 'pending'
+        assert fresh_db.get_queue_item(b)['status'] == 'pending'
+        assert fresh_db.get_queue_item(c)['status'] == 'completed'
+        # Recovery is not a failure — retry_count must be left untouched
+        assert fresh_db.get_queue_item(a)['retry_count'] == 2

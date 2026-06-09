@@ -396,6 +396,13 @@ class Database:
                 cursor.execute("ALTER TABLE history ADD COLUMN duration_seconds REAL DEFAULT 0")
                 print("  ↳ Migrated: added 'duration_seconds' to history")
 
+            # retry_count — automatic retry attempts for failed encodes
+            cursor.execute("PRAGMA table_info(queue)")
+            queue_cols_retry = [col[1] for col in cursor.fetchall()]
+            if 'retry_count' not in queue_cols_retry:
+                cursor.execute("ALTER TABLE queue ADD COLUMN retry_count INTEGER DEFAULT 0")
+                print("  ↳ Migrated: added 'retry_count' to queue")
+
             # Security: must_change_password flag for default admin
             try:
                 cursor.execute("SELECT must_change_password FROM users LIMIT 1")
@@ -808,7 +815,45 @@ class Database:
                 cursor.execute("DELETE FROM queue WHERE status = ?", (status,))
             else:
                 cursor.execute("DELETE FROM queue")
-    
+
+    def reset_stale_processing(self) -> int:
+        """Reset leftover 'processing'/'paused' items to 'pending' on startup.
+
+        After an unclean shutdown (crash, kill, Ctrl+C, power loss) the encode
+        process is gone but the DB row may still read 'processing' or 'paused'.
+        No encode can actually be running at startup, so re-queue these so they
+        are picked up again. Does NOT touch retry_count (this isn't a failure).
+        Returns the number of rows reset.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE queue SET status = 'pending', progress = 0.0, "
+                "paused_reason = NULL WHERE status IN ('processing', 'paused')"
+            )
+            return cursor.rowcount
+
+    # Generic settings (key-value) helpers
+    def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        """Read a single setting value by key, or ``default`` if not set."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            return row[0] if row else default
+
+    def set_setting(self, key: str, value: str):
+        """Insert or update a single setting value."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO settings (key, value, updated_at)
+                VALUES (?, ?, CURRENT_TIMESTAMP)
+                ON CONFLICT(key) DO UPDATE SET
+                    value = excluded.value,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (key, str(value)))
+
     # User CRUD
     def create_user(self, username: str, password_hash: str, email: Optional[str] = None, is_admin: bool = False) -> int:
         """Create a new user."""

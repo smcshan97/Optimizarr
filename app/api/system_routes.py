@@ -142,6 +142,29 @@ async def update_resource_settings(
     return MessageResponse(message="Resource settings updated")
 
 
+@router.get("/settings/encoding")
+async def get_encoding_settings(current_user: dict = Depends(get_current_user)):
+    """Get general encoding settings (e.g. retry behavior)."""
+    return {
+        'max_retries': db.get_setting('max_retries', '3'),
+    }
+
+
+@router.post("/settings/encoding")
+async def update_encoding_settings(
+    settings: dict,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Update general encoding settings (admin only)."""
+    if 'max_retries' in settings:
+        try:
+            val = max(0, min(20, int(settings['max_retries'])))
+        except (ValueError, TypeError):
+            val = 3
+        db.set_setting('max_retries', str(val))
+    return MessageResponse(message="Encoding settings updated")
+
+
 # Directory Browser Endpoint
 @router.get("/browse")
 async def browse_directories(

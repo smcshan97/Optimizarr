@@ -303,6 +303,36 @@ async def clear_completed_queue(
     return {"message": f"Cleared {count} completed item(s)", "count": count}
 
 
+@router.post("/queue/retry-failed", response_model=MessageResponse)
+async def retry_all_failed(current_user: dict = Depends(get_current_user)):
+    """Re-queue every failed item (resets retry counters)."""
+    failed = db.get_queue_items(status='failed')
+    for it in failed:
+        db.update_queue_item(
+            it['id'], status='pending', retry_count=0,
+            progress=0.0, error_message=None
+        )
+    return MessageResponse(message=f"Re-queued {len(failed)} failed item(s)")
+
+
+@router.post("/queue/{item_id}/retry", response_model=MessageResponse)
+async def retry_queue_item(item_id: int, current_user: dict = Depends(get_current_user)):
+    """Re-queue a single failed or cancelled item (resets its retry counter)."""
+    item = db.get_queue_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    if item['status'] not in ('failed', 'cancelled'):
+        return MessageResponse(
+            message=f"Item is '{item['status']}' — only failed/cancelled items can be retried",
+            success=False
+        )
+    db.update_queue_item(
+        item_id, status='pending', retry_count=0,
+        progress=0.0, error_message=None
+    )
+    return MessageResponse(message="Item re-queued")
+
+
 @router.post("/queue/reorder", response_model=MessageResponse)
 async def reorder_queue(
     data: dict,

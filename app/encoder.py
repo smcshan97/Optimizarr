@@ -580,32 +580,29 @@ class EncodingJob:
                     original_input,
                     f"HandBrakeCLI exited with code {return_code}\n{tail}"
                 )
-                db.update_queue_item(
-                    self.queue_item_id,
-                    status='failed',
-                    error_message=f"HandBrakeCLI exited with code {return_code}: {tail[:200]}"
+                final_status = self._handle_failure(
+                    f"HandBrakeCLI exited with code {return_code}: {tail[:200]}"
                 )
-                try:
-                    from app.notifications import notify_encode_failed
-                    notify_encode_failed(original_input, f"Exit code {return_code}", self.profile.get('name', ''))
-                except Exception:
-                    pass
+                # Only notify on permanent failure, not on auto-retry
+                if final_status == 'failed':
+                    try:
+                        from app.notifications import notify_encode_failed
+                        notify_encode_failed(original_input, f"Exit code {return_code}", self.profile.get('name', ''))
+                    except Exception:
+                        pass
                 return False
 
         except Exception as e:
             if self._manually_stopped:
                 return False
             optimizarr_logger.log_handbrake_error(original_input, str(e))
-            db.update_queue_item(
-                self.queue_item_id,
-                status='failed',
-                error_message=str(e)
-            )
-            try:
-                from app.notifications import notify_encode_failed
-                notify_encode_failed(original_input, str(e), self.profile.get('name', ''))
-            except Exception:
-                pass
+            final_status = self._handle_failure(str(e))
+            if final_status == 'failed':
+                try:
+                    from app.notifications import notify_encode_failed
+                    notify_encode_failed(original_input, str(e), self.profile.get('name', ''))
+                except Exception:
+                    pass
             return False
 
         finally:
@@ -798,12 +795,82 @@ class EncodingJob:
             except Exception as e:
                 print(f"✗ Error resuming: {e}")
     
-    def stop(self):
+    def _cleanup_partial_output(self):
+        """Remove the partial _optimized.* output file if it exists.
+
+        Used on manual stop and on failure — a half-written HandBrake output
+        is useless and would otherwise linger next to the source file.
+        """
+        try:
+            original_path = Path(self.queue_item['file_path'])
+            container = self.profile.get('container', 'mkv')
+            ext_map = {'mkv': '.mkv', 'mp4': '.mp4', 'webm': '.webm'}
+            output_ext = ext_map.get(container, '.mkv')
+            temp_out = original_path.parent / f"{original_path.stem}_optimized{output_ext}"
+            if temp_out.exists():
+                temp_out.unlink()
+                print(f"🗑 Removed partial output: {temp_out.name}")
+        except Exception as e:
+            print(f"⚠ Could not remove partial output: {e}")
+
+    def _handle_failure(self, error_message: str) -> str:
+        """Apply retry logic on encode failure.
+
+        Reads ``max_retries`` (default 3). If the item is under the limit it is
+        re-queued as 'pending' with an incremented retry_count; otherwise it is
+        marked 'failed' permanently. Also cleans up the partial output file.
+        Returns the resulting status ('pending' or 'failed').
+        """
+        from app.logger import optimizarr_logger
+
+        self._cleanup_partial_output()
+
+        try:
+            max_retries = int(db.get_setting('max_retries', '3'))
+        except (ValueError, TypeError):
+            max_retries = 3
+
+        # Re-read retry_count from DB — self.queue_item may be stale
+        current = db.get_queue_item(self.queue_item_id) or {}
+        retry_count = current.get('retry_count', 0) or 0
+
+        if retry_count < max_retries:
+            new_count = retry_count + 1
+            db.update_queue_item(
+                self.queue_item_id,
+                status='pending',
+                retry_count=new_count,
+                progress=0.0,
+                error_message=f"Retry {new_count}/{max_retries}: {error_message[:200]}",
+            )
+            optimizarr_logger.app_logger.warning(
+                "Encode failed (item %s) — re-queued for retry %d/%d",
+                self.queue_item_id, new_count, max_retries
+            )
+            return 'pending'
+
+        db.update_queue_item(
+            self.queue_item_id,
+            status='failed',
+            error_message=error_message[:500],
+        )
+        optimizarr_logger.app_logger.error(
+            "Encode failed permanently (item %s) after %d retries",
+            self.queue_item_id, retry_count
+        )
+        return 'failed'
+
+    def stop(self, mark_cancelled: bool = True):
         """Stop the encoding job.
 
-        Sets the 'cancelled' status and cleans up the partial output file.
-        Uses psutil to kill the full HandBrakeCLI process tree on Windows
-        (terminate() only kills the parent; child processes survive).
+        Kills the full HandBrakeCLI process tree via psutil (terminate() only
+        kills the parent; child processes survive on Windows) and cleans up the
+        partial output file.
+
+        Args:
+            mark_cancelled: When True (manual stop) the item is set to
+                'cancelled'. When False (server shutdown) the status is left
+                untouched so startup recovery can re-queue it as 'pending'.
         """
         self._manually_stopped = True
         self.stop_monitoring = True
@@ -833,25 +900,17 @@ class EncodingJob:
                     pass
                 print(f"⚠ psutil kill failed, used terminate(): {e}")
 
-        # Clean up the partial _optimized output file if it exists
-        try:
-            original_path = Path(self.queue_item['file_path'])
-            container = self.profile.get('container', 'mkv')
-            ext_map = {'mkv': '.mkv', 'mp4': '.mp4', 'webm': '.webm'}
-            output_ext = ext_map.get(container, '.mkv')
-            temp_out = original_path.parent / f"{original_path.stem}_optimized{output_ext}"
-            if temp_out.exists():
-                temp_out.unlink()
-                print(f"🗑 Removed partial output: {temp_out.name}")
-        except Exception as e:
-            print(f"⚠ Could not remove partial output: {e}")
+        self._cleanup_partial_output()
 
-        db.update_queue_item(
-            self.queue_item_id,
-            status='cancelled',
-            error_message='Manually stopped'
-        )
-        print("⏹ Encoding cancelled")
+        if mark_cancelled:
+            db.update_queue_item(
+                self.queue_item_id,
+                status='cancelled',
+                error_message='Manually stopped'
+            )
+            print("⏹ Encoding cancelled")
+        else:
+            print("⏹ Encoding interrupted (will resume on next start)")
 
 
 class EncoderPool:
@@ -949,13 +1008,19 @@ class EncoderPool:
                 'cpu_usage_threshold': 95.0,
             }
     
-    def stop(self):
-        """Stop the encoder pool."""
+    def stop(self, mark_cancelled: bool = True):
+        """Stop the encoder pool.
+
+        Args:
+            mark_cancelled: Forwarded to each job's stop(). True for a manual
+                stop (items → 'cancelled'); False for server shutdown (items
+                left for startup recovery to re-queue).
+        """
         self.is_running = False
-        
-        # Stop all active jobs
-        for job in self.active_jobs:
-            job.stop()
+
+        # Iterate a copy — process_queue() mutates active_jobs concurrently
+        for job in list(self.active_jobs):
+            job.stop(mark_cancelled=mark_cancelled)
 
 
 def detect_hardware_acceleration() -> Dict:
