@@ -358,7 +358,7 @@ function sortQueueItems(items, field, dir) {
                 valB = b.file_path.split(/[/\\]/).pop().toLowerCase();
                 break;
             case 'status':
-                const statusOrder = { processing: 0, paused: 1, pending: 2, failed: 3, completed: 4 };
+                const statusOrder = { processing: 0, paused: 1, pending: 2, failed: 3, cancelled: 4, completed: 5 };
                 valA = statusOrder[a.status] ?? 5;
                 valB = statusOrder[b.status] ?? 5;
                 break;
@@ -559,6 +559,7 @@ function displayQueueItems(items) {
             ${counts.completed ? `<span style="color:var(--success)">✅ Completed: ${counts.completed}</span>` : ''}
             ${counts.failed ? `<span style="color:var(--danger)">❌ Failed: ${counts.failed}</span>` : ''}
             ${counts.paused ? `<span style="color:#e67e22">⏸️ Paused: ${counts.paused}</span>` : ''}
+            ${counts.cancelled ? `<span style="color:var(--text-muted)">⏹️ Cancelled: ${counts.cancelled}</span>` : ''}
             <span style="margin-left:auto">Showing: <strong style="color:var(--text-primary)">${items.length}</strong> of ${queueTotal}</span>
         </div>
         <table class="tbl">
@@ -597,7 +598,8 @@ function displayQueueItems(items) {
             'processing': { emoji: '⚙️', color: 'text-blue-400',   barColor: 'bg-blue-500' },
             'completed':  { emoji: '✅', color: 'text-green-400',  barColor: 'bg-green-500' },
             'failed':     { emoji: '❌', color: 'text-red-400',    barColor: 'bg-red-500' },
-            'paused':     { emoji: '⏸️', color: 'text-orange-400', barColor: 'bg-orange-500' }
+            'paused':     { emoji: '⏸️', color: 'text-orange-400', barColor: 'bg-orange-500' },
+            'cancelled':  { emoji: '⏹️', color: 'text-gray-400',   barColor: 'bg-gray-500' }
         };
         const sc = statusConfig[item.status] || { emoji: '❓', color: 'text-gray-400', barColor: 'bg-gray-500' };
         const progress = item.progress || 0;
@@ -636,6 +638,14 @@ function displayQueueItems(items) {
                         <div class="bg-red-500 h-2.5 rounded-full" style="width: ${progress}%"></div>
                     </div>
                     <span class="text-red-400 font-mono text-xs w-14 text-right" title="${item.error_message || ''}">${progress > 0 ? progress.toFixed(1) + '%' : 'ERR'}</span>
+                </div>`;
+        } else if (item.status === 'cancelled') {
+            progressBar = `
+                <div class="flex items-center gap-2">
+                    <div class="flex-1 bg-gray-600 rounded-full h-2.5 overflow-hidden">
+                        <div class="bg-gray-500 h-2.5 rounded-full" style="width: ${progress}%"></div>
+                    </div>
+                    <span class="text-gray-400 font-mono text-xs w-14 text-right" title="Manually stopped">${progress > 0 ? progress.toFixed(1) + '%' : '—'}</span>
                 </div>`;
         } else if (item.status === 'processing' || (item.status === 'paused' && progress > 0)) {
             // Calculate elapsed and ETA from started_at

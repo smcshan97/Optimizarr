@@ -30,6 +30,7 @@ class EncodingJob:
         self.paused_reason = None
         self.monitoring_thread = None
         self.stop_monitoring = False
+        self._manually_stopped = False
         
         # Resource limits — temperature-first defaults
         self.resource_limits = resource_limits or {
@@ -569,6 +570,10 @@ class EncodingJob:
                 self._finalize_encoding()
                 return True
             else:
+                # stop() already set status='cancelled' — don't overwrite it
+                if self._manually_stopped:
+                    return False
+
                 # Include last HandBrake output in error for diagnostics
                 tail = '\n'.join(last_lines[-5:]) if last_lines else '(no output captured)'
                 optimizarr_logger.log_handbrake_error(
@@ -588,6 +593,8 @@ class EncodingJob:
                 return False
 
         except Exception as e:
+            if self._manually_stopped:
+                return False
             optimizarr_logger.log_handbrake_error(original_input, str(e))
             db.update_queue_item(
                 self.queue_item_id,
@@ -792,26 +799,59 @@ class EncodingJob:
                 print(f"✗ Error resuming: {e}")
     
     def stop(self):
-        """Stop the encoding job."""
-        # Stop monitoring thread
+        """Stop the encoding job.
+
+        Sets the 'cancelled' status and cleans up the partial output file.
+        Uses psutil to kill the full HandBrakeCLI process tree on Windows
+        (terminate() only kills the parent; child processes survive).
+        """
+        self._manually_stopped = True
         self.stop_monitoring = True
         if self.monitoring_thread and self.monitoring_thread.is_alive():
             self.monitoring_thread.join(timeout=2)
-        
+
         if self.process:
             try:
-                self.process.terminate()
-                self.process.wait(timeout=10)
-                
-                db.update_queue_item(
-                    self.queue_item_id,
-                    status='failed',
-                    error_message='Manually stopped'
-                )
-                
-                print(f"⏹ Stopped encoding")
+                import psutil as _psutil
+                try:
+                    parent = _psutil.Process(self.process.pid)
+                    for child in parent.children(recursive=True):
+                        child.kill()
+                    parent.kill()
+                except _psutil.NoSuchProcess:
+                    pass
+                try:
+                    self.process.wait(timeout=10)
+                except Exception:
+                    pass
             except Exception as e:
-                print(f"✗ Error stopping: {e}")
+                # psutil unavailable or process already gone — fall back
+                try:
+                    self.process.terminate()
+                    self.process.wait(timeout=5)
+                except Exception:
+                    pass
+                print(f"⚠ psutil kill failed, used terminate(): {e}")
+
+        # Clean up the partial _optimized output file if it exists
+        try:
+            original_path = Path(self.queue_item['file_path'])
+            container = self.profile.get('container', 'mkv')
+            ext_map = {'mkv': '.mkv', 'mp4': '.mp4', 'webm': '.webm'}
+            output_ext = ext_map.get(container, '.mkv')
+            temp_out = original_path.parent / f"{original_path.stem}_optimized{output_ext}"
+            if temp_out.exists():
+                temp_out.unlink()
+                print(f"🗑 Removed partial output: {temp_out.name}")
+        except Exception as e:
+            print(f"⚠ Could not remove partial output: {e}")
+
+        db.update_queue_item(
+            self.queue_item_id,
+            status='cancelled',
+            error_message='Manually stopped'
+        )
+        print("⏹ Encoding cancelled")
 
 
 class EncoderPool:
