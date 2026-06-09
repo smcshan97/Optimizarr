@@ -158,12 +158,6 @@ class FolderWatcher:
                     continue
 
                 perm_status, _ = media_scanner.check_file_permissions(file_path)
-                savings = media_scanner._estimate_savings(
-                    file_size,
-                    current_specs.get('codec', 'unknown'),
-                    target_specs['codec'],
-                    current_specs=current_specs,
-                )
 
                 # Upscale eligibility: scan root settings > profile settings
                 import json as _json
@@ -210,6 +204,17 @@ class FolderWatcher:
                         'depth_model': stereo_source.get('stereo_depth_model', 'Any_V2_S'),
                     })
 
+                # Savings estimate (AFTER plans so upscale/stereo are factored in)
+                savings = media_scanner._estimate_savings(
+                    file_size,
+                    current_specs.get('codec', 'unknown'),
+                    target_specs['codec'],
+                    current_specs=current_specs,
+                    profile=profile,
+                    upscale_plan=upscale_plan,
+                    stereo_plan=stereo_plan,
+                )
+
                 db.add_to_queue(
                     file_path=file_path,
                     root_id=None,
@@ -219,6 +224,7 @@ class FolderWatcher:
                     target_specs=target_specs,
                     file_size_bytes=file_size,
                     estimated_savings_bytes=savings,
+                    duration_seconds=current_specs.get('duration', 0),
                     upscale_plan=upscale_plan,
                     stereo_plan=stereo_plan,
                 )

@@ -451,6 +451,16 @@ function formatSize(bytes) {
     return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
 }
 
+function formatDuration(totalSeconds) {
+    if (!totalSeconds || totalSeconds <= 0) return '-';
+    const h = Math.floor(totalSeconds / 3600);
+    const m = Math.floor((totalSeconds % 3600) / 60);
+    const s = Math.floor(totalSeconds % 60);
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+}
+
 // Select All / Deselect All
 function toggleSelectAll(checkbox) {
     const checkboxes = document.querySelectorAll('.queue-row-checkbox');
@@ -562,7 +572,8 @@ function displayQueueItems(items) {
                     <th onclick="toggleSort('codec')">Codec ${sortArrow('codec')}</th>
                     <th onclick="toggleSort('resolution')">Resolution ${sortArrow('resolution')}</th>
                     <th onclick="toggleSort('size')">Size ${sortArrow('size')}</th>
-                    <th onclick="toggleSort('savings')">Savings ${sortArrow('savings')}</th>
+                    <th onclick="toggleSort('savings')">Est. Change ${sortArrow('savings')}</th>
+                    <th style="cursor:default">Duration</th>
                     <th onclick="toggleSort('status')">Status ${sortArrow('status')}</th>
                     <th onclick="toggleSort('progress')" style="min-width:180px">Progress ${sortArrow('progress')}</th>
                     <th onclick="toggleSort('priority')">Priority ${sortArrow('priority')}</th>
@@ -591,12 +602,22 @@ function displayQueueItems(items) {
         const sc = statusConfig[item.status] || { emoji: '❓', color: 'text-gray-400', barColor: 'bg-gray-500' };
         const progress = item.progress || 0;
 
-        // Savings column
+        // Savings / size change column (can be negative for upscaled files)
         const savingsBytes = item.estimated_savings_bytes || 0;
-        const savingsPctItem = item.file_size_bytes > 0 ? ((savingsBytes / item.file_size_bytes) * 100).toFixed(0) : 0;
-        const savingsDisplay = savingsBytes > 0 
-            ? `<span class="text-green-400">-${formatSize(savingsBytes)}</span> <span class="text-gray-500 text-xs">(${savingsPctItem}%)</span>`
-            : '<span class="text-gray-500">-</span>';
+        const absSavings = Math.abs(savingsBytes);
+        const savingsPctItem = item.file_size_bytes > 0 ? ((absSavings / item.file_size_bytes) * 100).toFixed(0) : 0;
+        let savingsDisplay;
+        if (savingsBytes > 0) {
+            savingsDisplay = `<span style="color:var(--success)">-${formatSize(absSavings)}</span> <span style="color:var(--text-muted);font-size:10px">(${savingsPctItem}%)</span>`;
+        } else if (savingsBytes < 0) {
+            savingsDisplay = `<span style="color:var(--warning)">+${formatSize(absSavings)}</span> <span style="color:var(--text-muted);font-size:10px">(↑${savingsPctItem}%)</span>`;
+        } else {
+            savingsDisplay = '<span style="color:var(--text-muted)">—</span>';
+        }
+
+        // Duration column
+        const durSec = item.duration_seconds || 0;
+        const durDisplay = durSec > 0 ? formatDuration(durSec) : '<span style="color:var(--text-muted)">—</span>';
 
         // Progress bar — always rendered for consistency
         let progressBar;
@@ -682,6 +703,7 @@ function displayQueueItems(items) {
                 <td class="py-2 px-2 text-xs text-gray-300">${resolution}${fps !== '-' ? ` <span class="text-gray-500">@ ${fps}fps</span>` : ''}</td>
                 <td class="py-2 px-2 text-xs">${formatSize(item.file_size_bytes)}</td>
                 <td class="py-2 px-2 text-xs">${savingsDisplay}</td>
+                <td class="py-2 px-2 text-xs" style="color:var(--text-secondary)">${durDisplay}</td>
                 <td class="py-2 px-2"><span class="${sc.color} text-xs">${sc.emoji} ${item.status}</span></td>
                 <td class="py-2 px-2">${progressBar}</td>
                 <td class="py-2 px-2 text-xs text-gray-400">${item.priority}</td>

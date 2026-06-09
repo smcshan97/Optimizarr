@@ -679,6 +679,16 @@ class EncodingJob:
             )
 
             # Add to history — use db.add_history so all fields are populated
+            # Extract video duration from current_specs for encode speed tracking
+            specs = self.queue_item.get('current_specs', {})
+            if isinstance(specs, str):
+                try:
+                    import json as _json
+                    specs = _json.loads(specs)
+                except (ValueError, TypeError):
+                    specs = {}
+            video_duration = specs.get('duration', 0)
+
             db.add_history(
                 file_path=str(final_path),
                 profile_name=self.profile['name'],
@@ -688,6 +698,7 @@ class EncodingJob:
                 encoding_time_seconds=encoding_time,
                 codec=self.profile.get('codec'),
                 container=container,
+                duration_seconds=video_duration,
             )
 
             # Log completion

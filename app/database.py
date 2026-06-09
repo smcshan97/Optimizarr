@@ -383,6 +383,19 @@ class Database:
                 cursor.execute("ALTER TABLE queue ADD COLUMN stereo_plan TEXT")
                 print("  ↳ Migrated: added 'stereo_plan' to queue")
 
+            # duration_seconds — real video duration for accurate ETA + savings
+            cursor.execute("PRAGMA table_info(queue)")
+            queue_cols_dur = [col[1] for col in cursor.fetchall()]
+            if 'duration_seconds' not in queue_cols_dur:
+                cursor.execute("ALTER TABLE queue ADD COLUMN duration_seconds REAL DEFAULT 0")
+                print("  ↳ Migrated: added 'duration_seconds' to queue")
+
+            cursor.execute("PRAGMA table_info(history)")
+            history_cols = [col[1] for col in cursor.fetchall()]
+            if 'duration_seconds' not in history_cols:
+                cursor.execute("ALTER TABLE history ADD COLUMN duration_seconds REAL DEFAULT 0")
+                print("  ↳ Migrated: added 'duration_seconds' to history")
+
             # Security: must_change_password flag for default admin
             try:
                 cursor.execute("SELECT must_change_password FROM users LIMIT 1")
@@ -621,8 +634,8 @@ class Database:
                 INSERT INTO queue 
                 (file_path, root_id, profile_id, status, priority, current_specs, 
                  target_specs, file_size_bytes, estimated_savings_bytes, upscale_plan,
-                 stereo_plan)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 stereo_plan, duration_seconds)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 kwargs.get('file_path'),
                 kwargs.get('root_id'),
@@ -635,6 +648,7 @@ class Database:
                 kwargs.get('estimated_savings_bytes', 0),
                 kwargs.get('upscale_plan'),
                 kwargs.get('stereo_plan'),
+                kwargs.get('duration_seconds', 0),
             ))
             return cursor.lastrowid
     
@@ -899,8 +913,9 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO history (file_path, profile_name, original_size_bytes, new_size_bytes, 
-                                     savings_bytes, encoding_time_seconds, codec, container)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                     savings_bytes, encoding_time_seconds, codec, container,
+                                     duration_seconds)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 kwargs.get('file_path'),
                 kwargs.get('profile_name'),
@@ -909,7 +924,8 @@ class Database:
                 kwargs.get('savings_bytes', 0),
                 kwargs.get('encoding_time_seconds', 0),
                 kwargs.get('codec'),
-                kwargs.get('container')
+                kwargs.get('container'),
+                kwargs.get('duration_seconds', 0),
             ))
             return cursor.lastrowid
     

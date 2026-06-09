@@ -308,7 +308,10 @@ def _sync_connection_task(conn_id: int):
                 profile["codec"],
                 current_specs=current_specs,
                 profile=profile,
+                upscale_plan=upscale_plan,
+                stereo_plan=stereo_plan,
             ),
+            duration_seconds=current_specs.get("duration", 0),
             upscale_plan=upscale_plan,
             stereo_plan=stereo_plan,
         )
@@ -493,7 +496,10 @@ async def receive_webhook(app_type: str, payload: dict):
         estimated_savings_bytes=scanner._estimate_savings(
             file_size, codec, profile["codec"], current_specs=current_specs,
             profile=profile,
+            upscale_plan=upscale_plan,
+            stereo_plan=stereo_plan,
         ),
+        duration_seconds=current_specs.get("duration", 0),
         upscale_plan=upscale_plan,
         stereo_plan=stereo_plan,
     )
