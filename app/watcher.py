@@ -88,13 +88,21 @@ class FolderWatcher:
             current_files = self._scan_directory(watch['path'], watch.get('recursive', True), extensions)
 
             with self._lock:
-                known = self._known_files.get(watch['id'], set())
-                new_files = current_files - known
-
-                if new_files:
-                    self._queue_new_files(new_files, watch)
-
-                self._known_files[watch['id']] = current_files
+                # A watch we haven't seen before (e.g. just toggled on for a
+                # library) is seeded, not queued — existing files belong to a
+                # manual scan; the watch only fires on *future* additions.
+                if watch['id'] not in self._known_files:
+                    self._known_files[watch['id']] = current_files
+                    optimizarr_logger.app_logger.info(
+                        "Watcher seeded new watch: %s (%d existing files ignored)",
+                        watch['path'], len(current_files)
+                    )
+                else:
+                    known = self._known_files[watch['id']]
+                    new_files = current_files - known
+                    if new_files:
+                        self._queue_new_files(new_files, watch)
+                    self._known_files[watch['id']] = current_files
 
             # Update last check timestamp
             db.update_folder_watch(watch['id'], last_check=datetime.now().isoformat())
@@ -217,7 +225,7 @@ class FolderWatcher:
 
                 db.add_to_queue(
                     file_path=file_path,
-                    root_id=None,
+                    root_id=watch.get('scan_root_id'),
                     profile_id=watch['profile_id'],
                     status='pending' if perm_status == 'ok' else 'permission_error',
                     current_specs=current_specs,
@@ -237,6 +245,11 @@ class FolderWatcher:
             optimizarr_logger.app_logger.info(
                 "Watcher auto-queued %d new file(s) from %s", queued_count, watch['path']
             )
+
+    def forget_watch(self, watch_id: int):
+        """Drop a watch's known-file cache (called when a watch is removed)."""
+        with self._lock:
+            self._known_files.pop(watch_id, None)
 
     def get_status(self) -> Dict:
         """Get watcher status for API."""

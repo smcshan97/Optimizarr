@@ -403,6 +403,22 @@ class Database:
                 cursor.execute("ALTER TABLE queue ADD COLUMN retry_count INTEGER DEFAULT 0")
                 print("  ↳ Migrated: added 'retry_count' to queue")
 
+            # folder_watches.scan_root_id — links a watch to its library (scan root).
+            # Folder watching is now toggled per-library via the eye toggle.
+            cursor.execute("PRAGMA table_info(folder_watches)")
+            fw_cols = [col[1] for col in cursor.fetchall()]
+            if 'scan_root_id' not in fw_cols:
+                cursor.execute("ALTER TABLE folder_watches ADD COLUMN scan_root_id INTEGER")
+                print("  ↳ Migrated: added 'scan_root_id' to folder_watches")
+                # Best-effort: link existing watches to a scan root with the same path
+                cursor.execute("""
+                    UPDATE folder_watches
+                    SET scan_root_id = (
+                        SELECT sr.id FROM scan_roots sr WHERE sr.path = folder_watches.path
+                    )
+                    WHERE scan_root_id IS NULL
+                """)
+
             # Security: must_change_password flag for default admin
             try:
                 cursor.execute("SELECT must_change_password FROM users LIMIT 1")
@@ -558,21 +574,30 @@ class Database:
                   stereo_divergence, stereo_convergence, stereo_depth_model))
             return cursor.lastrowid
     
+    # Joins the linked folder watch so callers see watch_enabled / watch_id.
+    _SCAN_ROOT_SELECT = """
+        SELECT sr.*,
+               fw.id AS watch_id,
+               CASE WHEN fw.id IS NOT NULL AND fw.enabled = 1 THEN 1 ELSE 0 END AS watch_enabled
+        FROM scan_roots sr
+        LEFT JOIN folder_watches fw ON fw.scan_root_id = sr.id
+    """
+
     def get_scan_roots(self, enabled_only: bool = False) -> List[Dict]:
-        """Get all scan roots."""
+        """Get all scan roots (including linked folder-watch state)."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            query = "SELECT * FROM scan_roots"
+            query = self._SCAN_ROOT_SELECT
             if enabled_only:
-                query += " WHERE enabled = 1"
+                query += " WHERE sr.enabled = 1"
             cursor.execute(query)
             return [dict(row) for row in cursor.fetchall()]
-    
+
     def get_scan_root(self, root_id: int) -> Optional[Dict]:
-        """Get a specific scan root by ID."""
+        """Get a specific scan root by ID (including linked folder-watch state)."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM scan_roots WHERE id = ?", (root_id,))
+            cursor.execute(self._SCAN_ROOT_SELECT + " WHERE sr.id = ?", (root_id,))
             row = cursor.fetchone()
             return dict(row) if row else None
     
@@ -626,9 +651,10 @@ class Database:
             return cursor.rowcount > 0
     
     def delete_scan_root(self, root_id: int) -> bool:
-        """Delete a scan root by ID."""
+        """Delete a scan root by ID. Also removes any linked folder watch."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            cursor.execute("DELETE FROM folder_watches WHERE scan_root_id = ?", (root_id,))
             cursor.execute("DELETE FROM scan_roots WHERE id = ?", (root_id,))
             return cursor.rowcount > 0
     
@@ -899,16 +925,28 @@ class Database:
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO folder_watches (path, profile_id, enabled, recursive, auto_queue, extensions)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO folder_watches (path, profile_id, enabled, recursive, auto_queue, extensions, scan_root_id)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 path, profile_id,
                 kwargs.get('enabled', True),
                 kwargs.get('recursive', True),
                 kwargs.get('auto_queue', True),
-                kwargs.get('extensions', '.mkv,.mp4,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.mpg,.mpeg')
+                kwargs.get('extensions', '.mkv,.mp4,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.mpg,.mpeg'),
+                kwargs.get('scan_root_id'),
             ))
             return cursor.lastrowid
+
+    def get_folder_watch_by_scan_root(self, scan_root_id: int) -> Optional[Dict]:
+        """Get the folder watch linked to a scan root, if any."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM folder_watches WHERE scan_root_id = ? LIMIT 1",
+                (scan_root_id,)
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
     
     def get_folder_watches(self, enabled_only: bool = False) -> List[Dict]:
         """Get all folder watches."""

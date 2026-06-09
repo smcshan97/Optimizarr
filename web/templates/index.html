@@ -56,10 +56,6 @@
                     <span class="nav-icon">📂</span>
                     <span class="nav-label">Libraries</span>
                 </a>
-                <a class="nav-item" onclick="switchTab('watches')" data-tab="watches">
-                    <span class="nav-icon">👁️</span>
-                    <span class="nav-label">Folder Watches</span>
-                </a>
                 <div class="nav-section">Insights</div>
                 <a class="nav-item" onclick="switchTab('statistics')" data-tab="statistics">
                     <span class="nav-icon">📊</span>
@@ -1284,96 +1280,6 @@
                 <div class="modal-footer">
                     <button onclick="closeFolderBrowser()" class="btn btn-secondary">Cancel</button>
                     <button onclick="selectCurrentFolder()" class="btn btn-primary">Select Folder</button>
-                </div>
-            </div>
-        </div>
-
-        <!-- ============================================================ -->
-        <!-- FOLDER WATCHES TAB -->
-        <!-- ============================================================ -->
-        <div id="content-watches" class="tab-panel">
-            <div class="card">
-                <div class="flex justify-between items-center mb-6">
-                    <div>
-                        <h2 class="page-title">Folder Watches</h2>
-                        <p class="text-sm text-gray-400 mt-1">Auto-queue new media files when they appear in watched folders</p>
-                    </div>
-                    <div class="flex gap-2">
-                        <button onclick="forceWatchCheck()" class="btn btn-secondary btn-sm">
-                            🔍 Check Now
-                        </button>
-                        <button onclick="showCreateWatchForm()" class="btn btn-primary">
-                            Add Watch
-                        </button>
-                    </div>
-                </div>
-                
-                <!-- Watcher Status -->
-                <div id="watcherStatus" class="mb-4 p-3 bg-gray-700 rounded text-sm text-gray-300"></div>
-                
-                <div id="watchesList">
-                    <p style="color:var(--text-muted)">Loading watches...</p>
-                </div>
-            </div>
-        </div>
-        
-        <!-- Watch Modal -->
-        <div id="watchModal" class="modal-backdrop hidden">
-            <div class="modal-panel" style="max-width:540px">
-                <div class="modal-header">
-                    <h3 class="modal-title" id="watchModalTitle">Add Folder Watch</h3>
-                    <button onclick="closeWatchModal()" class="modal-close">✕</button>
-                </div>
-                <div class="modal-body">
-                <form id="watchForm" onsubmit="saveWatch(event)">
-                    <input type="hidden" id="watchId">
-                    
-                    <div class="space-y-4">
-                        <div>
-                            <label class="block text-sm font-medium mb-2">Folder Path *</label>
-                            <div class="flex gap-2">
-                                <input type="text" id="watchPath" required 
-                                    class="flex-1 bg-gray-700 border border-gray-600 rounded px-4 py-2"
-                                    placeholder="/path/to/media/folder">
-                                <button type="button" onclick="openFolderBrowser('watchPath')" 
-                                    class="btn btn-secondary">📁</button>
-                            </div>
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-medium mb-2">Encoding Profile *</label>
-                            <select id="watchProfile" required 
-                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
-                            </select>
-                        </div>
-                        
-                        <div>
-                            <label class="block text-sm font-medium mb-2">File Extensions</label>
-                            <input type="text" id="watchExtensions" 
-                                class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2"
-                                value=".mkv,.mp4,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.mpg,.mpeg">
-                        </div>
-                        
-                        <div class="grid grid-cols-3 gap-4">
-                            <label class="flex items-center">
-                                <input type="checkbox" id="watchEnabled" checked class="mr-2">
-                                <span class="text-sm">Enabled</span>
-                            </label>
-                            <label class="flex items-center">
-                                <input type="checkbox" id="watchRecursive" checked class="mr-2">
-                                <span class="text-sm">Recursive</span>
-                            </label>
-                            <label class="flex items-center">
-                                <input type="checkbox" id="watchAutoQueue" checked class="mr-2">
-                                <span class="text-sm">Auto Queue</span>
-                            </label>
-                        </div>
-                    </div>
-                </form>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" onclick="closeWatchModal()" class="btn btn-secondary">Cancel</button>
-                    <button type="submit" onclick="document.getElementById('watchForm').requestSubmit()" class="btn btn-primary">Save Watch</button>
                 </div>
             </div>
         </div>

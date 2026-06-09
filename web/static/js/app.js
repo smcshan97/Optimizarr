@@ -99,7 +99,6 @@ function switchTab(tabName) {
     if (tabName === 'settings') { loadSettings(); loadConnections(); }
     if (tabName === 'schedule') loadSchedule();
     if (tabName === 'logs') loadLogs();
-    if (tabName === 'watches') loadWatches();
     if (tabName === 'statistics') loadStatistics();
 }
 
@@ -1438,18 +1437,29 @@ async function loadScanRoots() {
                                 ${r.show_in_stats !== false ? '📊 Stats: On' : '🔒 Stats: Hidden'}
                             </span>
                         </div>
+                        ${r.watch_enabled ? `
+                        <div>
+                            <span class="px-2 py-1 rounded text-xs bg-green-900 text-green-300" title="Auto-queues new files added to this folder">
+                                👁️ Watching
+                            </span>
+                        </div>` : ''}
                     </div>
                 </div>
                 <div class="flex gap-2">
-                    <button onclick="scanSingleRoot(${r.id})" 
+                    <button onclick="toggleScanRootWatch(${r.id}, ${r.watch_enabled ? 'false' : 'true'})"
+                        class="btn btn-sm ${r.watch_enabled ? 'btn-success' : 'btn-secondary'}"
+                        title="${r.watch_enabled ? 'Folder watching ON — click to stop watching for new files' : 'Folder watching OFF — click to auto-queue new files added here'}">
+                        ${r.watch_enabled ? '👁️ Watching' : '👁️‍🗨️ Watch'}
+                    </button>
+                    <button onclick="scanSingleRoot(${r.id})"
                         class="btn btn-success btn-sm">
                         Scan Now
                     </button>
-                    <button onclick="editScanRoot(${r.id})" 
+                    <button onclick="editScanRoot(${r.id})"
                         class="btn btn-primary btn-sm">
                         Edit
                     </button>
-                    <button onclick="deleteScanRoot(${r.id}, '${r.path}')" 
+                    <button onclick="deleteScanRoot(${r.id}, '${r.path}')"
                         class="btn btn-danger btn-sm">
                         Delete
                     </button>
@@ -1581,12 +1591,24 @@ document.getElementById('scanRootForm').addEventListener('submit', async (e) => 
 
 async function deleteScanRoot(id, path) {
     if (!confirm(`Delete scan root "${path}"?`)) return;
-    
+
     const result = await apiRequest(`/scan-roots/${id}`, { method: 'DELETE' });
-    
+
     if (result) {
         loadScanRoots();
         showMessage('Scan root deleted successfully!', 'success');
+    }
+}
+
+async function toggleScanRootWatch(id, enabled) {
+    const result = await apiRequest(`/scan-roots/${id}/watch`, {
+        method: 'POST',
+        body: JSON.stringify({ enabled })
+    });
+    if (result) {
+        showMessage(result.message || (enabled ? 'Folder watching enabled' : 'Folder watching disabled'),
+                    result.success === false ? 'error' : 'success');
+        loadScanRoots();
     }
 }
 
@@ -1848,9 +1870,6 @@ async function browseFolderPath(targetFieldId) {
     document.getElementById('folderBrowserModal').classList.remove('hidden');
     await loadDirectoryListing('');
 }
-
-// Alias for watch form compatibility
-const openFolderBrowser = browseFolderPath;
 
 function closeFolderBrowser() {
     document.getElementById('folderBrowserModal').classList.add('hidden');
@@ -2310,150 +2329,6 @@ async function checkHwAccel() {
         helpEl.textContent = '⚠️ Detection failed';
         helpEl.className = 'text-xs text-red-400 mt-1';
         checkbox.checked = false;
-    }
-}
-
-
-// ============================================================
-// FOLDER WATCHES
-// ============================================================
-
-async function loadWatches() {
-    const list = document.getElementById('watchesList');
-    const statusEl = document.getElementById('watcherStatus');
-    
-    // Load watcher status
-    try {
-        const status = await apiRequest('/watches/status');
-        if (status) {
-            statusEl.innerHTML = `
-                <span class="${status.running ? 'text-green-400' : 'text-yellow-400'}">
-                    ${status.running ? '● Running' : '○ Stopped'}
-                </span>
-                <span class="mx-3 text-gray-500">|</span>
-                Poll interval: ${status.poll_interval}s
-                <span class="mx-3 text-gray-500">|</span>
-                Active watches: ${status.active_watches}/${status.total_watches}
-            `;
-        }
-    } catch (e) {
-        statusEl.innerHTML = '<span class="text-gray-500">Status unavailable</span>';
-    }
-    
-    // Load watches
-    const watches = await apiRequest('/watches');
-    if (!watches || watches.length === 0) {
-        list.innerHTML = '<p class="text-gray-400">No folder watches configured. Click "Add Watch" to start monitoring a folder.</p>';
-        return;
-    }
-    
-    list.innerHTML = watches.map(w => `
-        <div class="bg-gray-700 rounded-lg p-4 mb-3">
-            <div class="flex justify-between items-start">
-                <div class="flex-1">
-                    <div class="flex items-center gap-2">
-                        <span class="text-lg">${w.enabled ? '👁️' : '⏸️'}</span>
-                        <h3 class="font-semibold">${w.path}</h3>
-                        ${w.enabled ? '<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">Active</span>' : '<span class="px-2 py-0.5 bg-gray-600 text-gray-400 text-xs rounded">Disabled</span>'}
-                    </div>
-                    <div class="flex gap-4 mt-2 text-sm text-gray-300">
-                        <div><span class="text-gray-400">Profile:</span> ${w.profile_name || 'Unknown'}</div>
-                        <div><span class="text-gray-400">Recursive:</span> ${w.recursive ? 'Yes' : 'No'}</div>
-                        <div><span class="text-gray-400">Auto Queue:</span> ${w.auto_queue ? 'Yes' : 'No'}</div>
-                        ${w.last_check ? `<div><span class="text-gray-400">Last Check:</span> ${new Date(w.last_check).toLocaleString()}</div>` : ''}
-                    </div>
-                    <div class="mt-1 text-xs text-gray-500">Extensions: ${w.extensions}</div>
-                </div>
-                <div class="flex gap-2">
-                    <button onclick='editWatch(${JSON.stringify(w)})' class="btn btn-secondary btn-sm">Edit</button>
-                    <button onclick="deleteWatch(${w.id})" class="btn btn-danger btn-sm">Delete</button>
-                </div>
-            </div>
-        </div>
-    `).join('');
-}
-
-async function showCreateWatchForm() {
-    document.getElementById('watchModalTitle').textContent = 'Add Folder Watch';
-    document.getElementById('watchForm').reset();
-    document.getElementById('watchId').value = '';
-    document.getElementById('watchEnabled').checked = true;
-    document.getElementById('watchRecursive').checked = true;
-    document.getElementById('watchAutoQueue').checked = true;
-    document.getElementById('watchExtensions').value = '.mkv,.mp4,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.mpg,.mpeg';
-    
-    // Populate profile dropdown
-    const profiles = await apiRequest('/profiles');
-    const select = document.getElementById('watchProfile');
-    select.innerHTML = profiles.map(p => `<option value="${p.id}">${p.name}</option>`).join('');
-    
-    document.getElementById('watchModal').classList.remove('hidden');
-}
-
-function editWatch(watch) {
-    document.getElementById('watchModalTitle').textContent = 'Edit Folder Watch';
-    document.getElementById('watchId').value = watch.id;
-    document.getElementById('watchPath').value = watch.path;
-    document.getElementById('watchEnabled').checked = watch.enabled;
-    document.getElementById('watchRecursive').checked = watch.recursive;
-    document.getElementById('watchAutoQueue').checked = watch.auto_queue;
-    document.getElementById('watchExtensions').value = watch.extensions || '';
-    
-    // Populate and select profile
-    showCreateWatchForm().then(() => {
-        document.getElementById('watchProfile').value = watch.profile_id;
-        document.getElementById('watchModalTitle').textContent = 'Edit Folder Watch';
-        document.getElementById('watchId').value = watch.id;
-        document.getElementById('watchPath').value = watch.path;
-        document.getElementById('watchEnabled').checked = watch.enabled;
-        document.getElementById('watchRecursive').checked = watch.recursive;
-        document.getElementById('watchAutoQueue').checked = watch.auto_queue;
-        document.getElementById('watchExtensions').value = watch.extensions || '';
-    });
-}
-
-async function saveWatch(event) {
-    event.preventDefault();
-    
-    const data = {
-        path: document.getElementById('watchPath').value,
-        profile_id: parseInt(document.getElementById('watchProfile').value),
-        enabled: document.getElementById('watchEnabled').checked,
-        recursive: document.getElementById('watchRecursive').checked,
-        auto_queue: document.getElementById('watchAutoQueue').checked,
-        extensions: document.getElementById('watchExtensions').value
-    };
-    
-    const watchId = document.getElementById('watchId').value;
-    
-    if (watchId) {
-        await apiRequest(`/watches/${watchId}`, { method: 'PUT', body: JSON.stringify(data) });
-        showMessage('Watch updated', 'success');
-    } else {
-        await apiRequest('/watches', { method: 'POST', body: JSON.stringify(data) });
-        showMessage('Watch created', 'success');
-    }
-    
-    closeWatchModal();
-    loadWatches();
-}
-
-async function deleteWatch(id) {
-    if (!confirm('Delete this folder watch?')) return;
-    await apiRequest(`/watches/${id}`, { method: 'DELETE' });
-    showMessage('Watch deleted', 'success');
-    loadWatches();
-}
-
-function closeWatchModal() {
-    document.getElementById('watchModal').classList.add('hidden');
-}
-
-async function forceWatchCheck() {
-    const result = await apiRequest('/watches/check', { method: 'POST' });
-    if (result) {
-        showMessage(`Checked ${result.checked} watch(es), found ${result.new_files} new file(s)`, 'success');
-        loadWatches();
     }
 }
 

@@ -129,6 +129,54 @@ async def update_scan_root(
         )
 
 
+@router.post("/scan-roots/{root_id}/watch", response_model=MessageResponse)
+async def toggle_scan_root_watch(
+    root_id: int,
+    data: dict,
+    current_user: dict = Depends(get_current_admin_user)
+):
+    """Enable/disable folder watching for a library (admin only).
+
+    Enabling auto-creates a folder watch bound to the scan root (inheriting its
+    path, profile, and recursion). Disabling deletes the linked watch. Newly
+    queued files come from *future* additions only — existing files are picked
+    up by a manual scan.
+    """
+    root = db.get_scan_root(root_id)
+    if not root:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Scan root {root_id} not found"
+        )
+
+    enabled = bool(data.get('enabled', False))
+    existing = db.get_folder_watch_by_scan_root(root_id)
+
+    from app.watcher import folder_watcher
+
+    if enabled:
+        if existing:
+            db.update_folder_watch(existing['id'], enabled=True)
+        else:
+            db.create_folder_watch(
+                path=root['path'],
+                profile_id=root['profile_id'],
+                enabled=True,
+                recursive=bool(root.get('recursive', True)),
+                auto_queue=True,
+                scan_root_id=root_id,
+            )
+        # Ensure the watcher thread is running (idempotent)
+        folder_watcher.start()
+        return MessageResponse(message="Folder watching enabled for this library")
+
+    # Disable — remove the linked watch and forget its known-file cache
+    if existing:
+        folder_watcher.forget_watch(existing['id'])
+        db.delete_folder_watch(existing['id'])
+    return MessageResponse(message="Folder watching disabled for this library")
+
+
 @router.post("/scan-roots/{root_id}/scan", response_model=MessageResponse)
 async def scan_single_root(
     root_id: int,

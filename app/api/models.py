@@ -215,6 +215,9 @@ class ScanRootResponse(BaseModel):
     stereo_divergence: Optional[float] = 2.0
     stereo_convergence: Optional[float] = 0.5
     stereo_depth_model: Optional[str] = "Any_V2_S"
+    # Folder-watch state (eye toggle)
+    watch_enabled: Optional[bool] = False
+    watch_id: Optional[int] = None
 
 
 # ============================================================
