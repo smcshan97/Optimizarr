@@ -535,5 +535,26 @@ class MediaScanner:
         return sum(self.scan_root(root['id']) for root in scan_roots)
 
 
+def estimate_encode_seconds(duration_seconds, target_codec, speed_stats) -> Optional[float]:
+    """Estimate wall-clock encode time for a video.
+
+    duration × speed ratio (encode seconds per video second), using the
+    history average for the target codec, falling back to the overall
+    average across all codecs, then to 1.0× realtime when there's no
+    history at all. Returns None when the video duration is unknown —
+    callers should sort those last rather than guessing.
+    """
+    if not duration_seconds or duration_seconds <= 0:
+        return None
+    ratio = None
+    if speed_stats:
+        ratio = (speed_stats.get('by_codec') or {}).get(target_codec)
+        if ratio is None:
+            ratio = speed_stats.get('overall')
+    if ratio is None or ratio <= 0:
+        ratio = 1.0
+    return duration_seconds * ratio
+
+
 # Global scanner instance
 scanner = MediaScanner()

@@ -444,3 +444,53 @@ class TestPriorityRank:
                     f"sort direction had no effect for field '{field}'"
                 assert asc['items'][0]['id'] == low_first, \
                     f"unexpected asc order for field '{field}'"
+
+
+# ---------------------------------------------------------------------------
+# Encode speed stats + time estimation (Patch 30)
+# ---------------------------------------------------------------------------
+
+class TestEncodeSpeedEstimation:
+    def test_speed_stats_empty_history(self, fresh_db):
+        """No usable history → no ratios, zero samples."""
+        stats = fresh_db.get_encode_speed_stats()
+        assert stats['overall'] is None
+        assert stats['by_codec'] == {}
+        assert stats['samples'] == 0
+
+    def test_speed_stats_per_codec_and_overall(self, fresh_db):
+        """Ratios group by target codec; overall is sample-weighted."""
+        # h265 (NVENC): 1h video in 30min → ratio 0.5, two samples
+        fresh_db.add_history(file_path="/x/a.mkv", encoding_time_seconds=1800,
+                             duration_seconds=3600, codec='h265')
+        fresh_db.add_history(file_path="/x/b.mkv", encoding_time_seconds=1800,
+                             duration_seconds=3600, codec='h265')
+        # av1 (software): 1h video in 4h → ratio 4.0, one sample
+        fresh_db.add_history(file_path="/x/c.mkv", encoding_time_seconds=14400,
+                             duration_seconds=3600, codec='av1')
+        # Pre-Patch-25 row (duration unknown) must be excluded
+        fresh_db.add_history(file_path="/x/old.mkv", encoding_time_seconds=999,
+                             duration_seconds=0, codec='h265')
+
+        stats = fresh_db.get_encode_speed_stats()
+        assert stats['samples'] == 3
+        assert abs(stats['by_codec']['h265'] - 0.5) < 1e-9
+        assert abs(stats['by_codec']['av1'] - 4.0) < 1e-9
+        # weighted: (0.5*2 + 4.0*1) / 3
+        assert abs(stats['overall'] - (5.0 / 3)) < 1e-9
+
+    def test_estimate_encode_seconds(self):
+        """Codec match > overall fallback > 1.0× realtime; None for unknown."""
+        from app.scanner import estimate_encode_seconds
+
+        stats = {'overall': 2.0, 'by_codec': {'av1': 4.0}, 'samples': 3}
+        # Codec-specific ratio wins
+        assert estimate_encode_seconds(600, 'av1', stats) == 2400
+        # Unknown codec falls back to overall
+        assert estimate_encode_seconds(600, 'h265', stats) == 1200
+        # No history at all → 1.0× realtime
+        assert estimate_encode_seconds(600, 'av1', {'overall': None, 'by_codec': {}}) == 600
+        assert estimate_encode_seconds(600, 'av1', None) == 600
+        # Unknown duration → None (caller sorts these last)
+        assert estimate_encode_seconds(0, 'av1', stats) is None
+        assert estimate_encode_seconds(None, 'av1', stats) is None

@@ -204,8 +204,15 @@ async def prioritize_queue(
 ):
     """
     Re-prioritize pending queue items by a given criterion.
-    sort_by: 'file_size' | 'estimated_savings' | 'filename' | 'default'
-    order: 'desc' | 'asc'  (default: desc = largest first)
+    sort_by: 'file_size' | 'estimated_savings' | 'filename'
+           | 'fastest_first' | 'slowest_first' | 'default'
+    order: 'desc' | 'asc'  (default: desc = largest first; ignored by the
+           fastest/slowest strategies, which embed their own direction)
+
+    fastest_first / slowest_first sort by estimated encode time, derived from
+    each item's video duration and the average encode speed in history for
+    its target codec. Fastest-first suits short encoding windows; slowest-
+    first suits overnight runs. Items with unknown duration sort last.
     """
     sort_by = data.get("sort_by", "default")
     order = data.get("order", "desc")
@@ -222,6 +229,23 @@ async def prioritize_queue(
         items.sort(key=lambda i: i.get("estimated_savings_bytes", 0), reverse=reverse)
     elif sort_by == "filename":
         items.sort(key=lambda i: Path(i.get("file_path", "")).name.lower(), reverse=reverse)
+    elif sort_by in ("fastest_first", "slowest_first"):
+        from app.scanner import estimate_encode_seconds
+        speed_stats = db.get_encode_speed_stats()
+        slowest = (sort_by == "slowest_first")
+
+        def _sort_key(item):
+            target = item.get("target_specs") or {}
+            est = estimate_encode_seconds(
+                item.get("duration_seconds") or 0,
+                target.get("codec") if isinstance(target, dict) else None,
+                speed_stats,
+            )
+            if est is None:
+                return (1, 0)  # unknown duration → always last
+            return (0, -est if slowest else est)
+
+        items.sort(key=_sort_key)
     # default: leave current order but we still write priorities below
 
     # Assign rank-based priorities: 1 = first to encode, 2 = second, etc.

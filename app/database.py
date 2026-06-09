@@ -1052,6 +1052,37 @@ class Database:
             ))
             return cursor.lastrowid
     
+    def get_encode_speed_stats(self) -> Dict:
+        """Average encode speed ratios from history.
+
+        Ratio = encoding wall-clock seconds per second of video (2.0 means a
+        1-hour video takes ~2 hours to encode). Grouped by target codec since
+        speed differs wildly between e.g. NVENC H.265 and software AV1.
+        Only rows with a known duration count (pre-duration-tracking history
+        has duration_seconds = 0 and is excluded).
+
+        Returns {'overall': float|None, 'by_codec': {codec: float}, 'samples': int}.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT codec,
+                       AVG(CAST(encoding_time_seconds AS REAL) / duration_seconds) AS ratio,
+                       COUNT(*) AS n
+                FROM history
+                WHERE encoding_time_seconds > 0 AND duration_seconds > 0
+                GROUP BY codec
+            """)
+            by_codec = {}
+            weighted = 0.0
+            samples = 0
+            for row in cursor.fetchall():
+                by_codec[row['codec'] or ''] = row['ratio']
+                weighted += row['ratio'] * row['n']
+                samples += row['n']
+            overall = (weighted / samples) if samples else None
+            return {'overall': overall, 'by_codec': by_codec, 'samples': samples}
+
     def get_stats_dashboard(self, days: int = 30) -> Dict:
         """Get comprehensive statistics for the dashboard."""
         with self.get_connection() as conn:

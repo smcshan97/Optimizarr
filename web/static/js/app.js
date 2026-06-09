@@ -2672,6 +2672,8 @@ async function applyQueuePriority() {
         'file_size':          { sort_by: 'file_size',          order: 'desc' },
         'estimated_savings':  { sort_by: 'estimated_savings',  order: 'desc' },
         'filename':           { sort_by: 'filename',           order: 'asc'  },
+        'fastest_first':      { sort_by: 'fastest_first',      order: 'asc'  },
+        'slowest_first':      { sort_by: 'slowest_first',      order: 'desc' },
     };
     const params = sortMap[sortBy] || sortMap['default'];
 
