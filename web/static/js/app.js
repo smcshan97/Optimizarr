@@ -289,7 +289,7 @@ async function loadResources() {
 let allQueueItems = [];      // current page items only
 let selectedQueueIds = new Set();
 let queueSortField = 'priority';
-let queueSortDir = 'desc'; // 'asc' or 'desc'
+let queueSortDir = 'asc'; // priority is a rank: 1 = first to encode
 let queuePage = 1;
 let queuePageSize = parseInt(localStorage.getItem('queuePageSize') || '50');
 let queueTotalPages = 1;
@@ -345,62 +345,7 @@ function filterQueue() {
 
 const debouncedFilter = debounce(filterQueue, 300);
 
-// Sort queue items by any field
-function sortQueueItems(items, field, dir) {
-    return [...items].sort((a, b) => {
-        let valA, valB;
-        
-        // Extract sortable values based on field
-        switch (field) {
-            case 'file':
-                valA = a.file_path.split(/[/\\]/).pop().toLowerCase();
-                valB = b.file_path.split(/[/\\]/).pop().toLowerCase();
-                break;
-            case 'status':
-                const statusOrder = { processing: 0, paused: 1, pending: 2, failed: 3, cancelled: 4, completed: 5 };
-                valA = statusOrder[a.status] ?? 5;
-                valB = statusOrder[b.status] ?? 5;
-                break;
-            case 'progress':
-                valA = a.progress || 0;
-                valB = b.progress || 0;
-                break;
-            case 'size':
-                valA = a.file_size_bytes || 0;
-                valB = b.file_size_bytes || 0;
-                break;
-            case 'savings':
-                valA = a.estimated_savings_bytes || 0;
-                valB = b.estimated_savings_bytes || 0;
-                break;
-            case 'codec':
-                valA = getSpec(a, 'codec');
-                valB = getSpec(b, 'codec');
-                break;
-            case 'resolution':
-                valA = getSpec(a, 'resolution');
-                valB = getSpec(b, 'resolution');
-                break;
-            case 'priority':
-                valA = a.priority || 50;
-                valB = b.priority || 50;
-                break;
-            default: // created_at
-                valA = a.created_at || '';
-                valB = b.created_at || '';
-                break;
-        }
-        
-        // Compare
-        if (typeof valA === 'string') {
-            const cmp = valA.localeCompare(valB);
-            return dir === 'asc' ? cmp : -cmp;
-        }
-        return dir === 'asc' ? (valA - valB) : (valB - valA);
-    });
-}
-
-// Toggle sort on column header click
+// Toggle sort on column header click (sorting itself is server-side)
 function toggleSort(field) {
     if (queueSortField === field) {
         queueSortDir = queueSortDir === 'asc' ? 'desc' : 'asc';
@@ -573,7 +518,7 @@ function displayQueueItems(items) {
                     <th onclick="toggleSort('resolution')">Resolution ${sortArrow('resolution')}</th>
                     <th onclick="toggleSort('size')">Size ${sortArrow('size')}</th>
                     <th onclick="toggleSort('savings')">Est. Change ${sortArrow('savings')}</th>
-                    <th style="cursor:default">Duration</th>
+                    <th onclick="toggleSort('duration')">Duration ${sortArrow('duration')}</th>
                     <th onclick="toggleSort('status')">Status ${sortArrow('status')}</th>
                     <th onclick="toggleSort('progress')" style="min-width:180px">Progress ${sortArrow('progress')}</th>
                     <th onclick="toggleSort('priority')">Priority ${sortArrow('priority')}</th>
@@ -819,14 +764,16 @@ function initQueueDragDrop() {
             dragRow.style.opacity = '1';
             dragRow = null;
         }
-        // Collect new order and push to server
+        // Collect new order and push to server.
+        // Rank scheme: 1 = first to encode. Offset by page so page 2 rows
+        // get ranks after page 1's rather than colliding with them.
         const rows = tbody.querySelectorAll('tr[data-queue-id]');
         const items = [];
-        const total = rows.length;
+        const rankOffset = (queuePage - 1) * queuePageSize;
         rows.forEach((row, index) => {
             items.push({
                 id: parseInt(row.dataset.queueId),
-                priority: (total - index) * 10
+                priority: rankOffset + index + 1
             });
         });
         if (items.length > 0) {

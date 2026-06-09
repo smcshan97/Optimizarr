@@ -934,7 +934,7 @@ class EncoderPool:
                 pending_items = db.get_queue_items(status='pending')
                 
                 if pending_items:
-                    item = pending_items[0]  # Highest priority
+                    item = pending_items[0]  # Rank 1 = first (priority ASC)
                     
                     # Get profile
                     profile = db.get_profile(item['profile_id'])

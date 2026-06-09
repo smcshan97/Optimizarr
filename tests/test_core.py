@@ -386,3 +386,61 @@ class TestRetryAndRecovery:
         assert fresh_db.get_queue_item(c)['status'] == 'completed'
         # Recovery is not a failure — retry_count must be left untouched
         assert fresh_db.get_queue_item(a)['retry_count'] == 2
+
+
+# ---------------------------------------------------------------------------
+# Rank-based priority scheme (Patch 29): 1 = first to encode
+# ---------------------------------------------------------------------------
+
+class TestPriorityRank:
+    def test_new_items_append_at_end(self, fresh_db):
+        """Items without explicit priority get sequential ranks 1, 2, 3…"""
+        a = fresh_db.add_to_queue(file_path="/x/a.mkv", profile_id=1)
+        b = fresh_db.add_to_queue(file_path="/x/b.mkv", profile_id=1)
+        c = fresh_db.add_to_queue(file_path="/x/c.mkv", profile_id=1)
+        assert fresh_db.get_queue_item(a)['priority'] == 1
+        assert fresh_db.get_queue_item(b)['priority'] == 2
+        assert fresh_db.get_queue_item(c)['priority'] == 3
+
+    def test_queue_order_is_rank_ascending(self, fresh_db):
+        """get_queue_items returns rank 1 first — the encoder's next job."""
+        fresh_db.add_to_queue(file_path="/x/second.mkv", profile_id=1, priority=2)
+        fresh_db.add_to_queue(file_path="/x/first.mkv", profile_id=1, priority=1)
+        fresh_db.add_to_queue(file_path="/x/third.mkv", profile_id=1, priority=3)
+
+        items = fresh_db.get_queue_items(status='pending')
+        order = [i['file_path'] for i in items]
+        assert order == ["/x/first.mkv", "/x/second.mkv", "/x/third.mkv"], order
+
+    def test_fresh_db_has_priority_scheme_flag(self, fresh_db):
+        """Fresh DBs are flagged so the renumber migration never re-runs."""
+        assert fresh_db.get_setting('priority_scheme') == 'rank'
+
+    def test_paginated_sorts_all_columns_both_directions(self, fresh_db):
+        """Every UI-sortable column works asc and desc without falling back."""
+        a = fresh_db.add_to_queue(
+            file_path="/x/a.mkv", profile_id=1, file_size_bytes=100,
+            estimated_savings_bytes=10, duration_seconds=60,
+            current_specs={'codec': 'h264', 'height': 1080},
+        )
+        b = fresh_db.add_to_queue(
+            file_path="/x/b.mkv", profile_id=1, file_size_bytes=200,
+            estimated_savings_bytes=20, duration_seconds=120,
+            current_specs={'codec': 'av1', 'height': 720},
+        )
+
+        for field, low_first in [
+            ('file', a), ('size', a), ('savings', a), ('duration', a),
+            ('codec', b),        # 'av1' < 'h264'
+            ('resolution', b),   # 720 < 1080
+            ('priority', a), ('status', a), ('progress', a), ('created_at', a),
+        ]:
+            asc = fresh_db.get_queue_items_paginated(sort_field=field, sort_dir='asc')
+            desc = fresh_db.get_queue_items_paginated(sort_field=field, sort_dir='desc')
+            assert len(asc['items']) == 2 and len(desc['items']) == 2
+            # asc and desc must actually differ for fields with distinct values
+            if field in ('file', 'size', 'savings', 'duration', 'codec', 'resolution', 'priority'):
+                assert asc['items'][0]['id'] != desc['items'][0]['id'], \
+                    f"sort direction had no effect for field '{field}'"
+                assert asc['items'][0]['id'] == low_first, \
+                    f"unexpected asc order for field '{field}'"

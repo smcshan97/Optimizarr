@@ -99,7 +99,7 @@ class Database:
                     root_id INTEGER,
                     profile_id INTEGER,
                     status TEXT DEFAULT 'pending',
-                    priority INTEGER DEFAULT 50,
+                    priority INTEGER DEFAULT 0,
                     current_specs TEXT,
                     target_specs TEXT,
                     file_size_bytes INTEGER,
@@ -419,6 +419,29 @@ class Database:
                     WHERE scan_root_id IS NULL
                 """)
 
+            # Priority scheme: rank-based (1 = first to encode, ascending).
+            # One-time renumber of the old "higher number = sooner" scheme,
+            # preserving each item's existing position in the queue.
+            cursor.execute("SELECT value FROM settings WHERE key = 'priority_scheme'")
+            scheme_row = cursor.fetchone()
+            if not scheme_row or scheme_row[0] != 'rank':
+                cursor.execute("""
+                    UPDATE queue SET priority = (
+                        SELECT rn FROM (
+                            SELECT id, ROW_NUMBER() OVER (
+                                ORDER BY priority DESC, created_at
+                            ) AS rn FROM queue
+                        ) ranked WHERE ranked.id = queue.id
+                    )
+                """)
+                cursor.execute("""
+                    INSERT INTO settings (key, value, updated_at)
+                    VALUES ('priority_scheme', 'rank', CURRENT_TIMESTAMP)
+                    ON CONFLICT(key) DO UPDATE SET
+                        value = 'rank', updated_at = CURRENT_TIMESTAMP
+                """)
+                print("  ↳ Migrated: queue priorities renumbered to rank scheme (1 = first)")
+
             # Security: must_change_password flag for default admin
             try:
                 cursor.execute("SELECT must_change_password FROM users LIMIT 1")
@@ -660,12 +683,20 @@ class Database:
     
     # Queue CRUD
     def add_to_queue(self, **kwargs) -> int:
-        """Add a file to the encoding queue."""
+        """Add a file to the encoding queue.
+
+        Priority is a rank: 1 = first to encode. When not given, the item is
+        appended at the end of the queue (MAX(priority) + 1).
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            priority = kwargs.get('priority')
+            if priority is None:
+                cursor.execute("SELECT COALESCE(MAX(priority), 0) + 1 FROM queue")
+                priority = cursor.fetchone()[0]
             cursor.execute("""
-                INSERT INTO queue 
-                (file_path, root_id, profile_id, status, priority, current_specs, 
+                INSERT INTO queue
+                (file_path, root_id, profile_id, status, priority, current_specs,
                  target_specs, file_size_bytes, estimated_savings_bytes, upscale_plan,
                  stereo_plan, duration_seconds)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -674,7 +705,7 @@ class Database:
                 kwargs.get('root_id'),
                 kwargs.get('profile_id'),
                 kwargs.get('status', 'pending'),
-                kwargs.get('priority', 50),
+                priority,
                 json.dumps(kwargs.get('current_specs', {})),
                 json.dumps(kwargs.get('target_specs', {})),
                 kwargs.get('file_size_bytes', 0),
@@ -686,13 +717,16 @@ class Database:
             return cursor.lastrowid
     
     def get_queue_items(self, status: Optional[str] = None) -> List[Dict]:
-        """Get queue items, optionally filtered by status."""
+        """Get queue items, optionally filtered by status.
+
+        Ordered by priority rank ascending (1 = first to encode).
+        """
         with self.get_connection() as conn:
             cursor = conn.cursor()
             if status:
-                cursor.execute("SELECT * FROM queue WHERE status = ? ORDER BY priority DESC, created_at", (status,))
+                cursor.execute("SELECT * FROM queue WHERE status = ? ORDER BY priority ASC, created_at", (status,))
             else:
-                cursor.execute("SELECT * FROM queue ORDER BY priority DESC, created_at")
+                cursor.execute("SELECT * FROM queue ORDER BY priority ASC, created_at")
             
             items = []
             for row in cursor.fetchall():
@@ -710,7 +744,7 @@ class Database:
         status: Optional[str] = None,
         search: Optional[str] = None,
         sort_field: str = 'priority',
-        sort_dir: str = 'desc',
+        sort_dir: str = 'asc',
         page: int = 1,
         page_size: int = 50,
     ) -> Dict:
@@ -720,7 +754,9 @@ class Database:
         ``counts`` gives per-status totals across the ENTIRE queue (unfiltered)
         so the summary bar can display accurate totals regardless of page/filter.
         """
-        # Whitelist sortable columns to prevent SQL injection
+        # Whitelist sortable columns to prevent SQL injection.
+        # codec/resolution live inside the current_specs JSON blob; resolution
+        # sorts by height so 480p < 720p < 1080p < 2160p.
         allowed_sorts = {
             'file': 'file_path',
             'file_path': 'file_path',
@@ -732,6 +768,10 @@ class Database:
             'savings': 'estimated_savings_bytes',
             'estimated_savings_bytes': 'estimated_savings_bytes',
             'created_at': 'created_at',
+            'codec': "json_extract(current_specs, '$.codec')",
+            'resolution': "CAST(json_extract(current_specs, '$.height') AS INTEGER)",
+            'duration': 'duration_seconds',
+            'duration_seconds': 'duration_seconds',
         }
         db_sort_col = allowed_sorts.get(sort_field, 'priority')
         db_sort_dir = 'ASC' if sort_dir.lower() == 'asc' else 'DESC'

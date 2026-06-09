@@ -35,7 +35,7 @@ async def list_queue(
             status=status,
             search=search,
             sort_field=sort or 'priority',
-            sort_dir=dir or 'desc',
+            sort_dir=dir or 'asc',
             page=page,
             page_size=page_size or 50,
         )
@@ -224,12 +224,11 @@ async def prioritize_queue(
         items.sort(key=lambda i: Path(i.get("file_path", "")).name.lower(), reverse=reverse)
     # default: leave current order but we still write priorities below
 
-    # Assign priority values: highest item gets priority = len(items)*10, etc.
-    # This preserves relative order in DB ORDER BY priority DESC
+    # Assign rank-based priorities: 1 = first to encode, 2 = second, etc.
+    # Matches DB ORDER BY priority ASC
     total = len(items)
     for rank, item in enumerate(items):
-        new_priority = (total - rank) * 10   # 1st item → highest priority
-        db.update_queue_item(item["id"], priority=new_priority)
+        db.update_queue_item(item["id"], priority=rank + 1)
 
     return {
         "message": f"Prioritized {total} pending items by {sort_by} ({order})",
