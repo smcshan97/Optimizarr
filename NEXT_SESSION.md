@@ -1,161 +1,216 @@
 # Optimizarr — Next Session Handoff
 
-**Repo:** https://github.com/smcshan97/Optimizarr  
-**Stack:** FastAPI · SQLite · HandBrakeCLI · Vanilla JS · Local CSS (no framework)  
-**Style guide:** Sonarr/Radarr dark UI ("Black Glass" theme) — `theme.css` + `utilities.css`  
-**Version:** 2.3.0  
+**Repo:** https://github.com/smcshan97/Optimizarr
+**Stack:** FastAPI · SQLite (WAL) · HandBrakeCLI · Vanilla JS · Local CSS (no framework)
+**Style guide:** Sonarr/Radarr dark UI ("Black Glass" theme) — `theme.css` + `utilities.css`
+**Version:** 2.3.0 (`app/__init__.py` is the single source of truth)
 **Owner:** Shyriq' — Windows, RTX 2060 SUPER, Samsung Odyssey G9 (5120×1440 ultrawide)
+**Local path:** `D:\Downloads\optimizarr`
 
 ---
 
-## What Was Shipped (Patches 15–22, this session)
+## ⚠️ Patch Numbering Reconciliation
 
-| # | Patch | Files | Summary |
+Two parallel handoff documents diverged after Patch 30. The June 2026 session
+shipped its own "Patches 26–31" while a separate audit document assigned
+different numbers. **The audit document's numbering is canonical going
+forward.** Mapping of the collision zone:
+
+| Audit # | Feature | Commit | Status |
 |---|---|---|---|
-| 15 | Temperature-Based Throttling | 7 | Replaced broken CPU/GPU utilization-based pause with temperature triggers. Dashboard expanded to 4 resource cards. Settings rebuilt with per-trigger toggle rows. CPU temp via WMI (needs admin), GPU temp via pynvml (works without admin). |
-| 16 | README Rewrite | 1 | Full GitHub landing page with Tdarr comparison, features, quick start, tech stack. |
-| 17 | Windows Unicode Fix | 5 | Added `encoding='utf-8', errors='replace'` to ALL 16 subprocess call sites across scanner, encoder, upscaler, stereo, resources. Fixes cp1252 crash on Unicode filenames. |
-| 18 | CDN Tailwind Removal | 2 | Replaced `cdn.tailwindcss.com` with local `utilities.css` (~296 lines, ~10KB vs 300KB CDN). |
-| 19 | Routes Decomposition | 7 | Split 1,873-line `routes.py` into 6 focused sub-routers: profile, scan, queue, connection, system, upscaler. Orchestrator is now 32 lines. |
-| 20 | Security + Button Unify | 6 | Auto-generate SECRET_KEY on first run (`data/.secret_key`). `must_change_password` flag on default admin. Disable uvicorn reload when `OPTIMIZARR_ENV=production`. All inline-styled buttons converted to `.btn` classes. Login page uses theme.css. |
-| 21 | Basic Test Suite | 2 | 32 pytest tests: codec normalisation, needs_encoding logic, savings math, DB schema, secret key gen, stereo plan structure. All pass. |
-| 22 | Queue Drag Reorder + Notifications | 7 | Drag handles (⠿) on queue rows with HTML5 drag-and-drop → batch `POST /queue/reorder`. Outgoing notifications module (Discord embeds, Slack blocks, generic JSON). Fires on encode_complete, encode_failed, queue_empty. Full CRUD routes + Settings UI with add modal, test, enable/disable, delete. |
+| 31 | Windows cp1252 Unicode fix (console + log handles) | `ede13f9` | ✅ shipped |
+| 32 | Encode speed display + per-item/total queue ETA | `8b412f8` + follow-up | ✅ shipped |
 
-**Projected score after all patches: ~95/100**
+Next up is **Patch 33**.
+
+## Current State (all committed and pushed)
+
+| Commit | What |
+|---|---|
+| `990ec9b` | Duration tracking + savings math rewrite (upscale/stereo aware, negative savings allowed) |
+| `3ded7ea` | Stop button: psutil kill tree, `cancelled` status, temp output cleanup |
+| `75e479c` | Failed-encode retry logic (`retry_count`, `max_retries` setting, retry endpoints/UI) + unclean-shutdown recovery (`reset_stale_processing` on startup, encoder kill on lifespan shutdown) |
+| `4a22481` | Folder watches merged into Libraries via per-root 👁 eye toggle (`folder_watches.scan_root_id` FK, watch seeding so toggling on doesn't flood the queue) |
+| `6321bfc` | Rank-based priority: **1 = first**, `ORDER BY priority ASC`; codec/resolution/duration server-side sortable (json_extract); drag-reorder page-offset ranks |
+| `a89f112` | Smart prioritization: ⚡ fastest-first / 🐢 slowest-first via `get_encode_speed_stats()` + `estimate_encode_seconds()` |
+| `8b412f8` | Avg Encode Speed stat card, per-item ETA in queue rows (remaining-time for processing), total Queue ETA chip, `_attach_eta()` on paginated envelope |
+| `ede13f9` | cp1252 Unicode fix: UTF-8 stdout/stderr reconfigure in main.py, UTF-8 log handlers + raw opens, /health uses `__version__` |
+| (next commit) | Per-codec encode speed in dashboard payload (`encode_speed` key) + codec breakdown rows show "N.N× realtime" |
+
+**Tests:** 46 in `tests/test_core.py` — all must pass before any commit.
+
+**Operational note:** existing queue items scanned before duration tracking
+have `duration_seconds = 0` — no ETA, sort last in fastest/slowest-first.
+A library re-scan fixes them.
 
 ---
 
-## Architecture Overview
+## Roadmap — Build These In Order
+
+### 🔴 Patch 33 — Live Encode Progress (SSE)
+The active-encode card estimates ETA by linear extrapolation in JS — the last
+fake math in the app. The encoder does NOT write FPS to the DB.
+- Parse FPS + HandBrake's own ETA from stdout lines:
+  `Encoding: task 1 of 1, 23.45 % (113.06 fps, avg 102.33 fps, ETA 00h12m34s)`
+  — the regex currently only captures the percentage
+- Write `current_fps`, `eta_seconds` to the queue row alongside progress
+  (migration, same pattern as `duration_seconds`)
+- `GET /events/encode-progress` SSE endpoint (text/event-stream, JSON every
+  ~2s while a job is active)
+- Frontend: EventSource replaces 5s polling for the active card ONLY; falls
+  back to polling if SSE unsupported. Rest of queue stays on 5s poll.
+
+### 🔴 Patch 34 — Webhook Reliability (Dead Letter)
+If Sonarr/Radarr fires a webhook while Optimizarr is restarting, the event is
+lost forever.
+- `webhook_events` table: id, app_type, payload_json, received_at,
+  processed_at, error
+- `receive_webhook` in connection_routes.py: insert row FIRST, then process,
+  then mark processed (idempotent — dedupe on file path already in queue)
+- Startup (main.py lifespan): replay unprocessed rows from last 24h
+- Health endpoint: include unprocessed webhook count
+
+### 🟡 Patch 35 — Permission Error Re-check
+`permission_error` queue items sit forever with no recovery path.
+- `POST /queue/{id}/recheck-permissions` — re-runs
+  `check_file_permissions()`, flips to pending if ok now
+- Bulk: `POST /queue/recheck-permissions` for all permission_error items
+- UI: "Re-check" button on permission_error rows + bulk action
+
+### 🟡 Patch 36 — Health Page Completion
+`/health` (system_routes.py) has DB counts + disk space. Add:
+- `HandBrakeCLI --version` and `ffprobe -version` strings (subprocess with
+  `encoding='utf-8', errors='replace'`, 5s timeout)
+- Upscaler binary presence + version per tool (upscaler.py has helpers)
+- Per-connection last_tested / last_synced from external_connections
+- Queue depth + estimated hours remaining (reuse Patch 32 ETA math)
+
+### 🟡 Patch 37 — Auto-Sync Interval
+Sync with Sonarr/Radarr is currently manual-only.
+- Migration: `sync_interval_hours INTEGER DEFAULT 0` on external_connections
+- Scheduler picks up connections with interval > 0, calls `_sync_connection_task`
+- UI: interval dropdown on connection modal (Off / 1h / 6h / 12h / 24h)
+
+### 🟢 Patch 38 — JSON Config Export/Import
+- `GET /backup/json` — profiles + scan roots + connections (API keys
+  EXCLUDED or re-encrypted) + settings as human-readable JSON
+- `POST /restore/json` — merges (doesn't wipe); skip duplicates by name/path
+
+### 🟢 Backlog (unsequenced)
+- **Retry backoff:** auto-retries currently fire immediately (re-queued item
+  can be picked up within ~1s); consider delay or send-to-back
+- **Watches API pruning:** standalone `/watches` CRUD routes still exist but
+  have no UI (eye toggle replaced it) — health/status routes still used
+- **Auto-switch fastest/slowest** based on Windows Active Hours
+  (`/schedule/windows-active-hours`)
+- **Two-pass audit:** `--multi-pass` passed but SVT-AV1 vs x265 handle it
+  differently — verify with real test encodes
+- **Stash size field:** `f.get("size")` — confirm against Stash v0.24+
+  GraphQL VideoFile schema
+- **Multi-instance support:** docs-only (separate data dirs + ports)
+- Skip dark/light mode — Sonarr/Radarr are dark-only; stay consistent
+
+---
+
+## Architecture Map
 
 ```
 app/
-  __init__.py              — Version constant (2.3.0)
-  main.py                  — FastAPI app, lifespan startup, default profile seeder
-  config.py                — Pydantic settings + auto SECRET_KEY generation
-  database.py              — SQLite via context managers; all CRUD, schema + migrations
-  encoder.py               — HandBrakeCLI wrapper, three-phase pipeline (stereo→upscale→encode)
-  scanner.py               — ffprobe/HandBrake probing, _needs_encoding, _estimate_savings
-  watcher.py               — Watchdog folder watcher, queues new files
+  __init__.py              — __version__ = "2.3.0" (single source of truth)
+  main.py                  — FastAPI app, UTF-8 stdout reconfigure (top), lifespan
+                             (startup recovery + encoder kill on shutdown)
+  config.py                — Pydantic settings + auto SECRET_KEY (data/.secret_key)
+  database.py              — SQLite WAL; CRUD, migrations, paginated queue query,
+                             get_encode_speed_stats, get_pending_duration_by_codec,
+                             get/set_setting, reset_stale_processing
+  encoder.py               — HandBrakeCLI wrapper, three-phase pipeline
+                             (stereo→upscale→encode), psutil kill tree on stop,
+                             _handle_failure retry logic, --multi-pass
+  scanner.py               — ffprobe probing, _needs_encoding, _estimate_savings
+                             (plan-aware, negative allowed), estimate_encode_seconds
+  watcher.py               — Polling folder watcher; watches linked to scan roots,
+                             new watches SEEDED not queued, forget_watch()
   scheduler.py             — APScheduler, should_encode_now(), check_and_trigger()
   upscaler.py              — Real-ESRGAN / Real-CUGAN / Waifu2x download + run
-  stereo.py                — iw3 2D→3D and ffmpeg 3D→2D conversion
-  resources.py             — CPU/GPU temp, memory, throttle logic (temperature-first)
-  notifications.py         — Outgoing webhooks (Discord/Slack/generic), fires on encode events
-  external_connections.py  — Sonarr/Radarr REST + Stash GraphQL, encryption
-  auth.py                  — Bcrypt + JWT auth
-  logger.py                — Structured logging
+  stereo.py                — iw3 2D→3D and ffmpeg 3D→2D
+  resources.py             — Temp-based throttling; persistent GPU thread pool +
+                             circuit breaker + reinit; NEVER 'with' on the pool
+  notifications.py         — Outgoing webhooks (Discord/Slack/generic)
+  external_connections.py  — Sonarr/Radarr REST + Stash GraphQL, Fernet encryption
+  auth.py / logger.py      — Bcrypt+JWT; rotating logs, all handlers UTF-8
   api/
-    routes.py              — Thin orchestrator, includes 6 sub-routers
-    profile_routes.py      — Profiles CRUD, import/export, seed defaults
-    scan_routes.py         — Scan roots CRUD, scanning
-    queue_routes.py        — Queue CRUD, control, stats, prioritize, reprobe, reorder
-    connection_routes.py   — Sonarr/Radarr/Stash connections, sync, webhooks
-    system_routes.py       — Resources, settings, health, logs, backup, schedule, watches, notifications
-    upscaler_routes.py     — AI upscaler + stereo 3D detection, downloads
-    auth_routes.py         — Login, logout, change password, user info
-    models.py              — Pydantic request/response models
-    dependencies.py        — Auth middleware
-    filesystem.py          — File system utilities
+    routes.py              — Thin orchestrator → 6 sub-routers
+    profile_routes.py      — Profiles CRUD, import/export
+    scan_routes.py         — Scan roots CRUD + POST /scan-roots/{id}/watch toggle
+    queue_routes.py        — Queue CRUD, pagination (+_attach_eta), prioritize
+                             (incl. fastest/slowest), reorder, retry, control
+    connection_routes.py   — Sonarr/Radarr/Stash, sync, incoming webhooks
+    system_routes.py       — Resources (+reinit-gpu), settings (resources +
+                             encoding/max_retries), health, logs, backup, schedule
+    upscaler_routes.py / auth_routes.py / models.py / dependencies.py / filesystem.py
 web/
-  templates/index.html     — Single-page app (~1,610 lines)
-  templates/login.html     — Login page (uses theme.css, no CDN)
-  static/js/app.js         — All frontend logic (~3,530 lines)
-  static/css/theme.css     — Black Glass design system (~695 lines)
-  static/css/utilities.css — Tailwind replacement utilities (~296 lines)
+  templates/index.html     — SPA; templates/login.html
+  static/js/app.js         — All frontend (~3,800 lines); token key is 'token'
+  static/css/theme.css     — Black Glass (~695 lines)
+  static/css/utilities.css — Tailwind-replacement utilities
 tests/
-  test_core.py             — 32 unit tests (pytest)
+  test_core.py             — 46 pytest tests
 ```
 
 ---
 
-## Known Bugs (must fix next session)
+## Hard Rules & Gotchas (violations have caused real bugs)
 
-### 🔴 BUG: Stop button doesn't actually stop encoding
-**File:** `app/encoder.py` lines 763–783, 876–882  
-**Problem:** Hitting "Stop" on the dashboard calls `encoder_pool.stop()` which sets `is_running = False` and calls `job.stop()`. But `process_queue()` is blocked on `job.start()` (synchronous), so the loop doesn't see `is_running = False` until the current job's start() returns. The `job.stop()` calls `process.terminate()` but:
-1. On Windows, `terminate()` may not kill HandBrakeCLI's child processes
-2. The job is immediately marked `status='failed'` with `error_message='Manually stopped'` — this should be a distinct `'cancelled'` status, not `'failed'`
-3. The `_optimized.mkv` temp output file is NOT cleaned up — left behind on disk
-
-**Fix needed:**
-- Use `psutil.Process(pid).kill()` + kill children on Windows (like the pause/resume logic already does)
-- Add a `'cancelled'` status distinct from `'failed'`
-- In `job.stop()`, clean up the `_optimized.*` temp file if it exists
-- The finally block in `start()` should check `self.stop_monitoring` to know if this was a manual stop vs a real failure
-
-### 🔴 BUG: Failed encode handling is poor
-**Problem:** When an encode fails, the queue item stays at `status='failed'` forever with no way to retry. No retry logic exists.
-**Fix needed:**
-- Add `retry_count` column to queue table (default 0)
-- Add `max_retries` setting (default 3)
-- On failure, increment retry_count; if < max_retries, set status back to `pending`
-- Add a "Retry" button per failed item and a "Retry All Failed" bulk action
-- Similar to JDownloader's retry model
-
----
-
-## Feature Requests (from owner)
-
-### 1. Folder Watch → Library Toggle
-**Current:** Folder watches have their own section in Settings with separate CRUD.  
-**Requested:** Merge folder watch into Libraries (Scan Roots). Add an eye-shaped toggle (👁) on each scan root card that enables/disables folder watching for that root. Remove the standalone Folder Watches section.  
-**Impact:** Remove `folder_watches` table? Or link watches to scan_roots via foreign key and auto-create/delete watches when toggling the eye icon.
-
-### 2. Smart Encoding Prioritization
-**Requested:** Two new queue sort strategies:
-- **Fastest First** — sort by estimated encode time ascending (considers file size, duration, codec complexity). Good for knocking out quick wins during short active-hours windows.
-- **Slowest First** — sort by estimated encode time descending. Good for starting long jobs during overnight windows (e.g. 2am–8am inactive hours → start 16-hour encodes first so they finish by morning).
-
-**Consideration:** Needs encode time estimation, which could use: `duration × (bitrate / target_bitrate) × preset_speed_factor`. The Windows Active Hours API already exists (`/schedule/windows-active-hours`). Could auto-switch strategy based on whether we're in active hours or not.
-
-### 3. Priority System Improvements
-**Requested:**
-- Priority should start at 1 (not 50) — easier to understand "1 is first, 2 is second"
-- Support both ascending and descending priority sort
-- The drag reorder (Patch 22) already renumbers priorities on drop — just needs the numbering scheme changed
-
-### 4. Ascending/Descending on All Queue Sorts
-**Current:** Queue sorting exists for file, codec, resolution, size, savings, status, progress, priority — but the sort direction toggle may not work correctly on all columns.  
-**Requested:** Verify and fix ascending/descending toggle on all sortable columns.
+1. **subprocess + file I/O on Windows:** ALWAYS `encoding='utf-8',
+   errors='replace'` on every subprocess call, `open()`, `read_text()`,
+   `write_text()`, and logging FileHandler. Three cp1252 incidents so far.
+   (Binary-mode `"wb"` opens are exempt.)
+2. **Never `with ThreadPoolExecutor()`** around code that can hang (pynvml).
+   `__exit__` calls `shutdown(wait=True)` and blocks forever. Use the
+   persistent pool pattern in resources.py.
+3. **HandBrakeCLI pegs CPU to 100% by design** — temperature-based throttling
+   only; never utilization-based.
+4. **AV1 NVENC requires RTX 40-series.** On RTX 2060 SUPER only H.264/H.265
+   map to NVENC; AV1 falls back to SVT-AV1 software.
+5. **HandBrake 1.8+:** flag is `--multi-pass`, not `--two-pass`.
+6. **HandBrakeCLI JSON scan output goes to stderr**, not stdout.
+7. **Queue API backward compat:** `GET /queue` without `page` returns a flat
+   list — encoder, scanner, watcher, sync depend on this. With `page` it
+   returns the paginated envelope (now incl. `pending_eta_seconds`).
+8. **Savings can be negative** (upscale/stereo increases size). Never re-add
+   `max(0, ...)` clamps. Frontend shows orange `+X GB (↑N%)`.
+9. **Savings calculated AFTER upscale/stereo plans are built** — plan JSON
+   feeds `_estimate_savings`.
+10. **Priority is rank-based: 1 = first** (`ORDER BY priority ASC`). New items
+    append at end (`MAX+1`). One-time migration guarded by `priority_scheme`
+    settings flag.
+11. **localStorage token key is `'token'`** — `'auth_token'` was a bug.
+12. **Speed stats exclude `duration_seconds = 0` rows** (pre-duration-tracking
+    history) via SQL WHERE — keep it that way.
+13. **DB settings are key-value strings** in `settings`; resource settings
+    prefixed `resource_`; parse with defaults. Use `db.get_setting`/`set_setting`.
+14. **Version string lives ONLY in `app/__init__.py`.** Never hardcode.
+15. **Watch toggling must not flood the queue:** the watcher SEEDS newly-seen
+    watches (existing files ignored — those are for manual scan) and only
+    queues future additions.
+16. **Git push on this machine:** the GitHub key is passphrase-protected in
+    the Windows ssh-agent; repo has `core.sshCommand` pointed at
+    `C:/Windows/System32/OpenSSH/ssh.exe`. Don't remove that config.
 
 ---
 
-## Key Patterns & Gotchas
+## Workflow
 
-- **Patch workflow:** Sequential `.patch` files. Applied via `git apply`, committed, pushed. Owner confirms each patch works before proceeding.
-- **Validation before delivery:** All patches validated with `python ast.parse()` and `node --check` for syntax, and `git apply --check` before delivery.
-- **subprocess on Windows:** ALWAYS use `encoding='utf-8', errors='replace'` — Python defaults to cp1252 which crashes on Unicode filenames.
-- **HandBrakeCLI pegs CPU to 100%** — utilization-based throttling is fundamentally broken; temperature-based triggers are the correct approach.
-- **Hardware encoder mapping:** Only H.264/H.265 should map to NVENC on RTX 2060 SUPER. AV1 NVENC requires RTX 40-series — fall back to SVT-AV1 software.
-- **HandBrake 1.8+** renamed `--two-pass` to `--multi-pass`.
-- **`app_logger` vs `app`:** `app_logger` was a broken attribute; correct attribute is `app` — fixed with alias in `logger.py`.
-- **Video on ultrawides:** Players don't stretch to fill 32:9. Content plays pillarboxed at native 16:9. Vertical resolution matters — 1440p source → encode at 1440p; 1080p source → leave at 1080p.
-- **DB settings:** Stored as key-value strings in `settings` table. Resource settings prefixed with `resource_`. All parsed with defaults at load time.
-
----
-
-## Suggested Next Patch Order
-
-| # | Patch | Priority | Scope |
-|---|---|---|---|
-| 23 | Stop Button Fix + Cancelled Status + Temp Cleanup | 🔴 Bug | encoder.py, database.py, app.js |
-| 24 | Failed Encode Retry Logic | 🔴 Bug | encoder.py, database.py, queue_routes.py, app.js |
-| 25 | Folder Watch → Library Eye Toggle | 🟡 UX | scan_routes.py, app.js, index.html, database.py |
-| 26 | Priority Renumbering (start at 1) + Asc/Desc Sort Fix | 🟡 UX | app.js, queue_routes.py |
-| 27 | Smart Encode Prioritization (fastest/slowest first) | 🟢 Feature | scanner.py, queue_routes.py, app.js |
-
----
-
-## How to Start the Next Chat
-
-Clone the repo first, then read this document:
-
-```
-I'm continuing development of Optimizarr, a Python/FastAPI media transcoding automation tool.
-Repo: https://github.com/smcshan97/Optimizarr
-
-Please clone the repo, read the NEXT_SESSION.md handoff document in the project knowledge,
-and begin with the bugs listed under "Known Bugs (must fix next session)".
-Think like a software developer — plan first, then code. Keep UI design close to Sonarr/Radarr.
-Patch workflow: one patch at a time as .patch files, validated with ast.parse() and git apply --check.
-```
+- One focused change at a time; each is a single git commit with a structured
+  message. Owner confirms each works before the next.
+- Validate before committing:
+  `python -c "import ast; ast.parse(open('FILE', encoding='utf-8').read())"`
+  per Python file, `node --check web/static/js/app.js`
+- Run the test suite: `python -m pytest tests/ -q` (all 46 must pass)
+- DB schema changes via the migration pattern in database.py
+  (`PRAGMA table_info` check → `ALTER TABLE` → `↳ Migrated:` print)
+- UI: Sonarr/Radarr aesthetic, CSS variables (`var(--card-bg)`,
+  `var(--accent)`, `var(--success)`, `var(--danger)`, `var(--warning)`,
+  `var(--text-primary)`, `var(--text-muted)`, `var(--border)`), button
+  classes (`.btn .btn-primary .btn-secondary .btn-xs`)
+- After the session: update this file with what shipped and what's next.
