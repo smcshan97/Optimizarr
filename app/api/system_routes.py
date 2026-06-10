@@ -313,10 +313,11 @@ async def health_check():
     import time
     from pathlib import Path
     
+    from app import __version__
     health = {
         "status": "ok",
         "service": "optimizarr",
-        "version": "2.1.0",
+        "version": __version__,
         "uptime_info": "running",
     }
     

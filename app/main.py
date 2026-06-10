@@ -1,6 +1,17 @@
 """
 Main FastAPI application for Optimizarr.
 """
+import sys
+
+# Windows consoles default to cp1252, which crashes any print() containing
+# emoji status markers or Unicode filenames (third cp1252 incident — see
+# NEXT_SESSION.md hard rules). Must run BEFORE imports that print at startup.
+try:
+    sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+except Exception:
+    pass  # non-reconfigurable streams (e.g. some service wrappers) — never fatal
+
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI

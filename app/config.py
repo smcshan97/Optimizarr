@@ -26,14 +26,14 @@ def _resolve_secret_key() -> str:
 
     # Try reading from persisted file
     if _SECRET_FILE.exists():
-        stored = _SECRET_FILE.read_text().strip()
+        stored = _SECRET_FILE.read_text(encoding='utf-8').strip()
         if stored and stored != _DEFAULT_SECRET:
             return stored
 
     # Generate and persist
     _SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
     new_key = secrets.token_hex(32)
-    _SECRET_FILE.write_text(new_key)
+    _SECRET_FILE.write_text(new_key, encoding='utf-8')
     print(f"✓ Generated new SECRET_KEY → {_SECRET_FILE}")
     return new_key
 

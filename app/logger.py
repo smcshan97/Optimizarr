@@ -38,7 +38,8 @@ class OptimizarrLogger:
         error_handler = RotatingFileHandler(
             str(self.log_files["errors"]),
             maxBytes=10 * 1024 * 1024,
-            backupCount=3
+            backupCount=3,
+            encoding='utf-8'
         )
         error_handler.setLevel(logging.ERROR)
         error_handler.setFormatter(self._get_formatter())
@@ -63,7 +64,8 @@ class OptimizarrLogger:
         fh = RotatingFileHandler(
             str(log_file),
             maxBytes=10 * 1024 * 1024,
-            backupCount=5
+            backupCount=5,
+            encoding='utf-8'
         )
         fh.setLevel(level)
         fh.setFormatter(self._get_formatter())
@@ -171,7 +173,7 @@ class OptimizarrLogger:
         """Write a structured JSON stat line."""
         data["timestamp"] = datetime.now().isoformat()
         try:
-            with open(self.stats_file, "a") as f:
+            with open(self.stats_file, "a", encoding="utf-8", errors="replace") as f:
                 f.write(json.dumps(data) + "\n")
         except Exception:
             pass  # Don't let stats logging break anything
@@ -213,7 +215,7 @@ class OptimizarrLogger:
         stats = []
         
         try:
-            with open(self.stats_file, "r") as f:
+            with open(self.stats_file, "r", encoding="utf-8", errors="replace") as f:
                 for line in f:
                     line = line.strip()
                     if not line:
@@ -258,7 +260,7 @@ class OptimizarrLogger:
         log_file = self.log_files.get(log_type)
         if log_file and log_file.exists():
             try:
-                with open(log_file, "w") as f:
+                with open(log_file, "w", encoding="utf-8") as f:
                     f.write("")
                 self.app.info(f"Log cleared: {log_type}")
                 return True
