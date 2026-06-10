@@ -1083,6 +1083,27 @@ class Database:
             overall = (weighted / samples) if samples else None
             return {'overall': overall, 'by_codec': by_codec, 'samples': samples}
 
+    def get_pending_duration_by_codec(self) -> List[Dict]:
+        """Sum of video durations for pending queue items, per target codec.
+
+        Feeds the total-queue-ETA estimate: each codec group's duration is
+        multiplied by that codec's encode speed ratio. ``unknown_count`` is
+        the number of items whose duration is unrecorded (no ETA possible).
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT COALESCE(json_extract(target_specs, '$.codec'), '') AS codec,
+                       COALESCE(SUM(CASE WHEN duration_seconds > 0
+                           THEN duration_seconds ELSE 0 END), 0) AS total_duration,
+                       SUM(CASE WHEN duration_seconds IS NULL OR duration_seconds <= 0
+                           THEN 1 ELSE 0 END) AS unknown_count
+                FROM queue
+                WHERE status = 'pending'
+                GROUP BY 1
+            """)
+            return [dict(row) for row in cursor.fetchall()]
+
     def get_stats_dashboard(self, days: int = 30) -> Dict:
         """Get comprehensive statistics for the dashboard."""
         with self.get_connection() as conn:
@@ -1097,7 +1118,9 @@ class Database:
                        COALESCE(SUM(encoding_time_seconds), 0) as total_time,
                        COALESCE(AVG(CASE WHEN original_size_bytes > 0
                            THEN (savings_bytes * 100.0 / original_size_bytes) ELSE 0 END), 0) as avg_savings_pct,
-                       COALESCE(AVG(encoding_time_seconds), 0) as avg_encode_seconds
+                       COALESCE(AVG(encoding_time_seconds), 0) as avg_encode_seconds,
+                       COALESCE(AVG(CASE WHEN duration_seconds > 0 AND encoding_time_seconds > 0
+                           THEN duration_seconds * 1.0 / encoding_time_seconds END), 0) as avg_speed_x
                 FROM history
                 WHERE completed_at >= datetime('now', ?)
             """, (f'-{days} days',))

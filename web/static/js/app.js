@@ -297,6 +297,8 @@ let queueTotal = 0;
 let queueCounts = {};        // per-status totals across ENTIRE queue
 let queueSearchTerm = '';
 let queueStatusFilter = '';
+let queuePendingEta = 0;        // estimated seconds to encode ALL pending items
+let queuePendingEtaUnknown = 0; // pending items with unknown duration (no ETA)
 
 // Load queue from API → display current page
 async function loadQueue() {
@@ -322,6 +324,8 @@ async function loadQueue() {
         queueTotalPages = data.total_pages;
         queuePage = data.page;
         queueCounts = data.counts || {};
+        queuePendingEta = data.pending_eta_seconds || 0;
+        queuePendingEtaUnknown = data.pending_eta_unknown || 0;
         displayQueueItems(allQueueItems);
     }
 }
@@ -504,6 +508,7 @@ function displayQueueItems(items) {
             ${counts.failed ? `<span style="color:var(--danger)">❌ Failed: ${counts.failed}</span>` : ''}
             ${counts.paused ? `<span style="color:#e67e22">⏸️ Paused: ${counts.paused}</span>` : ''}
             ${counts.cancelled ? `<span style="color:var(--text-muted)">⏹️ Cancelled: ${counts.cancelled}</span>` : ''}
+            ${queuePendingEta > 0 ? `<span style="color:var(--accent)" title="Estimated time to encode all pending items, from your encode-speed history${queuePendingEtaUnknown > 0 ? ` (+${queuePendingEtaUnknown} item(s) with unknown duration not included — re-scan to fix)` : ''}">⏱ Queue ETA: ~${formatDuration(queuePendingEta)}${queuePendingEtaUnknown > 0 ? ' ⁺' : ''}</span>` : ''}
             <span style="margin-left:auto">Showing: <strong style="color:var(--text-primary)">${items.length}</strong> of ${queueTotal}</span>
         </div>
         <table class="tbl">
@@ -561,9 +566,13 @@ function displayQueueItems(items) {
             savingsDisplay = '<span style="color:var(--text-muted)">—</span>';
         }
 
-        // Duration column
+        // Duration column — with estimated encode time underneath when known
         const durSec = item.duration_seconds || 0;
-        const durDisplay = durSec > 0 ? formatDuration(durSec) : '<span style="color:var(--text-muted)">—</span>';
+        let durDisplay = durSec > 0 ? formatDuration(durSec) : '<span style="color:var(--text-muted)">—</span>';
+        if (item.eta_seconds > 0) {
+            const etaLabel = item.status === 'processing' ? 'remaining' : 'encode';
+            durDisplay += `<div style="color:var(--text-muted);font-size:10px;white-space:nowrap" title="Estimated ${etaLabel} time, from your encode-speed history">⏱ ~${formatDuration(item.eta_seconds)}</div>`;
+        }
 
         // Progress bar — always rendered for consistency
         let progressBar;
@@ -2311,6 +2320,13 @@ async function loadStatistics() {
             } else {
                 avgTimeEl.textContent = (avgSec / 3600).toFixed(1) + 'h';
             }
+        }
+
+        // Avg encode speed (× realtime) — only present once history has duration data
+        const speedEl = document.getElementById('statSpeed');
+        if (speedEl) {
+            const speed = t.avg_speed_x || 0;
+            speedEl.textContent = speed > 0 ? speed.toFixed(1) + '× realtime' : '—';
         }
 
         renderDailyChart(data.daily);

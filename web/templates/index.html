@@ -1292,7 +1292,7 @@
         <div id="content-statistics" class="tab-panel">
             <div class="space-y-6">
                 <!-- Summary Cards -->
-                <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
+                <div class="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-7 gap-4">
                     <div class="bg-gray-800 p-5 rounded-lg text-center">
                         <p class="text-gray-400 text-xs mb-1">Files Processed</p>
                         <p id="statTotalFiles" class="text-2xl font-bold text-blue-400">—</p>
@@ -1316,6 +1316,10 @@
                     <div class="bg-gray-800 p-5 rounded-lg text-center">
                         <p class="text-gray-400 text-xs mb-1">Avg Encode Time</p>
                         <p id="statAvgTime" class="text-2xl font-bold text-purple-400">—</p>
+                    </div>
+                    <div class="bg-gray-800 p-5 rounded-lg text-center" title="Video seconds encoded per second of wall-clock time — 2.0× means a 1-hour video takes 30 minutes">
+                        <p class="text-gray-400 text-xs mb-1">Avg Encode Speed</p>
+                        <p id="statSpeed" class="text-2xl font-bold text-cyan-400">—</p>
                     </div>
                 </div>
                 

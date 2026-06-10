@@ -494,3 +494,70 @@ class TestEncodeSpeedEstimation:
         # Unknown duration → None (caller sorts these last)
         assert estimate_encode_seconds(0, 'av1', stats) is None
         assert estimate_encode_seconds(None, 'av1', stats) is None
+
+
+# ---------------------------------------------------------------------------
+# Queue ETA + dashboard encode speed (Patch 31)
+# ---------------------------------------------------------------------------
+
+class TestQueueEta:
+    def test_pending_duration_by_codec(self, fresh_db):
+        """Durations group by target codec; only pending items count."""
+        fresh_db.add_to_queue(file_path="/x/a.mkv", profile_id=1, duration_seconds=3600,
+                              target_specs={'codec': 'h265'})
+        fresh_db.add_to_queue(file_path="/x/b.mkv", profile_id=1, duration_seconds=1800,
+                              target_specs={'codec': 'h265'})
+        fresh_db.add_to_queue(file_path="/x/c.mkv", profile_id=1, duration_seconds=0,
+                              target_specs={'codec': 'h265'})  # unknown duration
+        fresh_db.add_to_queue(file_path="/x/d.mkv", profile_id=1, duration_seconds=900,
+                              target_specs={'codec': 'av1'})
+        fresh_db.add_to_queue(file_path="/x/done.mkv", profile_id=1, duration_seconds=999,
+                              target_specs={'codec': 'h265'}, status='completed')
+
+        groups = {g['codec']: g for g in fresh_db.get_pending_duration_by_codec()}
+        assert groups['h265']['total_duration'] == 5400  # completed item excluded
+        assert groups['h265']['unknown_count'] == 1
+        assert groups['av1']['total_duration'] == 900
+        assert groups['av1']['unknown_count'] == 0
+
+    def test_attach_eta_envelope(self, fresh_db, monkeypatch):
+        """Per-item ETAs use history speed; processing scales by progress."""
+        from app.api import queue_routes
+        monkeypatch.setattr(queue_routes, 'db', fresh_db)
+
+        # History: h265 encodes at ratio 0.5 (2× realtime)
+        fresh_db.add_history(file_path="/x/h.mkv", encoding_time_seconds=1800,
+                             duration_seconds=3600, codec='h265')
+
+        a = fresh_db.add_to_queue(file_path="/x/a.mkv", profile_id=1, duration_seconds=1800,
+                                  target_specs={'codec': 'h265'})
+        b = fresh_db.add_to_queue(file_path="/x/b.mkv", profile_id=1, duration_seconds=0,
+                                  target_specs={'codec': 'h265'})  # unknown
+        c = fresh_db.add_to_queue(file_path="/x/c.mkv", profile_id=1, duration_seconds=3600,
+                                  target_specs={'codec': 'h265'}, status='processing')
+        fresh_db.update_queue_item(c, progress=50.0)
+
+        envelope = fresh_db.get_queue_items_paginated(page=1, page_size=50)
+        queue_routes._attach_eta(envelope)
+
+        by_id = {i['id']: i for i in envelope['items']}
+        assert by_id[a]['eta_seconds'] == 900          # 1800 × 0.5
+        assert 'eta_seconds' not in by_id[b]           # unknown duration
+        assert by_id[c]['eta_seconds'] == 900          # 3600 × 0.5 × (1 − 0.5)
+        # Total covers pending only: item a (900s); unknown counted separately
+        assert envelope['pending_eta_seconds'] == 900
+        assert envelope['pending_eta_unknown'] == 1
+
+    def test_dashboard_avg_speed(self, fresh_db):
+        """avg_speed_x averages per-file realtime multiples; old rows excluded."""
+        # 2× realtime and 4× realtime → average 3.0×
+        fresh_db.add_history(file_path="/x/a.mkv", encoding_time_seconds=1800,
+                             duration_seconds=3600, codec='h265')
+        fresh_db.add_history(file_path="/x/b.mkv", encoding_time_seconds=900,
+                             duration_seconds=3600, codec='h265')
+        # Pre-duration-tracking row must not drag the average down
+        fresh_db.add_history(file_path="/x/old.mkv", encoding_time_seconds=500,
+                             duration_seconds=0, codec='h265')
+
+        totals = fresh_db.get_stats_dashboard(days=30)['totals']
+        assert abs(totals['avg_speed_x'] - 3.0) < 1e-9

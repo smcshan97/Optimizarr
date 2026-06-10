@@ -26,12 +26,15 @@ async def list_queue(
 
     When ``page`` is provided, returns a paginated envelope::
 
-        {items: [...], total, page, page_size, total_pages, counts}
+        {items: [...], total, page, page_size, total_pages, counts,
+         pending_eta_seconds, pending_eta_unknown}
 
-    When ``page`` is omitted, returns a flat list (backward compat).
+    Pending/paused/processing items carry an ``eta_seconds`` estimate
+    (remaining time for processing items). When ``page`` is omitted,
+    returns a flat list (backward compat).
     """
     if page is not None:
-        return db.get_queue_items_paginated(
+        envelope = db.get_queue_items_paginated(
             status=status,
             search=search,
             sort_field=sort or 'priority',
@@ -39,9 +42,51 @@ async def list_queue(
             page=page,
             page_size=page_size or 50,
         )
+        _attach_eta(envelope)
+        return envelope
     # Backward compatible — flat list for internal callers
     items = db.get_queue_items(status=status)
     return items
+
+
+def _attach_eta(envelope: dict):
+    """Add encode-time estimates to a paginated queue envelope.
+
+    Per item: ``eta_seconds`` for pending/paused (full estimate) and
+    processing (remaining = estimate scaled by progress). Envelope-level:
+    ``pending_eta_seconds`` totals ALL pending items (not just this page),
+    with ``pending_eta_unknown`` counting items lacking duration data.
+    """
+    from app.scanner import estimate_encode_seconds
+
+    speed_stats = db.get_encode_speed_stats()
+
+    for item in envelope.get('items', []):
+        if item.get('status') not in ('pending', 'paused', 'processing'):
+            continue
+        target = item.get('target_specs') or {}
+        est = estimate_encode_seconds(
+            item.get('duration_seconds') or 0,
+            target.get('codec') if isinstance(target, dict) else None,
+            speed_stats,
+        )
+        if est is None:
+            continue
+        if item.get('status') == 'processing':
+            est *= max(0.0, 1.0 - (item.get('progress') or 0) / 100.0)
+        item['eta_seconds'] = round(est)
+
+    total_eta = 0.0
+    unknown = 0
+    for group in db.get_pending_duration_by_codec():
+        unknown += group['unknown_count'] or 0
+        est = estimate_encode_seconds(
+            group['total_duration'], group['codec'] or None, speed_stats
+        )
+        if est:
+            total_eta += est
+    envelope['pending_eta_seconds'] = round(total_eta)
+    envelope['pending_eta_unknown'] = unknown
 
 
 @router.post("/queue/scan", response_model=MessageResponse)
