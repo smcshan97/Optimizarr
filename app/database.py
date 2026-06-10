@@ -1156,12 +1156,18 @@ class Database:
             """)
             recent = [dict(row) for row in cursor.fetchall()]
             
-            return {
+            result = {
                 'totals': totals,
                 'daily': daily,
                 'codecs': codecs,
-                'recent': recent
+                'recent': recent,
             }
+        # Attached OUTSIDE the with block: get_encode_speed_stats opens its
+        # own connection, and get_connection's lock is NOT reentrant —
+        # calling it nested deadlocks the whole Database instance.
+        # All-time speed ratios (same numbers the ETA estimator uses).
+        result['encode_speed'] = self.get_encode_speed_stats()
+        return result
     
     def clear_history_file_names(self) -> int:
         """Anonymize file paths in history while preserving all statistical data."""

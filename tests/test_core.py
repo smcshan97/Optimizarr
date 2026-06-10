@@ -561,3 +561,12 @@ class TestQueueEta:
 
         totals = fresh_db.get_stats_dashboard(days=30)['totals']
         assert abs(totals['avg_speed_x'] - 3.0) < 1e-9
+
+    def test_dashboard_includes_encode_speed_breakdown(self, fresh_db):
+        """Dashboard payload carries per-codec speed ratios for the UI."""
+        fresh_db.add_history(file_path="/x/a.mkv", encoding_time_seconds=1800,
+                             duration_seconds=3600, codec='h265')
+        data = fresh_db.get_stats_dashboard(days=30)
+        assert 'encode_speed' in data
+        assert abs(data['encode_speed']['by_codec']['h265'] - 0.5) < 1e-9
+        assert data['encode_speed']['samples'] == 1

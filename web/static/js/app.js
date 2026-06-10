@@ -2330,7 +2330,7 @@ async function loadStatistics() {
         }
 
         renderDailyChart(data.daily);
-        renderCodecBreakdown(data.codecs, t.total);
+        renderCodecBreakdown(data.codecs, t.total, data.encode_speed);
         renderRecentHistory(data.recent);
 
     } catch (err) {
@@ -2385,24 +2385,30 @@ function renderDailyChart(daily) {
     }).join('');
 }
 
-function renderCodecBreakdown(codecs, total) {
+function renderCodecBreakdown(codecs, total, encodeSpeed) {
     const container = document.getElementById('codecBreakdown');
-    
+
     if (!codecs || codecs.length === 0) {
         container.innerHTML = '<p class="text-gray-500 text-sm">No data yet</p>';
         return;
     }
-    
+
     const colors = ['bg-blue-500', 'bg-green-500', 'bg-purple-500', 'bg-yellow-500', 'bg-red-500', 'bg-cyan-500'];
-    
+    // by_codec stores encode-seconds per video-second; invert for "× realtime"
+    const speedRatios = (encodeSpeed && encodeSpeed.by_codec) || {};
+
     container.innerHTML = codecs.map((c, i) => {
         const pct = total > 0 ? ((c.count / total) * 100).toFixed(1) : 0;
         const savedMB = (c.saved / (1024*1024)).toFixed(0);
+        const ratio = speedRatios[c.codec];
+        const speedTag = ratio > 0
+            ? ` · <span class="text-cyan-400" title="Average encode speed for this codec (all history)">${(1 / ratio).toFixed(1)}× realtime</span>`
+            : '';
         return `
             <div>
                 <div class="flex justify-between text-sm mb-1">
                     <span>${(c.codec || 'unknown').toUpperCase()}</span>
-                    <span class="text-gray-400">${c.count} files (${pct}%) — ${savedMB}MB saved</span>
+                    <span class="text-gray-400">${c.count} files (${pct}%) — ${savedMB}MB saved${speedTag}</span>
                 </div>
                 <div class="w-full bg-gray-600 rounded h-2">
                     <div class="${colors[i % colors.length]} rounded h-2" style="width: ${pct}%"></div>
