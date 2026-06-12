@@ -245,6 +245,8 @@ class FolderWatcher:
             optimizarr_logger.app_logger.info(
                 "Watcher auto-queued %d new file(s) from %s", queued_count, watch['path']
             )
+            from app.devlog import devlog
+            devlog('watch_queue', n=queued_count, path=watch['path'])
 
     def forget_watch(self, watch_id: int):
         """Drop a watch's known-file cache (called when a watch is removed)."""

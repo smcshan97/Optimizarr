@@ -55,3 +55,6 @@ temp/
 
 # Development artifacts
 *.patch
+
+# Runtime logs (devlog is local forensics, never committed)
+logs/devlog.jsonl*

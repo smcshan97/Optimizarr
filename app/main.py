@@ -53,6 +53,9 @@ async def lifespan(app: FastAPI):
     if recovered:
         print(f"  Recovered {recovered} interrupted item(s) → pending")
 
+    from app.devlog import devlog
+    devlog('start', v=__version__, rec=recovered or None)
+
     # Seed default profiles on first run
     if not db.get_profiles():
         print("Seeding default encoding profiles…")
@@ -84,6 +87,8 @@ async def lifespan(app: FastAPI):
     from app.logger import optimizarr_logger as _log
     from app.watcher import folder_watcher as _fw
     from app.encoder import encoder_pool as _ep
+    from app.devlog import devlog as _devlog
+    _devlog('stop')
     _log.log_shutdown()
     print("\nShutting down Optimizarr...")
     # Kill any active HandBrakeCLI process tree so it doesn't orphan.
@@ -103,6 +108,22 @@ app = FastAPI(
     version=__version__,
     lifespan=lifespan,
 )
+
+# Devlog: record every unhandled exception and 5xx response so broken
+# endpoints (e.g. a 500ing /queue freezing the UI) leave evidence in
+# logs/devlog.jsonl instead of failing silently in the browser.
+@app.middleware("http")
+async def _devlog_error_middleware(request, call_next):
+    from app.devlog import devlog
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        devlog('api_err', p=str(request.url.path), err=str(exc)[:200])
+        raise
+    if response.status_code >= 500:
+        devlog('api_5xx', p=str(request.url.path), code=response.status_code)
+    return response
+
 
 app.add_middleware(
     CORSMiddleware,

@@ -409,6 +409,10 @@ class EncodingJob:
         )
 
         from app.logger import optimizarr_logger
+        from app.devlog import devlog
+        devlog('enc_start', id=self.queue_item_id,
+               f=Path(self.queue_item['file_path']).name,
+               c=self.profile.get('codec'))
 
         # ── Determine input file (may be replaced by stereo/upscaled version) ─
         original_input = self.queue_item['file_path']
@@ -746,6 +750,10 @@ class EncodingJob:
                 duration_seconds=video_duration,
             )
 
+            from app.devlog import devlog
+            devlog('enc_done', id=self.queue_item_id, f=final_path.name,
+                   s=encoding_time, sv=savings)
+
             # Log completion
             savings_pct = (savings / original_size * 100) if original_size > 0 else 0
             optimizarr_logger.log_handbrake_complete(str(input_path), {
@@ -804,6 +812,8 @@ class EncodingJob:
                     status='paused',
                     paused_reason=reason
                 )
+                from app.devlog import devlog
+                devlog('throttle', a='pause', why=(reason or '')[:80])
                 print(f"⏸ Paused: {reason}")
             except Exception as e:
                 print(f"✗ Error pausing: {e}")
@@ -832,6 +842,8 @@ class EncodingJob:
                     status='processing',
                     paused_reason=None
                 )
+                from app.devlog import devlog
+                devlog('throttle', a='resume')
                 print(f"▶ Resumed encoding")
             except Exception as e:
                 print(f"✗ Error resuming: {e}")
@@ -863,6 +875,7 @@ class EncodingJob:
         Returns the resulting status ('pending' or 'failed').
         """
         from app.logger import optimizarr_logger
+        from app.devlog import devlog
 
         self._cleanup_partial_output()
 
@@ -890,6 +903,8 @@ class EncodingJob:
                 "Encode failed (item %s) — re-queued for retry %d/%d",
                 self.queue_item_id, new_count, max_retries
             )
+            devlog('enc_retry', id=self.queue_item_id, n=new_count,
+                   err=error_message[:150])
             return 'pending'
 
         db.update_queue_item(
@@ -903,6 +918,8 @@ class EncodingJob:
             "Encode failed permanently (item %s) after %d retries",
             self.queue_item_id, retry_count
         )
+        devlog('enc_fail', id=self.queue_item_id, n=retry_count,
+               err=error_message[:150])
         return 'failed'
 
     def stop(self, mark_cancelled: bool = True):
@@ -955,6 +972,8 @@ class EncodingJob:
                 eta_seconds=0,
                 error_message='Manually stopped'
             )
+            from app.devlog import devlog
+            devlog('enc_cancel', id=self.queue_item_id)
             print("⏹ Encoding cancelled")
         else:
             print("⏹ Encoding interrupted (will resume on next start)")

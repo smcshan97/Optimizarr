@@ -358,6 +358,8 @@ class MediaScanner:
             added_count += 1
             print(f"  + Added: {Path(file_path).name} [{current_specs.get('codec','?')} {current_specs.get('resolution','?')}]{upscale_tag}{stereo_tag}")
         print(f"✓ Added {added_count} files to queue")
+        from app.devlog import devlog
+        devlog('scan', root=root_id, queued=added_count)
         return added_count
 
     def _estimate_savings(self, file_size: int, current_codec: str, target_codec: str,
