@@ -173,6 +173,9 @@
                         <button onclick="retryAllFailed()" class="btn btn-secondary" title="Re-queue all failed items">
                             ↻ Retry Failed
                         </button>
+                        <button onclick="recheckAllPermissions()" class="btn btn-secondary" title="Re-check file access on all permission-error items">
+                            🔒 Re-check Perms
+                        </button>
                     </div>
                 </div>
                 
@@ -193,6 +196,7 @@
                             <option value="failed">❌ Failed</option>
                             <option value="paused">⏸️ Paused</option>
                             <option value="cancelled">⏹️ Cancelled</option>
+                            <option value="permission_error">🔒 Permission Error</option>
                         </select>
                     </div>
                     <!-- Sort & Prioritize -->

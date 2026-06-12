@@ -513,6 +513,7 @@ function displayQueueItems(items) {
             ${counts.failed ? `<span style="color:var(--danger)">❌ Failed: ${counts.failed}</span>` : ''}
             ${counts.paused ? `<span style="color:#e67e22">⏸️ Paused: ${counts.paused}</span>` : ''}
             ${counts.cancelled ? `<span style="color:var(--text-muted)">⏹️ Cancelled: ${counts.cancelled}</span>` : ''}
+            ${counts.permission_error ? `<span style="color:var(--warning)" title="Files Optimizarr can't read/write — fix access then Re-check">🔒 Permission: ${counts.permission_error}</span>` : ''}
             ${queuePendingEta > 0 ? `<span style="color:var(--accent)" title="Estimated time to encode all pending items, from your encode-speed history${queuePendingEtaUnknown > 0 ? ` (+${queuePendingEtaUnknown} item(s) with unknown duration not included — re-scan to fix)` : ''}">⏱ Queue ETA: ~${formatDuration(queuePendingEta)}${queuePendingEtaUnknown > 0 ? ' ⁺' : ''}</span>` : ''}
             <span style="margin-left:auto">Showing: <strong style="color:var(--text-primary)">${items.length}</strong> of ${queueTotal}</span>
         </div>
@@ -553,7 +554,8 @@ function displayQueueItems(items) {
             'completed':  { emoji: '✅', color: 'text-green-400',  barColor: 'bg-green-500' },
             'failed':     { emoji: '❌', color: 'text-red-400',    barColor: 'bg-red-500' },
             'paused':     { emoji: '⏸️', color: 'text-orange-400', barColor: 'bg-orange-500' },
-            'cancelled':  { emoji: '⏹️', color: 'text-gray-400',   barColor: 'bg-gray-500' }
+            'cancelled':  { emoji: '⏹️', color: 'text-gray-400',   barColor: 'bg-gray-500' },
+            'permission_error': { emoji: '🔒', color: 'text-orange-300', barColor: 'bg-orange-500' }
         };
         const sc = statusConfig[item.status] || { emoji: '❓', color: 'text-gray-400', barColor: 'bg-gray-500' };
         const progress = item.progress || 0;
@@ -659,7 +661,7 @@ function displayQueueItems(items) {
                 <td class="py-2 px-2 text-xs">${formatSize(item.file_size_bytes)}</td>
                 <td class="py-2 px-2 text-xs">${savingsDisplay}</td>
                 <td class="py-2 px-2 text-xs" style="color:var(--text-secondary)">${durDisplay}</td>
-                <td class="py-2 px-2"><span class="${sc.color} text-xs">${sc.emoji} ${item.status}</span></td>
+                <td class="py-2 px-2"><span class="${sc.color} text-xs" title="${(item.permission_message || item.error_message || '').replace(/"/g, '&quot;')}">${sc.emoji} ${item.status}</span></td>
                 <td class="py-2 px-2">${progressBar}</td>
                 <td class="py-2 px-2 text-xs text-gray-400">
                     <span class="cursor-pointer hover:text-white" style="border-bottom:1px dotted var(--text-muted)"
@@ -672,6 +674,9 @@ function displayQueueItems(items) {
                 <td class="py-2 px-2">
                     ${(item.status === 'failed' || item.status === 'cancelled')
                         ? `<button onclick="retryQueueItem(${item.id})" class="btn btn-secondary btn-xs" title="Re-queue this item">↻ Retry</button> `
+                        : ''}
+                    ${item.status === 'permission_error'
+                        ? `<button onclick="recheckPermissions(${item.id})" class="btn btn-secondary btn-xs" title="Re-check file access — flips to pending if readable now">🔒 Re-check</button> `
                         : ''}
                     <button onclick="deleteQueueItem(${item.id})"
                         class="btn btn-danger btn-xs">Delete</button>
@@ -2113,6 +2118,27 @@ async function retryQueueItem(id) {
     const result = await apiRequest(`/queue/${id}/retry`, { method: 'POST' });
     if (result) {
         showMessage(result.message || 'Item re-queued', result.success === false ? 'error' : 'success');
+        loadQueue();
+    }
+}
+
+async function recheckPermissions(id) {
+    const result = await apiRequest(`/queue/${id}/recheck-permissions`, { method: 'POST' });
+    if (result) {
+        showMessage(result.message, result.success === false ? 'warning' : 'success');
+        loadQueue();
+    }
+}
+
+async function recheckAllPermissions() {
+    const blocked = queueCounts.permission_error || 0;
+    if (blocked === 0) {
+        showMessage('No permission-error items to check', 'info');
+        return;
+    }
+    const result = await apiRequest('/queue/recheck-permissions', { method: 'POST' });
+    if (result) {
+        showMessage(result.message, 'success');
         loadQueue();
     }
 }

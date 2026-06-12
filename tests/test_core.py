@@ -719,3 +719,42 @@ class TestWebhookDeadLetter:
         # Ignored event types are deterministic non-actions
         result3 = connection_routes.process_webhook_payload('radarr', {"eventType": "Test"})
         assert result3['ok'] and 'ignored' in result3['message'].lower()
+
+
+# ---------------------------------------------------------------------------
+# Permission-error re-check (Patch 35)
+# ---------------------------------------------------------------------------
+
+class TestPermissionRecheck:
+    def test_accessible_file_flips_to_pending(self, fresh_db, tmp_path, monkeypatch):
+        """A previously blocked file that's readable now goes pending."""
+        from app.api import queue_routes
+        monkeypatch.setattr(queue_routes, 'db', fresh_db)
+
+        f = tmp_path / "movie.mkv"
+        f.write_bytes(b"x")
+        qid = fresh_db.add_to_queue(file_path=str(f), profile_id=1,
+                                    status='permission_error')
+
+        item = fresh_db.get_queue_item(qid)
+        assert queue_routes._recheck_permission_item(item) is True
+        refreshed = fresh_db.get_queue_item(qid)
+        assert refreshed['status'] == 'pending'
+        assert refreshed['permission_status'] == 'ok'
+        assert refreshed['error_message'] is None
+
+    def test_missing_file_stays_blocked_with_reason(self, fresh_db, tmp_path, monkeypatch):
+        """A still-missing file keeps permission_error and records WHY."""
+        from app.api import queue_routes
+        monkeypatch.setattr(queue_routes, 'db', fresh_db)
+
+        missing = str(tmp_path / "gone.mkv")
+        qid = fresh_db.add_to_queue(file_path=missing, profile_id=1,
+                                    status='permission_error')
+
+        item = fresh_db.get_queue_item(qid)
+        assert queue_routes._recheck_permission_item(item) is False
+        refreshed = fresh_db.get_queue_item(qid)
+        assert refreshed['status'] == 'permission_error'
+        assert refreshed['permission_status'] == 'not_found'
+        assert 'does not exist' in (refreshed['permission_message'] or '')

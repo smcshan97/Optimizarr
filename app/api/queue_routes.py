@@ -420,6 +420,69 @@ async def clear_completed_queue(
     return {"message": f"Cleared {count} completed item(s)", "count": count}
 
 
+def _recheck_permission_item(item: dict) -> bool:
+    """Re-run the permission check for one queue item.
+
+    Returns True when the file is accessible now (item flipped to pending).
+    On continued failure the row keeps status permission_error but gets the
+    current reason written to permission_status/error_message so the UI can
+    show WHY (the original enqueue paths never stored it).
+    """
+    perm_status, perm_message = scanner.check_file_permissions(item['file_path'])
+    if perm_status == 'ok':
+        db.update_queue_item(
+            item['id'],
+            status='pending',
+            permission_status='ok',
+            permission_message=None,
+            error_message=None,
+        )
+        return True
+    db.update_queue_item(
+        item['id'],
+        permission_status=perm_status,
+        permission_message=perm_message,
+        error_message=perm_message,
+    )
+    return False
+
+
+@router.post("/queue/recheck-permissions", response_model=MessageResponse)
+async def recheck_all_permissions(current_user: dict = Depends(get_current_user)):
+    """Re-check every permission_error item; accessible files go pending."""
+    items = db.get_queue_items(status='permission_error')
+    if not items:
+        return MessageResponse(message="No permission-error items to check")
+    fixed = sum(1 for item in items if _recheck_permission_item(item))
+    return MessageResponse(
+        message=f"Re-checked {len(items)} item(s): {fixed} now pending, "
+                f"{len(items) - fixed} still blocked"
+    )
+
+
+@router.post("/queue/{item_id}/recheck-permissions", response_model=MessageResponse)
+async def recheck_item_permissions(
+    item_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """Re-check a single permission_error item."""
+    item = db.get_queue_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    if item['status'] != 'permission_error':
+        return MessageResponse(
+            message=f"Item is '{item['status']}' — nothing to re-check",
+            success=False
+        )
+    if _recheck_permission_item(item):
+        return MessageResponse(message="File is accessible now — re-queued as pending")
+    refreshed = db.get_queue_item(item_id) or {}
+    return MessageResponse(
+        message=f"Still blocked: {refreshed.get('permission_message') or 'permission error'}",
+        success=False
+    )
+
+
 @router.post("/queue/retry-failed", response_model=MessageResponse)
 async def retry_all_failed(current_user: dict = Depends(get_current_user)):
     """Re-queue every failed item (resets retry counters)."""
