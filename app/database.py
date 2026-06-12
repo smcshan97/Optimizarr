@@ -403,6 +403,16 @@ class Database:
                 cursor.execute("ALTER TABLE queue ADD COLUMN retry_count INTEGER DEFAULT 0")
                 print("  ↳ Migrated: added 'retry_count' to queue")
 
+            # Live encode telemetry parsed from HandBrakeCLI output (Patch 33)
+            cursor.execute("PRAGMA table_info(queue)")
+            queue_cols_live = [col[1] for col in cursor.fetchall()]
+            if 'current_fps' not in queue_cols_live:
+                cursor.execute("ALTER TABLE queue ADD COLUMN current_fps REAL DEFAULT 0")
+                print("  ↳ Migrated: added 'current_fps' to queue")
+            if 'eta_seconds' not in queue_cols_live:
+                cursor.execute("ALTER TABLE queue ADD COLUMN eta_seconds INTEGER DEFAULT 0")
+                print("  ↳ Migrated: added 'eta_seconds' to queue")
+
             # folder_watches.scan_root_id — links a watch to its library (scan root).
             # Folder watching is now toggled per-library via the eye toggle.
             cursor.execute("PRAGMA table_info(folder_watches)")

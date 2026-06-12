@@ -1,5 +1,10 @@
 """Queue, encoding control, and statistics routes."""
+import asyncio
+import json as _json
+from pathlib import Path as _Path
+
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Query
+from fastapi.responses import StreamingResponse
 from typing import List, Optional
 
 from app.api.models import QueueItemResponse, QueueUpdateRequest, StatsResponse, MessageResponse
@@ -10,6 +15,46 @@ from app.encoder import encoder_pool
 from app.logger import optimizarr_logger
 
 router = APIRouter()
+
+
+@router.get("/events/encode-progress")
+async def encode_progress_events(token: Optional[str] = None):
+    """Server-sent events stream of live encode progress (~every 2s).
+
+    EventSource cannot set an Authorization header, so the JWT is passed as
+    a ``token`` query parameter and validated the same way the header is.
+    Each event is JSON: {"processing": [{id, progress, fps, eta_seconds,
+    file}, ...]}. The stream ends only when the client disconnects.
+    """
+    from app.auth import auth as _auth
+    payload = _auth.decode_token(token) if token else None
+    if not payload or not db.get_user_by_id(int(payload.get("sub", 0) or 0)):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Invalid or expired token")
+
+    async def event_stream():
+        while True:
+            # to_thread: keep the encoder's DB write lock contention off the
+            # event loop
+            rows = await asyncio.to_thread(db.get_queue_items, 'processing')
+            data = [{
+                'id': r['id'],
+                'progress': round(r.get('progress') or 0, 1),
+                'fps': r.get('current_fps') or 0,
+                'eta_seconds': r.get('eta_seconds') or 0,
+                'file': _Path(r['file_path']).name,
+            } for r in rows]
+            yield f"data: {_json.dumps({'processing': data})}\n\n"
+            await asyncio.sleep(2)
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.get("/queue")
@@ -63,6 +108,10 @@ def _attach_eta(envelope: dict):
 
     for item in envelope.get('items', []):
         if item.get('status') not in ('pending', 'paused', 'processing'):
+            continue
+        # Processing rows carry a REAL ETA parsed live from HandBrake output
+        # (Patch 33) — never overwrite it with a history-based estimate.
+        if item.get('status') == 'processing' and (item.get('eta_seconds') or 0) > 0:
             continue
         target = item.get('target_specs') or {}
         est = estimate_encode_seconds(

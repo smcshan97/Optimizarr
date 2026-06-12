@@ -601,33 +601,20 @@ function displayQueueItems(items) {
                     <span class="text-gray-400 font-mono text-xs w-14 text-right" title="Manually stopped">${progress > 0 ? progress.toFixed(1) + '%' : '—'}</span>
                 </div>`;
         } else if (item.status === 'processing' || (item.status === 'paused' && progress > 0)) {
-            // Calculate elapsed and ETA from started_at
-            let etaStr = '';
-            if (item.started_at && item.status === 'processing' && progress > 0.5) {
-                try {
-                    const startMs  = new Date(item.started_at.replace(' ', 'T') + 'Z').getTime();
-                    const elapsedS = Math.max(0, (Date.now() - startMs) / 1000);
-                    const totalEstS = (elapsedS / (progress / 100));
-                    const remainS   = Math.max(0, totalEstS - elapsedS);
-
-                    const fmt = (s) => {
-                        s = Math.round(s);
-                        if (s < 60)   return s + 's';
-                        if (s < 3600) return Math.floor(s/60) + 'm ' + (s%60) + 's';
-                        return Math.floor(s/3600) + 'h ' + Math.floor((s%3600)/60) + 'm';
-                    };
-                    etaStr = `<div class="text-xs text-gray-500 mt-0.5">${fmt(elapsedS)} elapsed · ~${fmt(remainS)} left</div>`;
-                } catch (_) {}
-            }
+            // Live telemetry parsed from HandBrake's own output (Patch 33);
+            // the SSE stream updates these elements in place between polls.
+            let liveBits = [];
+            if (item.current_fps > 0) liveBits.push(item.current_fps.toFixed(1) + ' fps');
+            if (item.eta_seconds > 0) liveBits.push('~' + formatDuration(item.eta_seconds) + ' left');
             progressBar = `
                 <div>
                     <div class="flex items-center gap-2">
                         <div class="flex-1 bg-gray-600 rounded-full h-2.5 overflow-hidden">
-                            <div class="${sc.barColor} h-2.5 rounded-full transition-all duration-700" style="width: ${progress}%"></div>
+                            <div class="js-prog-bar ${sc.barColor} h-2.5 rounded-full transition-all duration-700" style="width: ${progress}%"></div>
                         </div>
-                        <span class="${sc.color} font-mono text-xs font-bold w-14 text-right">${progress.toFixed(1)}%</span>
+                        <span class="js-prog-label ${sc.color} font-mono text-xs font-bold w-14 text-right">${progress.toFixed(1)}%</span>
                     </div>
-                    ${etaStr}
+                    <div class="js-prog-eta text-xs text-gray-500 mt-0.5">${liveBits.join(' · ')}</div>
                 </div>`;
         } else {
             // Pending — empty bar
@@ -736,6 +723,50 @@ function displayQueueItems(items) {
 
     // ── Queue drag-and-drop reorder ──────────────────────────────
     initQueueDragDrop();
+
+    // ── Live progress stream (SSE) for the active encode ─────────
+    ensureProgressStream((queueCounts.processing || 0) > 0);
+}
+
+// EventSource pushing live encode progress every ~2s — replaces the 5s poll
+// for the active row only. Falls back to polling: on error we just close;
+// the next displayQueueItems (5s poll) reopens it.
+let _progressES = null;
+
+function ensureProgressStream(hasProcessing) {
+    if (!window.EventSource) return; // ancient browser → polling only
+    if (!hasProcessing) {
+        if (_progressES) { _progressES.close(); _progressES = null; }
+        return;
+    }
+    if (_progressES) return; // already streaming
+
+    const url = `${API_BASE}/events/encode-progress?token=${encodeURIComponent(getToken() || '')}`;
+    _progressES = new EventSource(url);
+
+    _progressES.onmessage = (e) => {
+        let payload;
+        try { payload = JSON.parse(e.data); } catch (_) { return; }
+        (payload.processing || []).forEach(p => {
+            const row = document.querySelector(`tr[data-queue-id="${p.id}"]`);
+            if (!row) return; // active item not on the current page
+            const bar = row.querySelector('.js-prog-bar');
+            const label = row.querySelector('.js-prog-label');
+            const eta = row.querySelector('.js-prog-eta');
+            if (bar) bar.style.width = `${p.progress}%`;
+            if (label) label.textContent = `${p.progress.toFixed(1)}%`;
+            if (eta) {
+                const bits = [];
+                if (p.fps > 0) bits.push(p.fps.toFixed(1) + ' fps');
+                if (p.eta_seconds > 0) bits.push('~' + formatDuration(p.eta_seconds) + ' left');
+                eta.textContent = bits.join(' · ');
+            }
+        });
+    };
+
+    _progressES.onerror = () => {
+        if (_progressES) { _progressES.close(); _progressES = null; }
+    };
 }
 
 function initQueueDragDrop() {

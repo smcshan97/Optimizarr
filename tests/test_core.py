@@ -536,14 +536,19 @@ class TestQueueEta:
         c = fresh_db.add_to_queue(file_path="/x/c.mkv", profile_id=1, duration_seconds=3600,
                                   target_specs={'codec': 'h265'}, status='processing')
         fresh_db.update_queue_item(c, progress=50.0)
+        # d: processing WITH a live HandBrake ETA — estimator must not clobber it
+        d = fresh_db.add_to_queue(file_path="/x/d.mkv", profile_id=1, duration_seconds=3600,
+                                  target_specs={'codec': 'h265'}, status='processing')
+        fresh_db.update_queue_item(d, progress=10.0, eta_seconds=4321)
 
         envelope = fresh_db.get_queue_items_paginated(page=1, page_size=50)
         queue_routes._attach_eta(envelope)
 
         by_id = {i['id']: i for i in envelope['items']}
         assert by_id[a]['eta_seconds'] == 900          # 1800 × 0.5
-        assert 'eta_seconds' not in by_id[b]           # unknown duration
+        assert by_id[b]['eta_seconds'] == 0            # unknown duration → column default
         assert by_id[c]['eta_seconds'] == 900          # 3600 × 0.5 × (1 − 0.5)
+        assert by_id[d]['eta_seconds'] == 4321         # real HandBrake ETA preserved
         # Total covers pending only: item a (900s); unknown counted separately
         assert envelope['pending_eta_seconds'] == 900
         assert envelope['pending_eta_unknown'] == 1
@@ -570,3 +575,51 @@ class TestQueueEta:
         assert 'encode_speed' in data
         assert abs(data['encode_speed']['by_codec']['h265'] - 0.5) < 1e-9
         assert data['encode_speed']['samples'] == 1
+
+
+# ---------------------------------------------------------------------------
+# Live encode progress parsing (Patch 33)
+# ---------------------------------------------------------------------------
+
+class TestHandBrakeProgressParsing:
+    def test_full_progress_line(self):
+        """Standard line with fps and ETA — all three values extracted."""
+        from app.encoder import parse_hb_progress
+        line = "Encoding: task 1 of 1, 23.45 % (113.06 fps, avg 102.33 fps, ETA 00h12m34s)"
+        pct, fps, eta = parse_hb_progress(line)
+        assert pct == 23.45
+        assert fps == 113.06
+        assert eta == 12 * 60 + 34
+
+    def test_early_line_without_fps(self):
+        """First lines of an encode lack the fps/ETA group."""
+        from app.encoder import parse_hb_progress
+        pct, fps, eta = parse_hb_progress("Encoding: task 1 of 1, 0.12 %")
+        assert pct == 0.12
+        assert fps is None
+        assert eta is None
+
+    def test_multi_hour_eta(self):
+        """Real overnight-encode line from logs/handbrake.log."""
+        from app.encoder import parse_hb_progress
+        line = "Encoding: task 1 of 1, 4.88 % (2.48 fps, avg 2.94 fps, ETA 12h07m19s)"
+        pct, fps, eta = parse_hb_progress(line)
+        assert pct == 4.88
+        assert fps == 2.48
+        assert eta == 12 * 3600 + 7 * 60 + 19
+
+    def test_non_progress_lines_ignored(self):
+        from app.encoder import parse_hb_progress
+        assert parse_hb_progress("Muxing: this may take awhile...") is None
+        assert parse_hb_progress("") is None
+
+    def test_queue_has_live_telemetry_columns(self, fresh_db):
+        """Migration adds current_fps + eta_seconds with zero defaults."""
+        qid = fresh_db.add_to_queue(file_path="/x/a.mkv", profile_id=1)
+        item = fresh_db.get_queue_item(qid)
+        assert item['current_fps'] == 0
+        assert item['eta_seconds'] == 0
+        fresh_db.update_queue_item(qid, current_fps=113.06, eta_seconds=754)
+        item = fresh_db.get_queue_item(qid)
+        assert item['current_fps'] == 113.06
+        assert item['eta_seconds'] == 754

@@ -18,6 +18,32 @@ from app.database import db
 from app.resources import resource_monitor, resource_throttler
 
 
+# HandBrakeCLI progress line, e.g.:
+#   Encoding: task 1 of 1, 23.45 % (113.06 fps, avg 102.33 fps, ETA 00h12m34s)
+# The fps/ETA group is absent on the first few lines of an encode.
+HB_PROGRESS_RE = re.compile(
+    r'Encoding: task \d+ of \d+, ([\d.]+) %'
+    r'(?:\s*\(([\d.]+) fps, avg ([\d.]+) fps, ETA (\d+)h(\d+)m(\d+)s\))?'
+)
+
+
+def parse_hb_progress(line: str):
+    """Parse a HandBrakeCLI progress line.
+
+    Returns (percent, current_fps, eta_seconds) — fps/eta are None when
+    HandBrake hasn't printed them yet — or None for non-progress lines.
+    """
+    m = HB_PROGRESS_RE.search(line)
+    if not m:
+        return None
+    pct = float(m.group(1))
+    fps = float(m.group(2)) if m.group(2) else None
+    eta = None
+    if m.group(4) is not None:
+        eta = int(m.group(4)) * 3600 + int(m.group(5)) * 60 + int(m.group(6))
+    return pct, fps, eta
+
+
 class EncodingJob:
     """Represents a single video encoding job."""
     
@@ -543,8 +569,8 @@ class EncodingJob:
                 )
                 self.monitoring_thread.start()
 
-            progress_pattern = re.compile(r'Encoding: task \d+ of \d+, ([\d.]+) %')
             last_lines = []  # Keep last 20 lines for diagnostics
+            last_db_write = 0.0
 
             for line in self.process.stdout:
                 line_stripped = line.rstrip()
@@ -554,12 +580,25 @@ class EncodingJob:
                         last_lines.pop(0)
                     optimizarr_logger.log_handbrake_output(line_stripped)
 
-                match = progress_pattern.search(line)
-                if match:
-                    hb_pct = float(match.group(1))
+                parsed = parse_hb_progress(line)
+                if parsed:
+                    hb_pct, fps, hb_eta = parsed
                     # Remap HandBrake 0-100 → hb_start to hb_start+hb_range
                     self.progress = hb_start + (hb_pct / 100.0) * hb_range
-                    db.update_queue_item(self.queue_item_id, progress=self.progress)
+
+                    # Throttle DB writes to ~every 2s: HandBrake emits many
+                    # progress lines per second and each update_queue_item
+                    # takes the global write lock, starving UI reads.
+                    now = time.monotonic()
+                    if now - last_db_write >= 2.0:
+                        last_db_write = now
+                        fields = {'progress': self.progress}
+                        if fps is not None:
+                            fields['current_fps'] = fps
+                        if hb_eta is not None:
+                            fields['eta_seconds'] = hb_eta
+                        db.update_queue_item(self.queue_item_id, **fields)
+
                     if progress_callback:
                         progress_callback(self.progress)
                     print(f"  Progress: {self.progress:.1f}%", end='\r')
@@ -679,6 +718,8 @@ class EncodingJob:
                 self.queue_item_id,
                 status='completed',
                 progress=100.0,
+                current_fps=0,
+                eta_seconds=0,
                 completed_at=datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
             )
 
@@ -841,6 +882,8 @@ class EncodingJob:
                 status='pending',
                 retry_count=new_count,
                 progress=0.0,
+                current_fps=0,
+                eta_seconds=0,
                 error_message=f"Retry {new_count}/{max_retries}: {error_message[:200]}",
             )
             optimizarr_logger.app_logger.warning(
@@ -852,6 +895,8 @@ class EncodingJob:
         db.update_queue_item(
             self.queue_item_id,
             status='failed',
+            current_fps=0,
+            eta_seconds=0,
             error_message=error_message[:500],
         )
         optimizarr_logger.app_logger.error(
@@ -906,6 +951,8 @@ class EncodingJob:
             db.update_queue_item(
                 self.queue_item_id,
                 status='cancelled',
+                current_fps=0,
+                eta_seconds=0,
                 error_message='Manually stopped'
             )
             print("⏹ Encoding cancelled")
