@@ -56,6 +56,33 @@ async def lifespan(app: FastAPI):
     from app.devlog import devlog
     devlog('start', v=__version__, rec=recovered or None)
 
+    # Replay webhook events that never finished processing (e.g. Sonarr
+    # fired while Optimizarr was restarting). Idempotent — files already
+    # queued are skipped. Old processed rows are pruned to cap table growth.
+    try:
+        import json as _wjson
+        from app.api.connection_routes import process_webhook_payload
+        pending_hooks = db.get_unprocessed_webhooks(hours=24)
+        replay_ok = 0
+        for ev in pending_hooks:
+            try:
+                result = process_webhook_payload(
+                    ev['app_type'], _wjson.loads(ev['payload_json'] or '{}')
+                )
+                db.mark_webhook_processed(
+                    ev['id'],
+                    error=None if result.get('ok') else result.get('message')
+                )
+                replay_ok += 1
+            except Exception as e:
+                db.set_webhook_error(ev['id'], str(e)[:300])
+        if pending_hooks:
+            print(f"  Replayed {replay_ok}/{len(pending_hooks)} unprocessed webhook event(s)")
+            devlog('webhook_replay', n=len(pending_hooks), ok=replay_ok)
+        db.prune_webhook_events(days=7)
+    except Exception as e:
+        print(f"  ⚠ Webhook replay failed: {e}")
+
     # Seed default profiles on first run
     if not db.get_profiles():
         print("Seeding default encoding profiles…")

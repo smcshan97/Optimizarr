@@ -362,12 +362,47 @@ async def receive_webhook(app_type: str, payload: dict):
     Receive download completion events from Sonarr or Radarr.
     No authentication — the caller is on the local network.
     Files are queued as pending (respects scheduler rest hours).
+
+    Dead-letter pattern (Patch 34): the raw event is persisted BEFORE any
+    processing, so a webhook that arrives mid-restart or dies on an
+    exception is replayed at next startup instead of being lost forever.
+    """
+    import json as _json
+
+    app_type = app_type.lower()
+    event_id = db.add_webhook_event(app_type, _json.dumps(payload))
+
+    try:
+        result = process_webhook_payload(app_type, payload)
+        # Deterministic outcomes (incl. "ignored"/"already queued") are
+        # final — record any non-ok message but don't replay them.
+        db.mark_webhook_processed(
+            event_id,
+            error=None if result.get("ok") else result.get("message")
+        )
+        return result
+    except Exception as e:
+        # Unexpected failure: keep processed_at NULL → replay candidate
+        db.set_webhook_error(event_id, str(e)[:300])
+        from app.devlog import devlog
+        devlog('webhook_fail', app=app_type, err=str(e)[:150])
+        optimizarr_logger.app_logger.error(
+            "Webhook processing failed (saved for replay): %s", e
+        )
+        return {"ok": False,
+                "message": f"Processing failed, event saved for replay: {e}"}
+
+
+def process_webhook_payload(app_type: str, payload: dict) -> dict:
+    """Process a Sonarr/Radarr download event payload (sync, replayable).
+
+    Called by the live webhook route and by the startup replay of
+    unprocessed events. Idempotent: files already in the queue are skipped.
     """
     import json as _json
     from app.external_connections import CODEC_MAP
     from app.scanner import scanner
 
-    app_type = app_type.lower()
     event_type = payload.get("eventType", "")
 
     optimizarr_logger.app_logger.info(

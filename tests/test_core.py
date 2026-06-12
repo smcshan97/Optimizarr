@@ -623,3 +623,99 @@ class TestHandBrakeProgressParsing:
         item = fresh_db.get_queue_item(qid)
         assert item['current_fps'] == 113.06
         assert item['eta_seconds'] == 754
+
+
+# ---------------------------------------------------------------------------
+# Webhook dead-letter queue (Patch 34)
+# ---------------------------------------------------------------------------
+
+class TestWebhookDeadLetter:
+    def test_event_lifecycle(self, fresh_db):
+        """Persist → unprocessed → mark processed → no longer replayable."""
+        eid = fresh_db.add_webhook_event('radarr', '{"eventType":"Download"}')
+        pending = fresh_db.get_unprocessed_webhooks(hours=24)
+        assert [e['id'] for e in pending] == [eid]
+        assert fresh_db.count_unprocessed_webhooks() == 1
+
+        fresh_db.mark_webhook_processed(eid)
+        assert fresh_db.get_unprocessed_webhooks(hours=24) == []
+        assert fresh_db.count_unprocessed_webhooks() == 0
+
+    def test_error_keeps_event_replayable(self, fresh_db):
+        """set_webhook_error records the failure but leaves it unprocessed."""
+        eid = fresh_db.add_webhook_event('sonarr', '{}')
+        fresh_db.set_webhook_error(eid, 'db locked')
+        pending = fresh_db.get_unprocessed_webhooks(hours=24)
+        assert len(pending) == 1
+        assert pending[0]['error'] == 'db locked'
+        assert pending[0]['processed_at'] is None
+
+    def test_replay_window_excludes_old_events(self, fresh_db):
+        """Unprocessed events older than the window are not replayed."""
+        old = fresh_db.add_webhook_event('radarr', '{}')
+        with fresh_db.get_connection() as conn:
+            conn.execute(
+                "UPDATE webhook_events SET received_at = datetime('now', '-48 hours') WHERE id = ?",
+                (old,)
+            )
+        fresh = fresh_db.add_webhook_event('radarr', '{}')
+        pending = fresh_db.get_unprocessed_webhooks(hours=24)
+        assert [e['id'] for e in pending] == [fresh]
+        # ...but stale unprocessed events still show on the health count
+        assert fresh_db.count_unprocessed_webhooks() == 2
+
+    def test_prune_keeps_unprocessed(self, fresh_db):
+        """Prune removes only old PROCESSED rows."""
+        done_old = fresh_db.add_webhook_event('radarr', '{}')
+        fresh_db.mark_webhook_processed(done_old)
+        fail_old = fresh_db.add_webhook_event('radarr', '{}')
+        with fresh_db.get_connection() as conn:
+            conn.execute(
+                "UPDATE webhook_events SET received_at = datetime('now', '-10 days')"
+            )
+        removed = fresh_db.prune_webhook_events(days=7)
+        assert removed == 1
+        # The unprocessed one survives regardless of age
+        assert fresh_db.count_unprocessed_webhooks() == 1
+
+    def test_process_radarr_payload_queues_file(self, fresh_db, monkeypatch):
+        """A Radarr Download payload queues the file; replay is idempotent."""
+        from app.api import connection_routes
+        monkeypatch.setattr(connection_routes, 'db', fresh_db)
+        # Keep the wake-encoder block from touching the real encoder/scheduler
+        from app.encoder import encoder_pool
+        monkeypatch.setattr(encoder_pool, 'is_running', True)
+
+        fresh_db.create_profile(
+            name="WH", resolution="", framerate=None,
+            codec="av1", encoder="svt_av1", quality=28,
+            audio_codec="passthrough", container="mkv",
+            audio_handling="preserve_all", subtitle_handling="none",
+            chapter_markers=True, enable_filters=False,
+            hw_accel_enabled=False, preset="8",
+            two_pass=False, custom_args=None, is_default=True,
+        )
+        payload = {
+            "eventType": "Download",
+            "movieFile": {
+                "path": "/movies/Some Movie (2024)/movie.mkv",
+                "size": 4_000_000_000,
+                "mediaInfo": {"videoCodec": "x264", "videoResolution": "1080p"},
+            },
+        }
+
+        result = connection_routes.process_webhook_payload('radarr', payload)
+        assert result['ok'], result
+        items = fresh_db.get_queue_items()
+        assert len(items) == 1
+        assert items[0]['file_path'] == "/movies/Some Movie (2024)/movie.mkv"
+
+        # Replaying the same payload must not duplicate the queue item
+        result2 = connection_routes.process_webhook_payload('radarr', payload)
+        assert result2['ok']
+        assert 'already in queue' in result2['message'].lower()
+        assert len(fresh_db.get_queue_items()) == 1
+
+        # Ignored event types are deterministic non-actions
+        result3 = connection_routes.process_webhook_payload('radarr', {"eventType": "Test"})
+        assert result3['ok'] and 'ignored' in result3['message'].lower()

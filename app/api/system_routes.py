@@ -450,6 +450,16 @@ async def health_check():
     except Exception:
         pass
 
+    # Incoming webhook dead-letter queue — unprocessed events await the
+    # next startup replay; a non-zero count after a replay means failures
+    try:
+        unprocessed = db.count_unprocessed_webhooks()
+        health["webhooks"] = {"unprocessed": unprocessed}
+        if unprocessed > 0:
+            health["webhooks"]["note"] = "Events will be replayed at next startup"
+    except Exception:
+        health["webhooks"] = {"unprocessed": -1}
+
     return health
 
 @router.get("/backup")
