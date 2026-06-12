@@ -487,6 +487,11 @@ async function bulkClearCompleted() {
 
 // Main display function
 function displayQueueItems(items) {
+    // Don't redraw out from under an in-progress priority edit
+    if (document.activeElement && document.activeElement.classList.contains('js-priority-input')) {
+        return;
+    }
+
     const container = document.getElementById('queueTable');
 
     if (!items || items.length === 0) {
@@ -656,7 +661,11 @@ function displayQueueItems(items) {
                 <td class="py-2 px-2 text-xs" style="color:var(--text-secondary)">${durDisplay}</td>
                 <td class="py-2 px-2"><span class="${sc.color} text-xs">${sc.emoji} ${item.status}</span></td>
                 <td class="py-2 px-2">${progressBar}</td>
-                <td class="py-2 px-2 text-xs text-gray-400">${item.priority}</td>
+                <td class="py-2 px-2 text-xs text-gray-400">
+                    <span class="cursor-pointer hover:text-white" style="border-bottom:1px dotted var(--text-muted)"
+                        onclick="editPriority(this, ${item.id}, ${item.priority})"
+                        title="Click to change rank (1 = first to encode)">${item.priority}</span>
+                </td>
                 <td class="py-2 px-2">
                     ${buildProfileSelect(item)}
                 </td>
@@ -2063,6 +2072,41 @@ async function deleteQueueItem(id) {
         showMessage('Item deleted from queue', 'success');
         loadQueue();
     }
+}
+
+// Inline priority (rank) editor — click the number, type, Enter/blur saves
+function editPriority(el, id, current) {
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '1';
+    input.value = current;
+    input.className = 'js-priority-input';
+    input.style.cssText = 'width:64px;background:var(--card-bg);color:var(--text-primary);border:1px solid var(--accent);border-radius:4px;padding:1px 4px;font-size:12px';
+
+    let done = false;
+    const commit = async () => {
+        if (done) return;
+        done = true;
+        const v = parseInt(input.value);
+        if (Number.isInteger(v) && v >= 1 && v !== current) {
+            const res = await apiRequest(`/queue/${id}`, {
+                method: 'PATCH',
+                body: JSON.stringify({ priority: v })
+            });
+            if (res) showMessage(`Rank set to ${v}`, 'success');
+        }
+        loadQueue();
+    };
+
+    input.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') input.blur();
+        if (e.key === 'Escape') { done = true; loadQueue(); }
+    });
+    input.addEventListener('blur', commit);
+
+    el.replaceWith(input);
+    input.focus();
+    input.select();
 }
 
 async function retryQueueItem(id) {

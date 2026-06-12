@@ -250,7 +250,9 @@ class QueueItemResponse(BaseModel):
 
 
 class QueueUpdateRequest(BaseModel):
-    priority: Optional[int] = Field(None, ge=0, le=100)
+    # Priority is a rank (1 = first) with no upper bound — queues can hold
+    # thousands of items, so the old le=100 cap would reject valid ranks
+    priority: Optional[int] = Field(None, ge=1)
     status: Optional[str] = None
     profile_id: Optional[int] = Field(None, gt=0)
 
