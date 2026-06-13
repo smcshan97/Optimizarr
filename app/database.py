@@ -427,6 +427,16 @@ class Database:
                 cursor.execute("ALTER TABLE queue ADD COLUMN eta_seconds INTEGER DEFAULT 0")
                 print("  ↳ Migrated: added 'eta_seconds' to queue")
 
+            # Auto-sync interval for external connections (Patch 37); 0 = off
+            cursor.execute("PRAGMA table_info(external_connections)")
+            conn_cols = [col[1] for col in cursor.fetchall()]
+            if 'sync_interval_hours' not in conn_cols:
+                cursor.execute(
+                    "ALTER TABLE external_connections "
+                    "ADD COLUMN sync_interval_hours INTEGER DEFAULT 0"
+                )
+                print("  ↳ Migrated: added 'sync_interval_hours' to external_connections")
+
             # folder_watches.scan_root_id — links a watch to its library (scan root).
             # Folder watching is now toggled per-library via the eye toggle.
             cursor.execute("PRAGMA table_info(folder_watches)")
@@ -1316,8 +1326,9 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO external_connections
-                    (name, app_type, base_url, api_key_encrypted, enabled, show_in_stats)
-                VALUES (?, ?, ?, ?, ?, ?)
+                    (name, app_type, base_url, api_key_encrypted, enabled,
+                     show_in_stats, sync_interval_hours)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (
                 kwargs["name"],
                 kwargs["app_type"],
@@ -1325,6 +1336,7 @@ class Database:
                 kwargs["api_key_encrypted"],
                 kwargs.get("enabled", True),
                 kwargs.get("show_in_stats", True),
+                kwargs.get("sync_interval_hours", 0),
             ))
             return cursor.lastrowid
 
@@ -1350,6 +1362,7 @@ class Database:
             allowed = [
                 "name", "app_type", "base_url", "api_key_encrypted",
                 "enabled", "show_in_stats", "last_tested", "last_synced",
+                "sync_interval_hours",
             ]
             updates, values = [], []
             for field in allowed:

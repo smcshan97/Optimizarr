@@ -633,6 +633,20 @@
                         </label>
                     </div>
 
+                    <!-- Auto-Sync Interval -->
+                    <div>
+                        <label class="block text-sm font-medium text-gray-300 mb-2">Auto-Sync</label>
+                        <select id="connectionSyncInterval"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white">
+                            <option value="0">Off (manual sync only)</option>
+                            <option value="1">Every hour</option>
+                            <option value="6">Every 6 hours</option>
+                            <option value="12">Every 12 hours</option>
+                            <option value="24">Every 24 hours</option>
+                        </select>
+                        <p class="text-xs text-gray-500 mt-1">Automatically pull the library and queue new files on this interval</p>
+                    </div>
+
                     <!-- Link to Scan Root -->
                     <div>
                         <label class="block text-sm font-medium text-gray-300 mb-2">Link to Scan Root <span class="text-gray-500 font-normal">(optional)</span></label>

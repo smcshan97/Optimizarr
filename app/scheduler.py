@@ -206,8 +206,15 @@ class ScheduleManager:
             return current_t >= start_t or current_t <= end_t
     
     def setup_schedule_check(self):
-        """Set up periodic schedule checking."""
-        self.scheduler.remove_all_jobs()
+        """Set up periodic schedule checking.
+
+        Removes only its own job — remove_all_jobs() would also kill the
+        auto-sync tick, which runs independently of the encode schedule.
+        """
+        try:
+            self.scheduler.remove_job('schedule_check')
+        except Exception:
+            pass
         if not self.is_enabled:
             return
         self.scheduler.add_job(
@@ -218,6 +225,42 @@ class ScheduleManager:
             replace_existing=True
         )
         print("✓ Schedule check configured (runs every minute)")
+
+    def setup_sync_check(self):
+        """Recurring auto-sync tick for external connections (Patch 37).
+
+        One job checks ALL connections every 15 minutes and syncs those
+        whose interval has elapsed — no per-connection job management, and
+        interval changes take effect on the next tick without re-registering.
+        """
+        self.scheduler.add_job(
+            func=self.check_auto_sync,
+            trigger='interval',
+            minutes=15,
+            id='auto_sync_check',
+            replace_existing=True,
+        )
+        print("✓ Auto-sync check configured (every 15 minutes)")
+
+    def check_auto_sync(self):
+        """Sync every enabled connection whose sync interval has elapsed."""
+        try:
+            connections = db.get_external_connections()
+        except Exception:
+            return
+        now = datetime.utcnow()
+        for conn in connections:
+            if not _sync_due(conn, now):
+                continue
+            from app.api.connection_routes import _sync_connection_task
+            from app.devlog import devlog
+            print(f"⏰ Auto-sync: {conn['name']} (every {conn['sync_interval_hours']}h)")
+            devlog('auto_sync', name=conn['name'],
+                   ivl=conn['sync_interval_hours'])
+            t = threading.Thread(
+                target=_sync_connection_task, args=(conn['id'],), daemon=True
+            )
+            t.start()
     
     def check_and_trigger(self):
         """Check schedule and trigger/stop encoding accordingly."""
@@ -256,6 +299,26 @@ class ScheduleManager:
         }
 
 
+def _sync_due(conn: Dict, now: datetime) -> bool:
+    """True when an enabled connection's auto-sync interval has elapsed.
+
+    interval 0/absent = auto-sync off. Never-synced connections (last_synced
+    NULL) are due immediately. last_synced is stored as UTC
+    '%Y-%m-%d %H:%M:%S'; an unparseable value counts as due.
+    """
+    interval = conn.get('sync_interval_hours') or 0
+    if not conn.get('enabled') or interval <= 0:
+        return False
+    last = conn.get('last_synced')
+    if not last:
+        return True
+    try:
+        last_dt = datetime.strptime(str(last)[:19], '%Y-%m-%d %H:%M:%S')
+    except ValueError:
+        return True
+    return (now - last_dt).total_seconds() >= interval * 3600
+
+
 # Global scheduler instance
 schedule_manager = ScheduleManager()
 
@@ -263,6 +326,8 @@ schedule_manager = ScheduleManager()
 def initialize_scheduler():
     schedule_manager.load_schedule()
     schedule_manager.start()
+    # Auto-sync runs regardless of whether the encode schedule is enabled
+    schedule_manager.setup_sync_check()
     if schedule_manager.is_enabled:
         schedule_manager.setup_schedule_check()
         print("✓ Scheduler initialized and enabled")

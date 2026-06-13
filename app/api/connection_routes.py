@@ -71,6 +71,7 @@ async def create_connection(
         api_key_encrypted=encrypt_api_key(raw_key),
         enabled=data.get("enabled", True),
         show_in_stats=data.get("show_in_stats", True),
+        sync_interval_hours=int(data.get("sync_interval_hours", 0) or 0),
     )
 
     # Stamp last_tested
@@ -109,6 +110,8 @@ async def update_connection(
     for field in ("name", "base_url", "enabled", "show_in_stats", "app_type"):
         if field in data:
             update_kwargs[field] = data[field]
+    if "sync_interval_hours" in data:
+        update_kwargs["sync_interval_hours"] = int(data["sync_interval_hours"] or 0)
 
     # Only re-encrypt if a new key was actually supplied
     new_key = data.get("api_key", "").strip()

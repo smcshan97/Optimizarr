@@ -799,3 +799,52 @@ class TestHealthHelpers:
         eta, unknown = queue_routes.compute_pending_eta()
         assert eta == 3600   # 7200s of video at 2× realtime
         assert unknown == 1
+
+
+# ---------------------------------------------------------------------------
+# Auto-sync interval (Patch 37)
+# ---------------------------------------------------------------------------
+
+class TestAutoSyncInterval:
+    def test_sync_due_logic(self):
+        """_sync_due fires only for enabled connections past their interval."""
+        from app.scheduler import _sync_due
+        from datetime import datetime, timedelta
+        now = datetime(2026, 6, 12, 12, 0, 0)
+
+        # Off (interval 0) — never due
+        assert _sync_due({'enabled': True, 'sync_interval_hours': 0,
+                          'last_synced': None}, now) is False
+        # Disabled connection — never due even with an interval
+        assert _sync_due({'enabled': False, 'sync_interval_hours': 6,
+                          'last_synced': None}, now) is False
+        # Enabled + interval + never synced — due now
+        assert _sync_due({'enabled': True, 'sync_interval_hours': 6,
+                          'last_synced': None}, now) is True
+        # Synced 7h ago, 6h interval — due
+        old = (now - timedelta(hours=7)).strftime('%Y-%m-%d %H:%M:%S')
+        assert _sync_due({'enabled': True, 'sync_interval_hours': 6,
+                          'last_synced': old}, now) is True
+        # Synced 2h ago, 6h interval — NOT due
+        recent = (now - timedelta(hours=2)).strftime('%Y-%m-%d %H:%M:%S')
+        assert _sync_due({'enabled': True, 'sync_interval_hours': 6,
+                          'last_synced': recent}, now) is False
+        # Garbage timestamp — treated as due (fail-safe)
+        assert _sync_due({'enabled': True, 'sync_interval_hours': 6,
+                          'last_synced': 'not-a-date'}, now) is True
+
+    def test_connection_persists_sync_interval(self, fresh_db):
+        """Migration + CRUD round-trip the sync_interval_hours column."""
+        cid = fresh_db.create_external_connection(
+            name="Radarr", app_type="radarr", base_url="http://x:7878",
+            api_key_encrypted="enc", sync_interval_hours=12,
+        )
+        assert fresh_db.get_external_connection(cid)['sync_interval_hours'] == 12
+        fresh_db.update_external_connection(cid, sync_interval_hours=24)
+        assert fresh_db.get_external_connection(cid)['sync_interval_hours'] == 24
+        # Default when unspecified is 0 (off)
+        cid2 = fresh_db.create_external_connection(
+            name="Sonarr", app_type="sonarr", base_url="http://y:8989",
+            api_key_encrypted="enc",
+        )
+        assert fresh_db.get_external_connection(cid2)['sync_interval_hours'] == 0

@@ -3239,6 +3239,9 @@ function renderConnections(connections) {
         const syncedAgo = c.last_synced
             ? `Last sync: ${_timeAgo(c.last_synced)}`
             : 'Never synced';
+        const autoSync = (c.sync_interval_hours || 0) > 0
+            ? `&nbsp;·&nbsp; <span style="color:var(--accent)" title="Library auto-syncs on this interval">⟳ Auto: ${c.sync_interval_hours}h</span>`
+            : '';
 
         return `
         <div class="bg-gray-750 border border-gray-700 rounded-lg px-5 py-4 flex flex-col md:flex-row md:items-center gap-4"
@@ -3256,7 +3259,7 @@ function renderConnections(connections) {
                 <p class="text-xs text-gray-500 mt-0.5">
                     Key: <code class="text-gray-400">${_esc(c.api_key_masked)}</code>
                     &nbsp;·&nbsp; ${testedAgo}
-                    &nbsp;·&nbsp; ${syncedAgo}
+                    &nbsp;·&nbsp; ${syncedAgo}${autoSync}
                 </p>
             </div>
 
@@ -3290,6 +3293,7 @@ function showAddConnectionModal() {
     document.getElementById('connectionUrl').value = '';
     document.getElementById('connectionApiKey').value = '';
     document.getElementById('connectionShowInStats').checked = true;
+    document.getElementById('connectionSyncInterval').value = '0';
     document.getElementById('connectionScanRoot').value = '';
     _hideConnectionTestResult();
     _populateConnectionScanRootDropdown();
@@ -3311,6 +3315,7 @@ function editConnection(id) {
     document.getElementById('connectionApiKey').value = '';   // never pre-fill
     document.getElementById('connectionApiKey').placeholder = `Key on file: ${c.api_key_masked} — leave blank to keep`;
     document.getElementById('connectionShowInStats').checked = !!c.show_in_stats;
+    document.getElementById('connectionSyncInterval').value = String(c.sync_interval_hours || 0);
     _hideConnectionTestResult();
     _populateConnectionScanRootDropdown(c.linked_scan_root_id);
     handleConnectionTypeChange();   // update URL hints / privacy note for this type
@@ -3426,6 +3431,7 @@ async function saveConnection() {
     }
 
     const body = { app_type: appType, name, base_url: url, show_in_stats: stats };
+    body.sync_interval_hours = parseInt(document.getElementById('connectionSyncInterval').value) || 0;
     if (apiKey) body.api_key = apiKey;
 
     let result;
