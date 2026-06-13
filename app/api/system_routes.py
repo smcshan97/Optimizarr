@@ -739,63 +739,12 @@ async def get_stats_dashboard(
     return db.get_stats_dashboard(days=days)
 
 
-@router.get("/watches")
-async def list_folder_watches(current_user: dict = Depends(get_current_user)):
-    """Get all folder watches."""
-    return db.get_folder_watches()
-
-
-@router.post("/watches")
-async def create_folder_watch(
-    watch: dict,
-    current_user: dict = Depends(get_current_admin_user)
-):
-    """Create a new folder watch (admin only)."""
-    required = ['path', 'profile_id']
-    for field in required:
-        if field not in watch:
-            raise HTTPException(status_code=400, detail=f"Missing required field: {field}")
-    
-    # Verify path exists
-    if not Path(watch['path']).exists():
-        raise HTTPException(status_code=400, detail=f"Path does not exist: {watch['path']}")
-    
-    try:
-        watch_id = db.create_folder_watch(
-            path=watch['path'],
-            profile_id=watch['profile_id'],
-            enabled=watch.get('enabled', True),
-            recursive=watch.get('recursive', True),
-            auto_queue=watch.get('auto_queue', True),
-            extensions=watch.get('extensions', '.mkv,.mp4,.avi,.mov,.wmv,.flv,.webm,.m4v,.ts,.mpg,.mpeg')
-        )
-        return db.get_folder_watch(watch_id)
-    except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Failed to create watch: {str(e)}")
-
-
-@router.put("/watches/{watch_id}")
-async def update_folder_watch(
-    watch_id: int, watch: dict,
-    current_user: dict = Depends(get_current_admin_user)
-):
-    """Update a folder watch (admin only)."""
-    success = db.update_folder_watch(watch_id, **watch)
-    if not success:
-        raise HTTPException(status_code=404, detail="Watch not found")
-    return db.get_folder_watch(watch_id)
-
-
-@router.delete("/watches/{watch_id}")
-async def delete_folder_watch(
-    watch_id: int,
-    current_user: dict = Depends(get_current_admin_user)
-):
-    """Delete a folder watch (admin only)."""
-    success = db.delete_folder_watch(watch_id)
-    if not success:
-        raise HTTPException(status_code=404, detail="Watch not found")
-    return MessageResponse(message="Folder watch deleted")
+# NOTE: folder watches are managed exclusively via the per-library eye toggle
+# (POST /scan-roots/{id}/watch, Patch 28). The old standalone CRUD routes
+# (GET/POST/PUT/DELETE /watches) were removed in Patch 40 — POST /watches in
+# particular could create orphan watches with no scan_root_id, the exact
+# inconsistency the eye toggle eliminated. Only the read-only status and the
+# manual-check trigger remain below.
 
 
 @router.get("/watches/status")
