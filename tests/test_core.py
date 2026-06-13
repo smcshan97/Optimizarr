@@ -948,3 +948,50 @@ class TestConfigExportImport:
         with pytest.raises(HTTPException) as ei:
             asyncio.run(system_routes.import_config_json({"foo": "bar"}, current_user={}))
         assert ei.value.status_code == 400
+
+
+# ---------------------------------------------------------------------------
+# Header-stats audit: SQL counts + corruption tolerance (frozen-UI fix)
+# ---------------------------------------------------------------------------
+
+class TestStatsAndResilience:
+    def test_collect_stats_counts_in_sql(self, fresh_db, monkeypatch):
+        """_collect_stats returns status counts + history savings."""
+        from app.api import queue_routes
+        monkeypatch.setattr(queue_routes, 'db', fresh_db)
+
+        fresh_db.add_to_queue(file_path="/x/a.mkv", profile_id=1, status='pending')
+        fresh_db.add_to_queue(file_path="/x/b.mkv", profile_id=1, status='pending')
+        fresh_db.add_to_queue(file_path="/x/c.mkv", profile_id=1, status='processing')
+        fresh_db.add_to_queue(file_path="/x/d.mkv", profile_id=1, status='completed')
+        fresh_db.add_history(file_path="/x/d.mkv", savings_bytes=1_000_000_000)
+
+        s = queue_routes._collect_stats()
+        assert s['queue_pending'] == 2
+        assert s['queue_processing'] == 1
+        assert s['queue_completed'] == 1
+        assert s['total_files_processed'] == 1
+        assert s['total_space_saved_bytes'] == 1_000_000_000
+        assert s['total_space_saved_gb'] == round(1_000_000_000 / (1024**3), 2)
+
+    def test_corrupt_specs_does_not_crash_queue_read(self, fresh_db):
+        """A malformed current_specs cell must not break the whole listing —
+        the row is returned with specs=None instead of raising."""
+        good = fresh_db.add_to_queue(file_path="/x/good.mkv", profile_id=1,
+                                     current_specs={'codec': 'h264'})
+        bad = fresh_db.add_to_queue(file_path="/x/bad.mkv", profile_id=1)
+        # Corrupt the JSON cell directly
+        with fresh_db.get_connection() as conn:
+            conn.execute("UPDATE queue SET current_specs = ? WHERE id = ?",
+                         ('{not valid json', bad))
+
+        items = fresh_db.get_queue_items()          # must not raise
+        assert len(items) == 2
+        by_id = {i['id']: i for i in items}
+        assert by_id[good]['current_specs'] == {'codec': 'h264'}
+        assert by_id[bad]['current_specs'] is None  # tolerated, not fatal
+
+        # Single-item and paginated reads tolerate it too
+        assert fresh_db.get_queue_item(bad)['current_specs'] is None
+        env = fresh_db.get_queue_items_paginated(page=1, page_size=50)
+        assert env['total'] == 2

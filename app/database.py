@@ -12,6 +12,20 @@ from contextlib import contextmanager
 from app.config import settings
 
 
+def _safe_json(raw, default=None):
+    """Parse a JSON column value, returning ``default`` on bad/empty data.
+
+    A single corrupt current_specs/target_specs cell must not crash a whole
+    queue read — that would freeze every polled UI that lists the queue.
+    """
+    if not raw:
+        return default
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        return default
+
+
 class Database:
     """SQLite database manager for Optimizarr."""
     
@@ -765,11 +779,9 @@ class Database:
             items = []
             for row in cursor.fetchall():
                 item = dict(row)
-                # Parse JSON fields
-                if item.get('current_specs'):
-                    item['current_specs'] = json.loads(item['current_specs'])
-                if item.get('target_specs'):
-                    item['target_specs'] = json.loads(item['target_specs'])
+                # Parse JSON fields (corruption-tolerant — see _safe_json)
+                item['current_specs'] = _safe_json(item.get('current_specs'))
+                item['target_specs'] = _safe_json(item.get('target_specs'))
                 items.append(item)
             return items
 
@@ -849,10 +861,8 @@ class Database:
             items = []
             for row in cursor.fetchall():
                 item = dict(row)
-                if item.get('current_specs'):
-                    item['current_specs'] = json.loads(item['current_specs'])
-                if item.get('target_specs'):
-                    item['target_specs'] = json.loads(item['target_specs'])
+                item['current_specs'] = _safe_json(item.get('current_specs'))
+                item['target_specs'] = _safe_json(item.get('target_specs'))
                 items.append(item)
 
             total_pages = max(1, -(-total // page_size))  # ceil division
@@ -875,10 +885,8 @@ class Database:
             if not row:
                 return None
             item = dict(row)
-            if item.get('current_specs'):
-                item['current_specs'] = json.loads(item['current_specs'])
-            if item.get('target_specs'):
-                item['target_specs'] = json.loads(item['target_specs'])
+            item['current_specs'] = _safe_json(item.get('current_specs'))
+            item['target_specs'] = _safe_json(item.get('target_specs'))
             return item
     
     def update_queue_item(self, item_id: int, **kwargs):

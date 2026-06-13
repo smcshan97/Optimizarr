@@ -79,18 +79,24 @@ async def list_queue(
     returns a flat list (backward compat).
     """
     if page is not None:
-        envelope = db.get_queue_items_paginated(
-            status=status,
-            search=search,
-            sort_field=sort or 'priority',
-            sort_dir=dir or 'asc',
-            page=page,
-            page_size=page_size or 50,
-        )
-        _attach_eta(envelope)
-        return envelope
+        # DB work in a thread (Patch 23 pattern): the paginated query + ETA
+        # pass acquire the global write-lock and parse JSON for the page;
+        # running them here would block the event loop while the encoder
+        # holds the lock.
+        def _build():
+            env = db.get_queue_items_paginated(
+                status=status,
+                search=search,
+                sort_field=sort or 'priority',
+                sort_dir=dir or 'asc',
+                page=page,
+                page_size=page_size or 50,
+            )
+            _attach_eta(env)
+            return env
+        return await asyncio.to_thread(_build)
     # Backward compatible — flat list for internal callers
-    items = db.get_queue_items(status=status)
+    items = await asyncio.to_thread(db.get_queue_items, status)
     return items
 
 
@@ -258,39 +264,43 @@ async def stop_encoding(current_user: dict = Depends(get_current_user)):
 
 
 # Statistics Endpoints
-@router.get("/stats", response_model=StatsResponse)
-async def get_statistics(current_user: dict = Depends(get_current_user)):
-    """Get system statistics."""
-    queue_items = db.get_queue_items()
-    
-    # Count by status
-    pending = len([i for i in queue_items if i['status'] == 'pending'])
-    processing = len([i for i in queue_items if i['status'] == 'processing'])
-    completed = len([i for i in queue_items if i['status'] == 'completed'])
-    failed = len([i for i in queue_items if i['status'] == 'failed'])
-    
-    # Get history stats
+def _collect_stats() -> dict:
+    """Aggregate header stats entirely in SQL (no per-row Python work).
+
+    The old version loaded ALL queue rows into Python (5k+, with per-row
+    JSON parsing) just to count statuses — ~140ms holding the global DB
+    write-lock. Two aggregate queries instead, ~5ms.
+    """
     with db.get_connection() as conn:
         cursor = conn.cursor()
-        cursor.execute("""
-            SELECT 
-                COUNT(*) as total_files,
-                COALESCE(SUM(savings_bytes), 0) as total_saved
-            FROM history
-        """)
-        row = cursor.fetchone()
-        total_files = row[0] if row else 0
-        total_saved = row[1] if row else 0
-    
-    return StatsResponse(
-        total_files_processed=total_files,
-        total_space_saved_bytes=total_saved,
-        total_space_saved_gb=round(total_saved / (1024**3), 2),
-        queue_pending=pending,
-        queue_processing=processing,
-        queue_completed=completed,
-        queue_failed=failed
-    )
+        cursor.execute("SELECT status, COUNT(*) FROM queue GROUP BY status")
+        counts = {row[0]: row[1] for row in cursor.fetchall()}
+        cursor.execute(
+            "SELECT COUNT(*), COALESCE(SUM(savings_bytes), 0) FROM history"
+        )
+        hist = cursor.fetchone()
+    total_files = hist[0] if hist else 0
+    total_saved = hist[1] if hist else 0
+    return {
+        "total_files_processed": total_files,
+        "total_space_saved_bytes": total_saved,
+        "total_space_saved_gb": round(total_saved / (1024**3), 2),
+        "queue_pending": counts.get('pending', 0),
+        "queue_processing": counts.get('processing', 0),
+        "queue_completed": counts.get('completed', 0),
+        "queue_failed": counts.get('failed', 0),
+    }
+
+
+@router.get("/stats", response_model=StatsResponse)
+async def get_statistics(current_user: dict = Depends(get_current_user)):
+    """Get system statistics for the always-visible header (polled every 5s).
+
+    Runs the DB work in a thread (like /resources/current, Patch 23) so the
+    blocking write-lock acquire never stalls the event loop while the
+    encoder holds the lock — that loop-stall was the frozen-header cause.
+    """
+    return StatsResponse(**await asyncio.to_thread(_collect_stats))
 
 
 @router.post("/stats/clear-names", response_model=MessageResponse)
