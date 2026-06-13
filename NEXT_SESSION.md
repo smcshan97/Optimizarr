@@ -24,8 +24,11 @@
 | `b990b7b` | **P37** Auto-sync interval — `sync_interval_hours` col, 15-min `auto_sync_check` tick, `_sync_due()`, modal dropdown + card badge |
 | `09aa6d3` | **P38** JSON config export/import — `GET /backup/json` (no keys), `POST /restore/json` (non-destructive merge by name/path) |
 | `2d3ef80` | **Frozen-header fix** — `/stats` rewritten as SQL aggregates (138ms→3ms) + moved off the event loop; `/queue` off-loop; corruption-tolerant queue reads (`_safe_json`) |
+| `1850ce8` | **Lock-free reads** — `get_connection(write=)` / `get_read_connection()`; 21 read methods + hot raw read sites no longer take the write-lock (WAL allows concurrent readers). Writers unchanged. |
+| `5848d6b` | **Retry backoff** — `queue.retry_after` + exponential delay (60s→30min cap); `get_next_pending_item()` (eligible-only, single row); manual retry/recheck clear the gate |
+| `966355f` | Removed orphaned `/watches` CRUD routes (managed via eye toggle since P28); kept status + manual-check diagnostics |
 
-**Tests:** 68 in `tests/test_core.py` — all must pass before any commit.
+**Tests:** 74 in `tests/test_core.py` — all must pass before any commit.
 
 **Operational notes:**
 - Existing queue items scanned before duration tracking have
@@ -38,10 +41,12 @@
 
 ---
 
-## 🔎 Audit finding — global DB write-lock defeats WAL (top backlog item)
+## 🔎 Audit finding — global DB write-lock defeats WAL (✅ RESOLVED in `1850ce8`)
 
-Root cause of the historical "frozen Space Saved header" (fixed for the hot
-paths in `2d3ef80`, but the underlying design remains):
+Root cause of the historical "frozen Space Saved header". The hot paths were
+patched in `2d3ef80`; the underlying lock model was fixed in `1850ce8` —
+reads no longer take the write-lock (see "Lock-free reads" below). Kept here
+for context.
 
 `Database.get_connection()` wraps **every** DB access — reads included — in a
 single process-global, non-reentrant `threading.Lock` (`_write_lock`), held
@@ -55,32 +60,30 @@ thread via `asyncio.to_thread` — `/resources/current` (P23), `/stats`,
 `/queue`, the SSE stream, `/resources/thresholds`, `/resources/reinit-gpu`.
 Encoder progress writes are throttled to 2s (P33).
 
-**Proper fix (do this next, carefully):** SQLite WAL already allows concurrent
-readers + one writer, so reads need **no** lock at all. Options:
-1. Drop `_write_lock` from the read path; keep it (or rely on `busy_timeout`)
-   only for writes. Biggest win, matches WAL's design.
-2. Or convert hot handlers to sync `def` so FastAPI threadpools them instead of
-   running on the loop.
-Either removes the architectural footgun rather than papering over each
-endpoint. ~90 async handlers still call blocking `db.*` on the loop, but the
-rest are user-triggered one-offs (create/update/delete) that complete in a few
-ms — low impact, fix opportunistically.
+**Fix shipped (`1850ce8`):** `get_connection(write=True)` now skips the lock
+for reads; `get_read_connection()` is the read wrapper. All 21 read-only DB
+methods + the hot raw read sites (`_collect_stats`, `/health` counts, resource
+settings, `_get_enabled_webhooks`) are lock-free. `write=True` stays the
+default so any untouched/future call site is serialized-safe by default —
+a missed read is unoptimized, never unsafe. Writers are unchanged. Remaining
+~90 async handlers still call blocking `db.*` on the loop, but they're now
+lock-free reads or fast user-triggered writes — low impact; convert to sync
+`def`/`to_thread` opportunistically if a slow one shows up in the devlog.
 
 ---
 
 ## Roadmap — 🟢 Backlog (unsequenced)
 
-- **DB locking model** (see audit finding above) — highest-value structural fix.
-- **Retry backoff:** auto-retries fire immediately (re-queued item can be
-  picked again within ~1s); consider a delay or send-to-back.
-- **Watches API pruning:** standalone `/watches` CRUD routes still exist but
-  have no UI (eye toggle replaced it); `/watches/status` still used by /health.
+Done this arc: DB locking model (`1850ce8`), retry backoff (`5848d6b`),
+watches API pruning (`966355f`). Remaining:
+
 - **Auto-switch fastest/slowest** by Windows Active Hours
-  (`/schedule/windows-active-hours`).
+  (`/schedule/windows-active-hours`) — feature; pick the slowest-first
+  strategy for overnight rest-hour windows, fastest-first otherwise.
 - **Two-pass audit:** `--multi-pass` is passed but SVT-AV1 vs x265 handle it
-  differently — verify with real test encodes on each encoder.
+  differently — needs real test encodes on each encoder (owner's hardware).
 - **Stash size field:** `external_connections` uses `f.get("size")` — confirm
-  against Stash v0.24+ GraphQL VideoFile schema.
+  against Stash v0.24+ GraphQL VideoFile schema (external dependency).
 - **Webhook replay timing:** startup replay is synchronous before serving; a
   large stranded backlog would delay startup a few seconds (acceptable today).
 - **Multi-instance support:** docs-only (separate data dirs + ports).
@@ -97,8 +100,10 @@ app/
                              devlog middleware; lifespan (stale-processing recovery,
                              webhook replay, encoder kill on shutdown)
   config.py                — Pydantic settings + auto SECRET_KEY (data/.secret_key)
-  database.py              — SQLite WAL; global _write_lock (see audit finding);
-                             _safe_json corruption-tolerant parsing; migrations;
+  database.py              — SQLite WAL; get_connection(write=)/get_read_connection
+                             (reads lock-free, writes serialized); _safe_json
+                             corruption-tolerant parsing; migrations;
+                             get_next_pending_item/count_pending (backoff-aware);
                              paginated queue query; get_encode_speed_stats;
                              get_pending_duration_by_codec; get/set/get_all_settings;
                              reset_stale_processing; webhook_events CRUD
@@ -141,7 +146,7 @@ web/
   static/css/theme.css     — Black Glass (~695 lines)
   static/css/utilities.css — Tailwind-replacement utilities (xl:grid-cols-7)
 tests/
-  test_core.py             — 68 pytest tests
+  test_core.py             — 74 pytest tests
 ```
 
 ---
@@ -211,7 +216,7 @@ leaves evidence there instead of only in the browser console.
 - Validate before committing:
   `python -c "import ast; ast.parse(open('FILE', encoding='utf-8').read())"`
   per Python file, `node --check web/static/js/app.js`.
-- Run the test suite: `python -m pytest tests/ -q` (all 68 must pass). NOTE: a
+- Run the test suite: `python -m pytest tests/ -q` (all 74 must pass). NOTE: a
   running encoder pegs the CPU and can stretch the suite from ~30s to ~2.5min —
   that's the machine, not a hang.
 - Prefer verifying against a COPY of the production DB (`data/optimizarr.db`)
