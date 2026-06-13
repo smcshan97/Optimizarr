@@ -306,13 +306,38 @@ async def clear_logs(
 # ============================================================
 # ENHANCED HEALTH CHECK
 # ============================================================
+# Tool version strings, probed once per process — the binaries don't change
+# while we're running, and /health is no-auth so it must stay cheap to poll.
+_tool_versions: dict = {}
+
+
+def _get_tool_version(cmd: list, cache_key: str) -> Optional[str]:
+    """First line of a tool's version output, cached. None on any failure."""
+    if cache_key in _tool_versions:
+        return _tool_versions[cache_key]
+    version = None
+    try:
+        import subprocess
+        r = subprocess.run(
+            cmd, capture_output=True, text=True,
+            encoding='utf-8', errors='replace', timeout=5
+        )
+        lines = ((r.stdout or '') + (r.stderr or '')).strip().splitlines()
+        if lines:
+            version = lines[0].strip()
+    except Exception:
+        version = None
+    _tool_versions[cache_key] = version
+    return version
+
+
 @router.get("/health")
 async def health_check():
     """Comprehensive health check — no auth required."""
     import shutil
     import time
     from pathlib import Path
-    
+
     from app import __version__
     health = {
         "status": "ok",
@@ -320,12 +345,13 @@ async def health_check():
         "version": __version__,
         "uptime_info": "running",
     }
-    
+
     # HandBrakeCLI check
     hb_path = shutil.which("HandBrakeCLI")
     health["handbrake"] = {
         "installed": hb_path is not None,
-        "path": hb_path or "not found"
+        "path": hb_path or "not found",
+        "version": _get_tool_version([hb_path, "--version"], "handbrake") if hb_path else None,
     }
     
     # Database check
@@ -378,8 +404,16 @@ async def health_check():
     # ffprobe / ffmpeg check
     ffprobe_path = shutil.which("ffprobe")
     ffmpeg_path  = shutil.which("ffmpeg")
-    health["ffprobe"] = {"installed": ffprobe_path is not None, "path": ffprobe_path or "not found"}
-    health["ffmpeg"]  = {"installed": ffmpeg_path  is not None, "path": ffmpeg_path  or "not found"}
+    health["ffprobe"] = {
+        "installed": ffprobe_path is not None,
+        "path": ffprobe_path or "not found",
+        "version": _get_tool_version([ffprobe_path, "-version"], "ffprobe") if ffprobe_path else None,
+    }
+    health["ffmpeg"] = {
+        "installed": ffmpeg_path is not None,
+        "path": ffmpeg_path or "not found",
+        "version": _get_tool_version([ffmpeg_path, "-version"], "ffmpeg") if ffmpeg_path else None,
+    }
     if not ffprobe_path or not ffmpeg_path:
         health["status"] = "degraded"
 
@@ -437,15 +471,39 @@ async def health_check():
     except Exception:
         health["scheduler"] = {"enabled": False, "running": False}
 
-    # Queue summary
+    # External connections — status only (no URLs/keys: endpoint is no-auth)
     try:
-        q_items = db.get_queue_items()
+        health["connections"] = [{
+            "name": c.get("name"),
+            "app_type": c.get("app_type"),
+            "enabled": bool(c.get("enabled")),
+            "last_tested": c.get("last_tested"),
+            "last_synced": c.get("last_synced"),
+        } for c in db.get_external_connections()]
+    except Exception:
+        health["connections"] = []
+
+    # Queue summary — counted in SQL (the old version loaded every row into
+    # Python; this endpoint is no-auth and must stay cheap)
+    try:
+        with db.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT status, COUNT(*) FROM queue GROUP BY status")
+            counts = {row[0]: row[1] for row in cursor.fetchall()}
+        # Estimated time to clear the pending backlog (Patch 32 ETA math).
+        # Called OUTSIDE the connection block — get_connection's lock is
+        # not reentrant.
+        from app.api.queue_routes import compute_pending_eta
+        eta_seconds, eta_unknown = compute_pending_eta()
         health["queue"] = {
-            "total": len(q_items),
-            "pending":    sum(1 for i in q_items if i["status"] == "pending"),
-            "processing": sum(1 for i in q_items if i["status"] == "processing"),
-            "completed":  sum(1 for i in q_items if i["status"] == "completed"),
-            "failed":     sum(1 for i in q_items if i["status"] == "failed"),
+            "total": sum(counts.values()),
+            "pending":    counts.get("pending", 0),
+            "processing": counts.get("processing", 0),
+            "completed":  counts.get("completed", 0),
+            "failed":     counts.get("failed", 0),
+            "permission_error": counts.get("permission_error", 0),
+            "estimated_hours_remaining": round(eta_seconds / 3600, 1),
+            "eta_unknown_items": eta_unknown,
         }
     except Exception:
         pass

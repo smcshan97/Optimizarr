@@ -125,6 +125,22 @@ def _attach_eta(envelope: dict):
             est *= max(0.0, 1.0 - (item.get('progress') or 0) / 100.0)
         item['eta_seconds'] = round(est)
 
+    total_eta, unknown = compute_pending_eta(speed_stats)
+    envelope['pending_eta_seconds'] = total_eta
+    envelope['pending_eta_unknown'] = unknown
+
+
+def compute_pending_eta(speed_stats: Optional[dict] = None) -> tuple:
+    """Total estimated encode seconds across ALL pending items.
+
+    Returns (eta_seconds, unknown_count) where unknown_count is the number
+    of pending items lacking duration data (excluded from the total).
+    Shared by the queue envelope and the /health endpoint.
+    """
+    from app.scanner import estimate_encode_seconds
+
+    if speed_stats is None:
+        speed_stats = db.get_encode_speed_stats()
     total_eta = 0.0
     unknown = 0
     for group in db.get_pending_duration_by_codec():
@@ -134,8 +150,7 @@ def _attach_eta(envelope: dict):
         )
         if est:
             total_eta += est
-    envelope['pending_eta_seconds'] = round(total_eta)
-    envelope['pending_eta_unknown'] = unknown
+    return round(total_eta), unknown
 
 
 @router.post("/queue/scan", response_model=MessageResponse)

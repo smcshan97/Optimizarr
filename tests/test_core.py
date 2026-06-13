@@ -758,3 +758,44 @@ class TestPermissionRecheck:
         assert refreshed['status'] == 'permission_error'
         assert refreshed['permission_status'] == 'not_found'
         assert 'does not exist' in (refreshed['permission_message'] or '')
+
+
+# ---------------------------------------------------------------------------
+# Health page completion (Patch 36)
+# ---------------------------------------------------------------------------
+
+class TestHealthHelpers:
+    def test_tool_version_probe_and_cache(self):
+        """_get_tool_version returns the first version line and caches it."""
+        import sys
+        from app.api import system_routes
+        system_routes._tool_versions.pop('_test_py', None)
+
+        v = system_routes._get_tool_version([sys.executable, '--version'], '_test_py')
+        assert v and v.startswith('Python 3')
+        # Cached: a bogus command with the same key must return the cached value
+        v2 = system_routes._get_tool_version(['definitely-not-a-real-binary'], '_test_py')
+        assert v2 == v
+
+    def test_tool_version_failure_returns_none(self):
+        from app.api import system_routes
+        system_routes._tool_versions.pop('_test_missing', None)
+        v = system_routes._get_tool_version(['definitely-not-a-real-binary'], '_test_missing')
+        assert v is None
+
+    def test_compute_pending_eta(self, fresh_db, monkeypatch):
+        """Shared ETA helper totals pending durations × codec speed ratios."""
+        from app.api import queue_routes
+        monkeypatch.setattr(queue_routes, 'db', fresh_db)
+
+        # h265 history: 2× realtime (ratio 0.5)
+        fresh_db.add_history(file_path="/x/h.mkv", encoding_time_seconds=1800,
+                             duration_seconds=3600, codec='h265')
+        fresh_db.add_to_queue(file_path="/x/a.mkv", profile_id=1, duration_seconds=7200,
+                              target_specs={'codec': 'h265'})
+        fresh_db.add_to_queue(file_path="/x/b.mkv", profile_id=1, duration_seconds=0,
+                              target_specs={'codec': 'h265'})  # unknown
+
+        eta, unknown = queue_routes.compute_pending_eta()
+        assert eta == 3600   # 7200s of video at 2× realtime
+        assert unknown == 1
