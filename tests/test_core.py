@@ -848,3 +848,103 @@ class TestAutoSyncInterval:
             api_key_encrypted="enc",
         )
         assert fresh_db.get_external_connection(cid2)['sync_interval_hours'] == 0
+
+
+# ---------------------------------------------------------------------------
+# JSON config export / import (Patch 38)
+# ---------------------------------------------------------------------------
+
+class TestConfigExportImport:
+    def _make_profile(self, db, name, is_default=False):
+        return db.create_profile(
+            name=name, resolution="", framerate=None, codec="av1",
+            encoder="svt_av1", quality=28, audio_codec="passthrough",
+            container="mkv", audio_handling="preserve_all",
+            subtitle_handling="none", chapter_markers=True,
+            enable_filters=False, hw_accel_enabled=False, preset="8",
+            two_pass=False, custom_args=None, is_default=is_default,
+        )
+
+    def test_export_shape(self, fresh_db, monkeypatch):
+        """Export carries profiles/scan_roots/settings; scan roots use
+        profile NAME; connections carry no api key."""
+        import asyncio
+        from app.api import system_routes
+        monkeypatch.setattr(system_routes, 'db', fresh_db)
+
+        pid = self._make_profile(fresh_db, "Movies AV1", is_default=True)
+        fresh_db.create_scan_root(path="/media/movies", profile_id=pid,
+                                  library_type="movie")
+        fresh_db.set_setting('max_retries', '5')
+        fresh_db.create_external_connection(
+            name="R", app_type="radarr", base_url="http://x:7878",
+            api_key_encrypted="SECRET-ENCRYPTED", sync_interval_hours=6,
+        )
+
+        cfg = asyncio.run(system_routes.export_config_json(current_user={}))
+        assert cfg["optimizarr_config"] is True
+        assert cfg["profiles"][0]["name"] == "Movies AV1"
+        assert "id" not in cfg["profiles"][0]
+        assert cfg["scan_roots"][0]["profile_name"] == "Movies AV1"
+        assert "external_connection_id" not in cfg["scan_roots"][0]
+        assert cfg["settings"]["max_retries"] == "5"
+        # Connections: metadata only, NO key field of any kind
+        conn = cfg["connections"][0]
+        assert conn["name"] == "R" and conn["sync_interval_hours"] == 6
+        assert not any("key" in k.lower() for k in conn)
+        blob = json.dumps(cfg)
+        assert "SECRET-ENCRYPTED" not in blob
+
+    def test_import_merges_non_destructively(self, fresh_db, monkeypatch):
+        """Import adds new items, skips existing by name/path, applies
+        settings, and never imports connections."""
+        import asyncio
+        from app.api import system_routes
+        monkeypatch.setattr(system_routes, 'db', fresh_db)
+
+        # Pre-existing default profile that must NOT be displaced
+        self._make_profile(fresh_db, "Existing", is_default=True)
+        fresh_db.create_scan_root(path="/old", profile_id=1, library_type="custom")
+
+        config = {
+            "optimizarr_config": True,
+            "profiles": [
+                {"name": "Existing", "codec": "h265", "quality": 24},   # dup → skip
+                {"name": "New HEVC", "codec": "h265", "encoder": "x265",
+                 "quality": 22, "audio_codec": "aac",
+                 "is_default": True},                          # added, but flag dropped
+            ],
+            "scan_roots": [
+                {"path": "/old", "profile_name": "Existing"},  # dup → skip
+                {"path": "/new", "profile_name": "New HEVC", "library_type": "tv_show"},
+            ],
+            "settings": {"max_retries": "9"},
+            "connections": [{"name": "R", "app_type": "radarr"}],
+        }
+        res = asyncio.run(system_routes.import_config_json(config, current_user={}))
+        s = res["summary"]
+        assert s["profiles_added"] == 1 and s["profiles_skipped"] == 1
+        assert s["scan_roots_added"] == 1 and s["scan_roots_skipped"] == 1
+        assert s["settings_applied"] == 1
+        assert s["connections_skipped"] == 1
+
+        # New profile exists but did NOT steal the default flag
+        names = {p["name"]: p for p in fresh_db.get_profiles()}
+        assert "New HEVC" in names
+        assert names["New HEVC"]["is_default"] == 0
+        assert names["Existing"]["is_default"] == 1
+        # New scan root resolved to the imported profile by name
+        roots = {r["path"]: r for r in fresh_db.get_scan_roots()}
+        assert roots["/new"]["profile_id"] == names["New HEVC"]["id"]
+        assert fresh_db.get_setting("max_retries") == "9"
+        # No connections were created
+        assert fresh_db.get_external_connections() == []
+
+    def test_import_rejects_foreign_json(self, fresh_db, monkeypatch):
+        import asyncio
+        from fastapi import HTTPException
+        from app.api import system_routes
+        monkeypatch.setattr(system_routes, 'db', fresh_db)
+        with pytest.raises(HTTPException) as ei:
+            asyncio.run(system_routes.import_config_json({"foo": "bar"}, current_user={}))
+        assert ei.value.status_code == 400

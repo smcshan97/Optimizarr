@@ -536,6 +536,7 @@ async def download_backup(current_user: dict = Depends(get_current_admin_user)):
     tmp.close()
     _shutil.copy2(str(db_path), tmp.name)
 
+    from datetime import datetime   # not imported at module level
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     filename = f"optimizarr_backup_{timestamp}.db"
     return FileResponse(
@@ -583,6 +584,146 @@ async def restore_backup_upload(
         raise HTTPException(status_code=500, detail=f"Restore failed: {e}")
 
     return {"message": "Database restored successfully. Please restart Optimizarr for changes to take effect.", "size_bytes": len(contents)}
+
+
+# Profile columns safe to round-trip through JSON config (excludes id).
+_PROFILE_EXPORT_FIELDS = [
+    "name", "resolution", "framerate", "codec", "encoder", "quality",
+    "audio_codec", "container", "audio_handling", "subtitle_handling",
+    "enable_filters", "chapter_markers", "hw_accel_enabled", "preset",
+    "two_pass", "custom_args", "is_default",
+    "upscale_enabled", "upscale_trigger_below", "upscale_target_height",
+    "upscale_model", "upscale_factor", "upscale_key",
+    "stereo_enabled", "stereo_mode", "stereo_format",
+    "stereo_divergence", "stereo_convergence", "stereo_depth_model",
+]
+# Scan-root columns. external_connection_id is intentionally omitted —
+# connection IDs are instance-specific and connections aren't imported.
+_SCANROOT_EXPORT_FIELDS = [
+    "library_type", "enabled", "recursive", "show_in_stats",
+    "upscale_enabled", "upscale_trigger_below", "upscale_target_height",
+    "upscale_model", "upscale_factor", "upscale_key",
+    "stereo_enabled", "stereo_mode", "stereo_format",
+    "stereo_divergence", "stereo_convergence", "stereo_depth_model",
+]
+
+
+@router.get("/backup/json")
+async def export_config_json(current_user: dict = Depends(get_current_admin_user)):
+    """Export profiles, scan roots, settings as human-readable JSON.
+
+    Unlike the raw .db backup this is portable across instances: scan roots
+    carry their profile by NAME (not instance-specific id), and connections
+    are listed for reference only WITHOUT api keys (keys are encrypted with
+    this instance's SECRET_KEY and aren't portable). Restore re-adds keys.
+    """
+    from datetime import datetime
+    from app import __version__
+
+    profiles = db.get_profiles()
+    profiles_by_id = {p["id"]: p for p in profiles}
+
+    export_profiles = [
+        {k: p.get(k) for k in _PROFILE_EXPORT_FIELDS} for p in profiles
+    ]
+
+    export_roots = []
+    for r in db.get_scan_roots():
+        entry = {k: r.get(k) for k in _SCANROOT_EXPORT_FIELDS}
+        entry["path"] = r["path"]
+        prof = profiles_by_id.get(r.get("profile_id"))
+        entry["profile_name"] = prof["name"] if prof else None
+        export_roots.append(entry)
+
+    # Connections: metadata only, no secrets. Informational on import.
+    export_connections = [{
+        "name": c.get("name"),
+        "app_type": c.get("app_type"),
+        "base_url": c.get("base_url"),
+        "enabled": bool(c.get("enabled")),
+        "sync_interval_hours": c.get("sync_interval_hours", 0),
+    } for c in db.get_external_connections()]
+
+    return {
+        "optimizarr_config": True,
+        "version": __version__,
+        "exported_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "profiles": export_profiles,
+        "scan_roots": export_roots,
+        "settings": db.get_all_settings(),
+        "connections": export_connections,
+    }
+
+
+@router.post("/restore/json")
+async def import_config_json(
+    config: dict,
+    current_user: dict = Depends(get_current_admin_user),
+):
+    """Merge a JSON config export into the current instance.
+
+    Non-destructive: profiles are skipped if the name already exists, scan
+    roots if the path exists; settings are upserted (overwrite by key).
+    Connections are NOT imported (api keys aren't portable) — re-add them
+    manually. Takes effect immediately; no restart needed.
+    """
+    if not config.get("optimizarr_config"):
+        raise HTTPException(
+            status_code=400,
+            detail="Not an Optimizarr config export (missing optimizarr_config flag)"
+        )
+
+    summary = {"profiles_added": 0, "profiles_skipped": 0,
+               "scan_roots_added": 0, "scan_roots_skipped": 0,
+               "settings_applied": 0, "connections_skipped": 0}
+
+    # ---- Profiles (skip by name) ----
+    existing_profile_names = {p["name"] for p in db.get_profiles()}
+    for p in config.get("profiles", []):
+        name = p.get("name")
+        if not name or name in existing_profile_names:
+            summary["profiles_skipped"] += 1
+            continue
+        fields = {k: p.get(k) for k in _PROFILE_EXPORT_FIELDS if k in p}
+        # Don't let an import silently steal the default flag
+        fields["is_default"] = False
+        db.create_profile(**fields)
+        existing_profile_names.add(name)
+        summary["profiles_added"] += 1
+
+    # ---- Scan roots (skip by path; resolve profile by name) ----
+    name_to_profile_id = {p["name"]: p["id"] for p in db.get_profiles()}
+    default_profile = next((p["id"] for p in db.get_profiles() if p.get("is_default")), None)
+    existing_paths = {r["path"] for r in db.get_scan_roots()}
+    for r in config.get("scan_roots", []):
+        path = r.get("path")
+        if not path or path in existing_paths:
+            summary["scan_roots_skipped"] += 1
+            continue
+        profile_id = name_to_profile_id.get(r.get("profile_name")) or default_profile
+        if not profile_id:
+            summary["scan_roots_skipped"] += 1
+            continue
+        fields = {k: r.get(k) for k in _SCANROOT_EXPORT_FIELDS if k in r}
+        db.create_scan_root(path=path, profile_id=profile_id, **fields)
+        existing_paths.add(path)
+        summary["scan_roots_added"] += 1
+
+    # ---- Settings (upsert by key) ----
+    for key, value in (config.get("settings") or {}).items():
+        db.set_setting(key, value)
+        summary["settings_applied"] += 1
+
+    # ---- Connections are not imported (keys aren't portable) ----
+    summary["connections_skipped"] = len(config.get("connections", []))
+
+    msg = (f"Imported {summary['profiles_added']} profile(s), "
+           f"{summary['scan_roots_added']} scan root(s), "
+           f"{summary['settings_applied']} setting(s).")
+    if summary["connections_skipped"]:
+        msg += (f" {summary['connections_skipped']} connection(s) in the file "
+                f"were NOT imported — re-add them with their API keys.")
+    return {"message": msg, "summary": summary}
 
 
 # ============================================================

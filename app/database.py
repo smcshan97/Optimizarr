@@ -942,6 +942,13 @@ class Database:
             row = cursor.fetchone()
             return row[0] if row else default
 
+    def get_all_settings(self) -> Dict:
+        """Return every setting as a {key: value} dict (for config export)."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT key, value FROM settings")
+            return {row[0]: row[1] for row in cursor.fetchall()}
+
     def set_setting(self, key: str, value: str):
         """Insert or update a single setting value."""
         with self.get_connection() as conn:

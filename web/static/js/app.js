@@ -2788,6 +2788,59 @@ async function restoreBackup(event) {
     event.target.value = '';
 }
 
+async function exportConfigJson() {
+    const result = await apiRequest('/backup/json');
+    if (!result) return;
+    const blob = new Blob([JSON.stringify(result, null, 2)], { type: 'application/json' });
+    const stamp = new Date().toISOString().slice(0, 10);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `optimizarr_config_${stamp}.json`;
+    document.body.appendChild(a); a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+    showMessage('Config exported', 'success');
+}
+
+async function importConfigJson(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const fileNameEl = document.getElementById('importConfigFileName');
+    const statusEl   = document.getElementById('importConfigStatus');
+    if (fileNameEl) fileNameEl.textContent = file.name;
+
+    let config;
+    try {
+        config = JSON.parse(await file.text());
+    } catch (e) {
+        if (statusEl) { statusEl.className = 'mt-3 text-xs text-red-400'; statusEl.classList.remove('hidden'); statusEl.textContent = '✗ Not valid JSON'; }
+        event.target.value = '';
+        return;
+    }
+
+    if (statusEl) { statusEl.className = 'mt-3 text-xs text-yellow-400'; statusEl.classList.remove('hidden'); statusEl.textContent = '⏳ Importing…'; }
+
+    const result = await apiRequest('/restore/json', {
+        method: 'POST',
+        body: JSON.stringify(config)
+    });
+
+    if (result && result.summary) {
+        if (statusEl) { statusEl.className = 'mt-3 text-xs text-green-400'; statusEl.textContent = '✓ ' + result.message; }
+        showMessage(result.message, 'success');
+        // Refresh whatever the import may have changed
+        loadProfiles();
+        loadScanRoots();
+        loadSettings();
+    } else if (statusEl) {
+        statusEl.className = 'mt-3 text-xs text-red-400';
+        statusEl.textContent = '✗ Import failed';
+    }
+
+    event.target.value = '';
+}
+
 async function applyQueuePriority() {
     const sortBy = document.getElementById('queueSortBy').value;
     const sortMap = {

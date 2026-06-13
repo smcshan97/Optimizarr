@@ -557,6 +557,29 @@
                         </div>
                         <div id="restoreStatus" class="mt-3 text-xs hidden"></div>
                     </div>
+
+                    <!-- Export Config JSON -->
+                    <div class="bg-gray-700 rounded-lg p-5">
+                        <h3 class="font-semibold mb-1">🧾 Export Config (JSON)</h3>
+                        <p class="text-xs text-gray-400 mb-4">Portable, human-readable export of profiles, scan roots, and settings. Connections are listed without API keys. Move config between instances.</p>
+                        <button onclick="exportConfigJson()" class="btn btn-primary btn-sm">
+                            Export Config
+                        </button>
+                    </div>
+
+                    <!-- Import Config JSON -->
+                    <div class="bg-gray-700 rounded-lg p-5">
+                        <h3 class="font-semibold mb-1">📋 Import Config (JSON)</h3>
+                        <p class="text-xs text-gray-400 mb-3">Merge a config export into this instance. <strong class="text-green-300">Non-destructive</strong> — skips profiles/scan roots that already exist; applies settings. No restart needed.</p>
+                        <div class="flex items-center gap-3">
+                            <label class="btn btn-secondary btn-sm cursor-pointer">
+                                Choose File
+                                <input type="file" accept=".json,application/json" onchange="importConfigJson(event)" class="hidden">
+                            </label>
+                            <span id="importConfigFileName" class="text-xs text-gray-400">No file chosen</span>
+                        </div>
+                        <div id="importConfigStatus" class="mt-3 text-xs hidden"></div>
+                    </div>
                 </div>
             </div>
         </div>
