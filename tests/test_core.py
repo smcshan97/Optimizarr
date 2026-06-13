@@ -995,3 +995,48 @@ class TestStatsAndResilience:
         assert fresh_db.get_queue_item(bad)['current_specs'] is None
         env = fresh_db.get_queue_items_paginated(page=1, page_size=50)
         assert env['total'] == 2
+
+    def test_reads_are_lock_free(self, fresh_db):
+        """A read must NOT block while a write holds the global lock.
+
+        WAL allows concurrent readers; serializing them behind _write_lock is
+        what let a busy encoder freeze the UI. With the old locked reads this
+        would deadlock (non-reentrant lock held by another party); now it
+        returns immediately.
+        """
+        import threading
+        fresh_db.add_to_queue(file_path="/x/a.mkv", profile_id=1)
+
+        result = {}
+        fresh_db._write_lock.acquire()   # simulate a write in progress
+        try:
+            def reader():
+                result['items'] = fresh_db.get_queue_items()
+                result['stats'] = fresh_db.get_queue_item(1)
+            t = threading.Thread(target=reader)
+            t.start()
+            t.join(timeout=5)
+            assert not t.is_alive(), "read blocked on the write lock (still serialized)"
+            assert len(result['items']) == 1
+        finally:
+            fresh_db._write_lock.release()
+
+    def test_writes_still_serialize(self, fresh_db):
+        """Writes keep taking the lock (default write=True)."""
+        # While the lock is held, a write must wait — prove the write path
+        # still acquires it (a non-blocking acquire by another holder fails).
+        assert fresh_db._write_lock.acquire(blocking=False) is True
+        try:
+            import threading
+            done = []
+            def writer():
+                fresh_db.set_setting('x', '1')   # write path → must block on lock
+                done.append(True)
+            t = threading.Thread(target=writer)
+            t.start()
+            t.join(timeout=1)
+            assert done == [], "write did not wait for the lock"
+        finally:
+            fresh_db._write_lock.release()
+        t.join(timeout=5)
+        assert fresh_db.get_setting('x') == '1'   # completed once lock freed

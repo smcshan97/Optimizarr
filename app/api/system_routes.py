@@ -55,7 +55,7 @@ async def check_resource_thresholds(
     nvidia-smi / psutil which can block.
     """
     # Load current settings
-    with db.get_connection() as conn:
+    with db.get_read_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT key, value FROM settings WHERE key LIKE 'resource_%'")
         settings = {row[0]: row[1] for row in cursor.fetchall()}
@@ -92,10 +92,10 @@ async def reinit_gpu(current_user: dict = Depends(get_current_user)):
 @router.get("/settings/resources")
 async def get_resource_settings(current_user: dict = Depends(get_current_user)):
     """Get resource management settings."""
-    with db.get_connection() as conn:
+    with db.get_read_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT key, value FROM settings 
+            SELECT key, value FROM settings
             WHERE key LIKE 'resource_%'
         """)
         settings = {row[0]: row[1] for row in cursor.fetchall()}
@@ -356,7 +356,7 @@ async def health_check():
     
     # Database check
     try:
-        with db.get_connection() as conn:
+        with db.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM profiles")
             profiles = cursor.fetchone()[0]
@@ -486,7 +486,7 @@ async def health_check():
     # Queue summary — counted in SQL (the old version loaded every row into
     # Python; this endpoint is no-auth and must stay cheap)
     try:
-        with db.get_connection() as conn:
+        with db.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT status, COUNT(*) FROM queue GROUP BY status")
             counts = {row[0]: row[1] for row in cursor.fetchall()}

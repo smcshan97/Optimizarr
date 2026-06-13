@@ -271,7 +271,7 @@ def _collect_stats() -> dict:
     JSON parsing) just to count statuses — ~140ms holding the global DB
     write-lock. Two aggregate queries instead, ~5ms.
     """
-    with db.get_connection() as conn:
+    with db.get_read_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT status, COUNT(*) FROM queue GROUP BY status")
         counts = {row[0]: row[1] for row in cursor.fetchall()}

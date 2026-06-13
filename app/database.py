@@ -46,21 +46,40 @@ class Database:
         self.initialize_database()
     
     @contextmanager
-    def get_connection(self):
-        """Context manager for database connections with thread-safe writes."""
+    def get_connection(self, write: bool = True):
+        """Context manager for a database connection.
+
+        WAL mode (set at init) allows unlimited concurrent readers alongside
+        the single writer, so READS take no lock — serializing them behind
+        the global write-lock was what let a busy encoder freeze the whole
+        UI (an async handler blocking the event loop on lock.acquire()).
+
+        ``write`` defaults to True so any caller that doesn't opt out keeps
+        the original serialized-write behavior — a missed call site is merely
+        unoptimized, never unsafe. Read-only callers pass ``write=False``
+        (or use :meth:`get_read_connection`).
+        """
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row  # Enable dict-like access
         conn.execute("PRAGMA busy_timeout = 5000")
-        self._write_lock.acquire()
+        if write:
+            self._write_lock.acquire()
         try:
             yield conn
-            conn.commit()
+            if write:
+                conn.commit()
         except Exception as e:
-            conn.rollback()
+            if write:
+                conn.rollback()
             raise e
         finally:
-            self._write_lock.release()
+            if write:
+                self._write_lock.release()
             conn.close()
+
+    def get_read_connection(self):
+        """Lock-free read-only connection (see :meth:`get_connection`)."""
+        return self.get_connection(write=False)
     
     def initialize_database(self):
         """Create database schema if it doesn't exist."""
@@ -598,14 +617,14 @@ class Database:
     
     def get_profiles(self) -> List[Dict]:
         """Get all encoding profiles."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM profiles ORDER BY name")
             return [dict(row) for row in cursor.fetchall()]
-    
+
     def get_profile(self, profile_id: int) -> Optional[Dict]:
         """Get a specific profile by ID."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM profiles WHERE id = ?", (profile_id,))
             row = cursor.fetchone()
@@ -656,7 +675,7 @@ class Database:
 
     def get_scan_roots(self, enabled_only: bool = False) -> List[Dict]:
         """Get all scan roots (including linked folder-watch state)."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             query = self._SCAN_ROOT_SELECT
             if enabled_only:
@@ -666,7 +685,7 @@ class Database:
 
     def get_scan_root(self, root_id: int) -> Optional[Dict]:
         """Get a specific scan root by ID (including linked folder-watch state)."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(self._SCAN_ROOT_SELECT + " WHERE sr.id = ?", (root_id,))
             row = cursor.fetchone()
@@ -769,7 +788,7 @@ class Database:
 
         Ordered by priority rank ascending (1 = first to encode).
         """
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             if status:
                 cursor.execute("SELECT * FROM queue WHERE status = ? ORDER BY priority ASC, created_at", (status,))
@@ -824,7 +843,7 @@ class Database:
         # Secondary sort for deterministic ordering
         secondary = ', created_at ASC' if db_sort_col != 'created_at' else ''
 
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
 
             # ── Total counts per status (unfiltered) ──
@@ -878,7 +897,7 @@ class Database:
 
     def get_queue_item(self, item_id: int) -> Optional[Dict]:
         """Get a single queue item by ID."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM queue WHERE id = ?", (item_id,))
             row = cursor.fetchone()
@@ -944,7 +963,7 @@ class Database:
     # Generic settings (key-value) helpers
     def get_setting(self, key: str, default: Optional[str] = None) -> Optional[str]:
         """Read a single setting value by key, or ``default`` if not set."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT value FROM settings WHERE key = ?", (key,))
             row = cursor.fetchone()
@@ -952,7 +971,7 @@ class Database:
 
     def get_all_settings(self) -> Dict:
         """Return every setting as a {key: value} dict (for config export)."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT key, value FROM settings")
             return {row[0]: row[1] for row in cursor.fetchall()}
@@ -982,15 +1001,15 @@ class Database:
     
     def get_user_by_username(self, username: str) -> Optional[Dict]:
         """Get a user by username."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM users WHERE username = ?", (username,))
             row = cursor.fetchone()
             return dict(row) if row else None
-    
+
     def get_user_by_id(self, user_id: int) -> Optional[Dict]:
         """Get a user by ID."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM users WHERE id = ?", (user_id,))
             row = cursor.fetchone()
@@ -1028,7 +1047,7 @@ class Database:
 
     def get_folder_watch_by_scan_root(self, scan_root_id: int) -> Optional[Dict]:
         """Get the folder watch linked to a scan root, if any."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT * FROM folder_watches WHERE scan_root_id = ? LIMIT 1",
@@ -1039,7 +1058,7 @@ class Database:
     
     def get_folder_watches(self, enabled_only: bool = False) -> List[Dict]:
         """Get all folder watches."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             if enabled_only:
                 cursor.execute("SELECT fw.*, p.name as profile_name FROM folder_watches fw LEFT JOIN profiles p ON fw.profile_id = p.id WHERE fw.enabled = 1")
@@ -1049,7 +1068,7 @@ class Database:
     
     def get_folder_watch(self, watch_id: int) -> Optional[Dict]:
         """Get a folder watch by ID."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT fw.*, p.name as profile_name FROM folder_watches fw LEFT JOIN profiles p ON fw.profile_id = p.id WHERE fw.id = ?", (watch_id,))
             row = cursor.fetchone()
@@ -1112,7 +1131,7 @@ class Database:
 
     def get_unprocessed_webhooks(self, hours: int = 24) -> List[Dict]:
         """Events never successfully processed, received in the last N hours."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT * FROM webhook_events "
@@ -1125,7 +1144,7 @@ class Database:
 
     def count_unprocessed_webhooks(self) -> int:
         """Unprocessed event count (any age) — surfaced on /health."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT COUNT(*) FROM webhook_events WHERE processed_at IS NULL"
@@ -1179,7 +1198,7 @@ class Database:
 
         Returns {'overall': float|None, 'by_codec': {codec: float}, 'samples': int}.
         """
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT codec,
@@ -1206,7 +1225,7 @@ class Database:
         multiplied by that codec's encode speed ratio. ``unknown_count`` is
         the number of items whose duration is unrecorded (no ETA possible).
         """
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT COALESCE(json_extract(target_specs, '$.codec'), '') AS codec,
@@ -1222,7 +1241,7 @@ class Database:
 
     def get_stats_dashboard(self, days: int = 30) -> Dict:
         """Get comprehensive statistics for the dashboard."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             
             # Overall totals
@@ -1357,14 +1376,14 @@ class Database:
 
     def get_external_connections(self) -> List[Dict]:
         """Get all external connections."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM external_connections ORDER BY name")
             return [dict(row) for row in cursor.fetchall()]
 
     def get_external_connection(self, conn_id: int) -> Optional[Dict]:
         """Get a single external connection by ID."""
-        with self.get_connection() as conn:
+        with self.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM external_connections WHERE id = ?", (conn_id,))
             row = cursor.fetchone()

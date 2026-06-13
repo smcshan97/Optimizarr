@@ -31,7 +31,7 @@ def _format_size(bytes_val: int) -> str:
 def _get_enabled_webhooks(event: str) -> List[Dict]:
     """Fetch all enabled notification webhooks that listen for this event."""
     try:
-        with db.get_connection() as conn:
+        with db.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute(
                 "SELECT id, name, webhook_url, webhook_type, events FROM notifications WHERE enabled = 1"
