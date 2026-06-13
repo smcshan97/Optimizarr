@@ -1040,3 +1040,81 @@ class TestStatsAndResilience:
             fresh_db._write_lock.release()
         t.join(timeout=5)
         assert fresh_db.get_setting('x') == '1'   # completed once lock freed
+
+
+# ---------------------------------------------------------------------------
+# Retry backoff (Patch 39)
+# ---------------------------------------------------------------------------
+
+class TestRetryBackoff:
+    def test_next_pending_skips_backoff(self, fresh_db):
+        """get_next_pending_item ignores items whose retry_after is future,
+        returns eligible ones, and orders by rank."""
+        # a: in backoff (future) — must be skipped
+        a = fresh_db.add_to_queue(file_path="/x/a.mkv", profile_id=1, priority=1)
+        fresh_db.update_queue_item(a, retry_after="2999-01-01 00:00:00")
+        # b: eligible, rank 3
+        b = fresh_db.add_to_queue(file_path="/x/b.mkv", profile_id=1, priority=3)
+        # c: eligible, rank 2 — should win on priority ASC
+        c = fresh_db.add_to_queue(file_path="/x/c.mkv", profile_id=1, priority=2)
+
+        nxt = fresh_db.get_next_pending_item()
+        assert nxt['id'] == c, "should pick lowest-rank eligible item"
+
+        # Past retry_after counts as eligible
+        fresh_db.update_queue_item(a, retry_after="2000-01-01 00:00:00")
+        fresh_db.update_queue_item(c, status='completed')
+        fresh_db.update_queue_item(b, status='completed')
+        assert fresh_db.get_next_pending_item()['id'] == a
+
+    def test_count_pending_vs_eligible(self, fresh_db):
+        """count_pending sees backed-off items even when none are eligible —
+        lets the encoder distinguish 'empty' from 'all waiting'."""
+        x = fresh_db.add_to_queue(file_path="/x/x.mkv", profile_id=1)
+        fresh_db.update_queue_item(x, retry_after="2999-01-01 00:00:00")
+        assert fresh_db.count_pending() == 1
+        assert fresh_db.get_next_pending_item() is None
+
+    def test_handle_failure_sets_exponential_backoff(self, fresh_db, monkeypatch):
+        """_handle_failure re-queues with an increasing retry_after delay."""
+        import app.encoder as enc
+        monkeypatch.setattr(enc, 'db', fresh_db)
+        fresh_db.set_setting('max_retries', '3')
+
+        qid = fresh_db.add_to_queue(file_path="/x/a.mkv", profile_id=1,
+                                    status='processing')
+        prof = {'name': 'P', 'codec': 'av1', 'container': 'mkv'}
+        job = enc.EncodingJob.__new__(enc.EncodingJob)
+        job.queue_item_id = qid
+        job.queue_item = {'file_path': '/x/a.mkv'}
+        job.profile = prof
+
+        # First failure → pending, retry_count 1, retry_after ~60s out
+        status = job._handle_failure("boom")
+        assert status == 'pending'
+        item = fresh_db.get_queue_item(qid)
+        assert item['retry_count'] == 1
+        assert item['retry_after'] is not None
+        assert fresh_db.get_next_pending_item() is None  # gated by backoff
+
+        # Exhaust retries → permanent failure, no further backoff scheduling
+        fresh_db.update_queue_item(qid, retry_count=3, status='processing')
+        assert job._handle_failure("boom again") == 'failed'
+        assert fresh_db.get_queue_item(qid)['status'] == 'failed'
+
+    def test_manual_retry_clears_backoff(self, fresh_db, monkeypatch):
+        """Manual retry is immediate — clears retry_after + counter."""
+        import asyncio
+        from app.api import queue_routes
+        monkeypatch.setattr(queue_routes, 'db', fresh_db)
+
+        qid = fresh_db.add_to_queue(file_path="/x/a.mkv", profile_id=1,
+                                    status='failed')
+        fresh_db.update_queue_item(qid, retry_count=3,
+                                   retry_after="2999-01-01 00:00:00")
+        asyncio.run(queue_routes.retry_queue_item(qid, current_user={}))
+        item = fresh_db.get_queue_item(qid)
+        assert item['status'] == 'pending'
+        assert item['retry_count'] == 0
+        assert item['retry_after'] is None
+        assert fresh_db.get_next_pending_item()['id'] == qid  # eligible now

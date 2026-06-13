@@ -460,6 +460,14 @@ class Database:
                 cursor.execute("ALTER TABLE queue ADD COLUMN eta_seconds INTEGER DEFAULT 0")
                 print("  ↳ Migrated: added 'eta_seconds' to queue")
 
+            # retry_after — backoff gate; a re-queued failure isn't eligible to
+            # run again until this UTC timestamp (NULL = eligible now) (Patch 39)
+            cursor.execute("PRAGMA table_info(queue)")
+            queue_cols_ra = [col[1] for col in cursor.fetchall()]
+            if 'retry_after' not in queue_cols_ra:
+                cursor.execute("ALTER TABLE queue ADD COLUMN retry_after TIMESTAMP")
+                print("  ↳ Migrated: added 'retry_after' to queue")
+
             # Auto-sync interval for external connections (Patch 37); 0 = off
             cursor.execute("PRAGMA table_info(external_connections)")
             conn_cols = [col[1] for col in cursor.fetchall()]
@@ -782,7 +790,37 @@ class Database:
                 kwargs.get('duration_seconds', 0),
             ))
             return cursor.lastrowid
-    
+
+    def get_next_pending_item(self) -> Optional[Dict]:
+        """The next pending item eligible to encode (rank 1 first).
+
+        Skips items still in retry backoff (retry_after in the future) and
+        fetches only ONE row — the encoder no longer loads the whole pending
+        backlog just to pick the head.
+        """
+        with self.get_read_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT * FROM queue WHERE status = 'pending' "
+                "AND (retry_after IS NULL OR retry_after <= CURRENT_TIMESTAMP) "
+                "ORDER BY priority ASC, created_at LIMIT 1"
+            )
+            row = cursor.fetchone()
+            if not row:
+                return None
+            item = dict(row)
+            item['current_specs'] = _safe_json(item.get('current_specs'))
+            item['target_specs'] = _safe_json(item.get('target_specs'))
+            return item
+
+    def count_pending(self) -> int:
+        """Total pending items (any backoff state). Lets the encoder tell
+        'queue empty' apart from 'everything is waiting on backoff'."""
+        with self.get_read_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM queue WHERE status = 'pending'")
+            return cursor.fetchone()[0]
+
     def get_queue_items(self, status: Optional[str] = None) -> List[Dict]:
         """Get queue items, optionally filtered by status.
 

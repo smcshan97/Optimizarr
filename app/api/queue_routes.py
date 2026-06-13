@@ -461,6 +461,7 @@ def _recheck_permission_item(item: dict) -> bool:
             permission_status='ok',
             permission_message=None,
             error_message=None,
+            retry_after=None,
         )
         return True
     db.update_queue_item(
@@ -515,7 +516,7 @@ async def retry_all_failed(current_user: dict = Depends(get_current_user)):
     for it in failed:
         db.update_queue_item(
             it['id'], status='pending', retry_count=0,
-            progress=0.0, error_message=None
+            progress=0.0, error_message=None, retry_after=None
         )
     return MessageResponse(message=f"Re-queued {len(failed)} failed item(s)")
 
@@ -533,7 +534,7 @@ async def retry_queue_item(item_id: int, current_user: dict = Depends(get_curren
         )
     db.update_queue_item(
         item_id, status='pending', retry_count=0,
-        progress=0.0, error_message=None
+        progress=0.0, error_message=None, retry_after=None
     )
     return MessageResponse(message="Item re-queued")
 

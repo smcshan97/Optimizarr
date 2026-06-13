@@ -6,7 +6,7 @@ import subprocess
 import re
 import time
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Callable
 import os
@@ -890,21 +890,27 @@ class EncodingJob:
 
         if retry_count < max_retries:
             new_count = retry_count + 1
+            # Exponential backoff so a transient failure doesn't burn every
+            # retry in seconds: 60s, 120s, 240s … capped at 30 min.
+            delay = min(60 * (2 ** (new_count - 1)), 1800)
+            retry_at = (datetime.utcnow() + timedelta(seconds=delay)).strftime(
+                '%Y-%m-%d %H:%M:%S')
             db.update_queue_item(
                 self.queue_item_id,
                 status='pending',
                 retry_count=new_count,
+                retry_after=retry_at,
                 progress=0.0,
                 current_fps=0,
                 eta_seconds=0,
-                error_message=f"Retry {new_count}/{max_retries}: {error_message[:200]}",
+                error_message=f"Retry {new_count}/{max_retries} in {delay}s: {error_message[:180]}",
             )
             optimizarr_logger.app_logger.warning(
-                "Encode failed (item %s) — re-queued for retry %d/%d",
-                self.queue_item_id, new_count, max_retries
+                "Encode failed (item %s) — retry %d/%d in %ds",
+                self.queue_item_id, new_count, max_retries, delay
             )
             devlog('enc_retry', id=self.queue_item_id, n=new_count,
-                   err=error_message[:150])
+                   delay=delay, err=error_message[:150])
             return 'pending'
 
         db.update_queue_item(
@@ -996,30 +1002,28 @@ class EncoderPool:
         while self.is_running:
             # Check if we can start a new job
             if len(self.active_jobs) < self.max_concurrent:
-                # Get next pending item
-                pending_items = db.get_queue_items(status='pending')
-                
-                if pending_items:
-                    item = pending_items[0]  # Rank 1 = first (priority ASC)
-                    
+                # Next eligible item (skips items still in retry backoff)
+                item = db.get_next_pending_item()
+
+                if item:
                     # Get profile
                     profile = db.get_profile(item['profile_id'])
-                    
+
                     if profile:
                         # Load resource settings
                         resource_limits = self._load_resource_settings()
-                        
+
                         # Create and start job
                         job = EncodingJob(item['id'], profile, resource_limits)
                         self.active_jobs.append(job)
-                        
+
                         # Start encoding (blocking for now - will be async later)
                         success = job.start()
-                        
+
                         # Remove from active jobs
                         self.active_jobs.remove(job)
-                else:
-                    # No more pending items
+                elif db.count_pending() == 0:
+                    # Truly empty — nothing pending at all
                     print("✓ Queue is empty")
                     try:
                         from app.notifications import notify_queue_empty
@@ -1027,9 +1031,11 @@ class EncoderPool:
                     except Exception:
                         pass
                     break
-            
+                # else: pending items exist but are all waiting on retry
+                # backoff — keep looping until one becomes eligible
+
             time.sleep(1)
-        
+
         print("Encoder pool stopped")
     
     def _load_resource_settings(self) -> Dict:
