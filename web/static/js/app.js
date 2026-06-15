@@ -3049,6 +3049,7 @@ async function saveSchedule() {
         timezone: 'local',
         use_windows_rest_hours: useWinEl ? useWinEl.checked : false,
         max_concurrent_jobs: 1,
+        finish_before_stop: (document.getElementById('finishBeforeStop') || {}).checked || false,
     };
     const result = await apiRequest('/schedule', {
         method: 'POST',
@@ -3090,6 +3091,9 @@ async function loadSchedule() {
         useWinEl.checked = config.use_windows_rest_hours || false;
         toggleWindowsHours();
     }
+
+    const finishEl = document.getElementById('finishBeforeStop');
+    if (finishEl) finishEl.checked = config.finish_before_stop || false;
 
     // Status indicators
     const statusEl = document.getElementById('scheduleStatus');

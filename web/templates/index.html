@@ -1504,7 +1504,19 @@
                         </div>
                     </div>
                     </div> <!-- end manualTimeWindow -->
-                    
+
+                    <!-- Finish current encode before stopping at window end -->
+                    <div class="p-4 bg-gray-700 rounded-lg flex items-center justify-between">
+                        <div>
+                            <h3 class="font-semibold">Finish current encode before stopping</h3>
+                            <p class="text-sm text-gray-400 mt-1">When the window closes, let the in-progress encode finish instead of killing it. New encodes still wait for the next window.</p>
+                        </div>
+                        <label class="relative inline-flex items-center cursor-pointer">
+                            <input type="checkbox" id="finishBeforeStop" class="sr-only peer">
+                            <div class="w-11 h-6 bg-gray-600 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-0.5 after:left-[2px] after:bg-white after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-600"></div>
+                        </label>
+                    </div>
+
                     <!-- Current Status -->
                     <div class="p-4 bg-gray-700 rounded-lg">
                         <h3 class="font-semibold mb-2">Current Status</h3>

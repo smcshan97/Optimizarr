@@ -46,15 +46,18 @@ class ScheduleManager:
                     cursor.execute("ALTER TABLE schedule ADD COLUMN use_windows_rest_hours BOOLEAN DEFAULT 0")
                 if 'max_concurrent_jobs' not in cols:
                     cursor.execute("ALTER TABLE schedule ADD COLUMN max_concurrent_jobs INTEGER DEFAULT 1")
+                if 'finish_before_stop' not in cols:
+                    cursor.execute("ALTER TABLE schedule ADD COLUMN finish_before_stop BOOLEAN DEFAULT 0")
                 conn.commit()
 
                 cursor.execute("""
                     SELECT enabled, days_of_week, start_time, end_time,
-                           timezone, use_windows_rest_hours, max_concurrent_jobs
+                           timezone, use_windows_rest_hours, max_concurrent_jobs,
+                           finish_before_stop
                     FROM schedule LIMIT 1
                 """)
                 row = cursor.fetchone()
-                
+
                 if row:
                     self.schedule_config = {
                         'enabled': bool(row[0]),
@@ -64,6 +67,7 @@ class ScheduleManager:
                         'timezone': row[4] or 'local',
                         'use_windows_rest_hours': bool(row[5]),
                         'max_concurrent_jobs': int(row[6] or 1),
+                        'finish_before_stop': bool(row[7]),
                     }
                     self.is_enabled = self.schedule_config['enabled']
                     return self.schedule_config
@@ -93,6 +97,8 @@ class ScheduleManager:
                     cursor.execute("ALTER TABLE schedule ADD COLUMN use_windows_rest_hours BOOLEAN DEFAULT 0")
                 if 'max_concurrent_jobs' not in cols:
                     cursor.execute("ALTER TABLE schedule ADD COLUMN max_concurrent_jobs INTEGER DEFAULT 1")
+                if 'finish_before_stop' not in cols:
+                    cursor.execute("ALTER TABLE schedule ADD COLUMN finish_before_stop BOOLEAN DEFAULT 0")
 
                 cursor.execute("""
                     UPDATE schedule SET
@@ -102,7 +108,8 @@ class ScheduleManager:
                         end_time = ?,
                         timezone = ?,
                         use_windows_rest_hours = ?,
-                        max_concurrent_jobs = ?
+                        max_concurrent_jobs = ?,
+                        finish_before_stop = ?
                 """, (
                     config.get('enabled', False),
                     config.get('days_of_week', '0,1,2,3,4,5,6'),
@@ -111,11 +118,18 @@ class ScheduleManager:
                     config.get('timezone', 'local'),
                     config.get('use_windows_rest_hours', False),
                     config.get('max_concurrent_jobs', 1),
+                    config.get('finish_before_stop', False),
                 ))
                 conn.commit()
             self.load_schedule()
-            if self.is_enabled:
-                self.setup_schedule_check()
+            # ALWAYS reconcile the cron job: setup_schedule_check() adds it when
+            # enabled and REMOVES it when disabled. The old code only called it
+            # when enabled, so disabling left a stale every-minute checker
+            # running (which then stopped manual encodes). Saving the schedule
+            # is also a deliberate "let the scheduler manage this" action, so
+            # hand control back from any manual override.
+            self.manual_override = False
+            self.setup_schedule_check()
             return True
         except Exception as e:
             print(f"✗ Error saving schedule: {e}")
@@ -263,9 +277,17 @@ class ScheduleManager:
             t.start()
     
     def check_and_trigger(self):
-        """Check schedule and trigger/stop encoding accordingly."""
+        """Check schedule and start/stop encoding accordingly.
+
+        A DISABLED schedule makes the scheduler fully inert — it must never
+        start OR stop encoding (encoding is then 100% manual). Previously a
+        disabled schedule still ran this check, and because is_within_schedule()
+        returns False when disabled, it stopped any manual encode every minute.
+        That, plus save_schedule() not tearing down this cron job on disable,
+        was the bug that killed an entire weekend of encoding.
+        """
         from app.encoder import encoder_pool
-        if self.manual_override:
+        if not self.is_enabled or self.manual_override:
             return
         is_scheduled = self.is_within_schedule()
         is_running = encoder_pool.is_running
@@ -273,9 +295,12 @@ class ScheduleManager:
             print("⏰ Schedule active — Starting encoding")
             t = threading.Thread(target=encoder_pool.process_queue, daemon=True)
             t.start()
-        elif not is_scheduled and is_running and not self.manual_override:
-            print("⏰ Outside schedule window — Stopping encoding")
-            encoder_pool.stop()
+        elif not is_scheduled and is_running:
+            # Hard stop unless the user opted to let the current encode finish
+            graceful = bool((self.schedule_config or {}).get('finish_before_stop'))
+            print(f"⏰ Outside schedule window — Stopping encoding"
+                  f"{' after current job' if graceful else ''}")
+            encoder_pool.stop(graceful=graceful)
     
     def enable_manual_override(self):
         self.manual_override = True

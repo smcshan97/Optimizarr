@@ -243,9 +243,17 @@ async def start_encoding(
             message="Encoder is already running",
             success=False
         )
-    
+
+    # Manual start takes control: an enabled schedule must not auto-stop this
+    # run at the next window boundary. Cleared when the schedule is next saved.
+    try:
+        from app.scheduler import schedule_manager
+        schedule_manager.enable_manual_override()
+    except Exception:
+        pass
+
     background_tasks.add_task(encoder_pool.process_queue)
-    
+
     return MessageResponse(message="Encoding started")
 
 
@@ -257,9 +265,17 @@ async def stop_encoding(current_user: dict = Depends(get_current_user)):
             message="Encoder is not running",
             success=False
         )
-    
+
+    # Manual stop takes control: an enabled schedule must not auto-restart this
+    # window. Cleared when the schedule is next saved.
+    try:
+        from app.scheduler import schedule_manager
+        schedule_manager.enable_manual_override()
+    except Exception:
+        pass
+
     encoder_pool.stop()
-    
+
     return MessageResponse(message="Encoding stopped")
 
 

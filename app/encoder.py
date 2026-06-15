@@ -860,9 +860,21 @@ class EncodingJob:
             ext_map = {'mkv': '.mkv', 'mp4': '.mp4', 'webm': '.webm'}
             output_ext = ext_map.get(container, '.mkv')
             temp_out = original_path.parent / f"{original_path.stem}_optimized{output_ext}"
-            if temp_out.exists():
-                temp_out.unlink()
-                print(f"🗑 Removed partial output: {temp_out.name}")
+            if not temp_out.exists():
+                return
+            # Windows doesn't release the file handle the instant the process
+            # is killed (WinError 32: file in use). Retry a few times before
+            # giving up so the partial output doesn't linger.
+            for attempt in range(5):
+                try:
+                    temp_out.unlink()
+                    print(f"🗑 Removed partial output: {temp_out.name}")
+                    return
+                except PermissionError:
+                    time.sleep(0.5)
+                except FileNotFoundError:
+                    return
+            print(f"⚠ Could not remove partial output (still locked): {temp_out.name}")
         except Exception as e:
             print(f"⚠ Could not remove partial output: {e}")
 
@@ -1080,15 +1092,22 @@ class EncoderPool:
                 'cpu_usage_threshold': 95.0,
             }
     
-    def stop(self, mark_cancelled: bool = True):
+    def stop(self, mark_cancelled: bool = True, graceful: bool = False):
         """Stop the encoder pool.
 
         Args:
             mark_cancelled: Forwarded to each job's stop(). True for a manual
                 stop (items → 'cancelled'); False for server shutdown (items
                 left for startup recovery to re-queue).
+            graceful: When True, stop accepting NEW jobs but let the active
+                encode finish on its own — process_queue() exits after the
+                current job because is_running is now False. Used at a
+                schedule-window boundary when "finish current encode" is on.
         """
         self.is_running = False
+
+        if graceful:
+            return  # leave the running job alone; loop ends when it completes
 
         # Iterate a copy — process_queue() mutates active_jobs concurrently
         for job in list(self.active_jobs):

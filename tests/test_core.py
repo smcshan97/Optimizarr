@@ -1118,3 +1118,115 @@ class TestRetryBackoff:
         assert item['retry_count'] == 0
         assert item['retry_after'] is None
         assert fresh_db.get_next_pending_item()['id'] == qid  # eligible now
+
+
+# ---------------------------------------------------------------------------
+# Scheduler safety — the weekend bug (Patch 41)
+# ---------------------------------------------------------------------------
+
+class _FakePool:
+    def __init__(self, running=True):
+        self.is_running = running
+        self.stop_calls = []
+    def stop(self, mark_cancelled=True, graceful=False):
+        self.stop_calls.append({'graceful': graceful})
+        self.is_running = False
+    def process_queue(self):
+        self.is_running = True
+
+
+class TestSchedulerSafety:
+    def _mgr(self):
+        from app.scheduler import ScheduleManager
+        return ScheduleManager()
+
+    def test_disabled_schedule_never_stops_encoding(self, monkeypatch):
+        """THE weekend bug: a disabled schedule must not stop a running encode."""
+        import app.encoder as enc
+        fake = _FakePool(running=True)
+        monkeypatch.setattr(enc, 'encoder_pool', fake)
+
+        mgr = self._mgr()
+        mgr.is_enabled = False
+        mgr.schedule_config = {'enabled': False}
+        mgr.check_and_trigger()
+        assert fake.stop_calls == [], "disabled scheduler must be inert"
+        assert fake.is_running is True
+
+    def test_manual_override_blocks_autostop(self, monkeypatch):
+        """A manual start (override) survives the window boundary."""
+        import app.encoder as enc
+        fake = _FakePool(running=True)
+        monkeypatch.setattr(enc, 'encoder_pool', fake)
+
+        mgr = self._mgr()
+        mgr.is_enabled = True
+        mgr.manual_override = True
+        mgr.schedule_config = {'enabled': True, 'days_of_week': '0,1,2,3,4,5,6',
+                               'start_time': '22:00', 'end_time': '06:00'}
+        mgr.check_and_trigger()
+        assert fake.stop_calls == []
+
+    def test_save_disable_tears_down_cron_job(self, fresh_db, monkeypatch):
+        """Disabling the schedule must REMOVE the every-minute checker."""
+        import app.scheduler as sched
+        monkeypatch.setattr(sched, 'db', fresh_db)
+        mgr = self._mgr()
+        mgr.scheduler.start()
+        try:
+            mgr.load_schedule()
+            mgr.save_schedule({'enabled': True, 'days_of_week': '0,1,2,3,4,5,6',
+                               'start_time': '22:00', 'end_time': '06:00'})
+            assert mgr.scheduler.get_job('schedule_check') is not None
+            # The bug: disabling left this job alive
+            mgr.save_schedule({'enabled': False})
+            assert mgr.scheduler.get_job('schedule_check') is None
+        finally:
+            mgr.scheduler.shutdown(wait=False)
+
+    def test_save_clears_manual_override(self, fresh_db, monkeypatch):
+        """Saving the schedule hands control back to the scheduler."""
+        import app.scheduler as sched
+        monkeypatch.setattr(sched, 'db', fresh_db)
+        mgr = self._mgr()
+        mgr.scheduler.start()
+        try:
+            mgr.manual_override = True
+            mgr.load_schedule()
+            mgr.save_schedule({'enabled': False})
+            assert mgr.manual_override is False
+        finally:
+            mgr.scheduler.shutdown(wait=False)
+
+    def test_finish_before_stop_persists(self, fresh_db, monkeypatch):
+        import app.scheduler as sched
+        monkeypatch.setattr(sched, 'db', fresh_db)
+        mgr = self._mgr()
+        mgr.scheduler.start()
+        try:
+            mgr.load_schedule()
+            mgr.save_schedule({'enabled': True, 'finish_before_stop': True,
+                               'start_time': '22:00', 'end_time': '06:00'})
+            cfg = mgr.load_schedule()
+            assert cfg['finish_before_stop'] is True
+        finally:
+            mgr.scheduler.shutdown(wait=False)
+
+    def test_graceful_stop_leaves_active_job_running(self):
+        """graceful=True stops new work but doesn't kill the active encode."""
+        from app.encoder import EncoderPool
+        killed = []
+        class FakeJob:
+            def stop(self, **k):
+                killed.append(True)
+        pool = EncoderPool()
+        pool.is_running = True
+        pool.active_jobs = [FakeJob()]
+
+        pool.stop(graceful=True)
+        assert pool.is_running is False        # stops taking new jobs
+        assert killed == []                    # current encode left alone
+
+        pool.is_running = True
+        pool.stop(graceful=False)              # hard stop DOES kill
+        assert killed == [True]
