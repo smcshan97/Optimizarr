@@ -542,16 +542,18 @@ def process_webhook_payload(app_type: str, payload: dict) -> dict:
         stereo_plan=stereo_plan,
     )
 
-    # Wake the encoder if it's not already running and schedule allows
+    # Wake the encoder if it's not already running and the schedule permits.
+    # (Was importing a non-existent `encoding_scheduler` → ImportError swallowed
+    # by the bare except, so webhook-queued files never auto-started encoding.)
     try:
         from app.encoder import encoder_pool
-        from app.scheduler import encoding_scheduler
+        from app.scheduler import schedule_manager
         import threading
-        if not encoder_pool.is_running and encoding_scheduler.should_encode_now():
+        if not encoder_pool.is_running and schedule_manager.should_encode_now():
             t = threading.Thread(target=encoder_pool.process_queue, daemon=True)
             t.start()
-    except Exception:
-        pass  # Non-fatal — item is queued, encoder will pick it up on next scheduler tick
+    except Exception as e:
+        optimizarr_logger.app_logger.warning("Webhook: could not wake encoder: %s", e)
 
     optimizarr_logger.app_logger.info(
         "Webhook: queued %s from %s", file_path, app_type

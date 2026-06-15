@@ -94,6 +94,22 @@ async def lifespan(app: FastAPI):
 
     initialize_scheduler()
 
+    # Resume encoding on boot when the schedule permits and there's pending
+    # work, so an unattended box ("leave it running") drains its backlog
+    # without a manual Start. Disabled schedule = always permitted.
+    try:
+        from app.encoder import encoder_pool
+        from app.scheduler import schedule_manager
+        import threading as _enc_t
+        pending = db.count_pending()
+        if (not encoder_pool.is_running and pending > 0
+                and schedule_manager.should_encode_now()):
+            _enc_t.Thread(target=encoder_pool.process_queue, daemon=True).start()
+            print(f"▶ Auto-started encoding on boot ({pending} pending)")
+            devlog('autostart', pending=pending)
+    except Exception as e:
+        print(f"  ⚠ Boot auto-start check failed: {e}")
+
     from app.watcher import folder_watcher
     watches = db.get_folder_watches(enabled_only=True)
     if watches:

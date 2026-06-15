@@ -1230,3 +1230,25 @@ class TestSchedulerSafety:
         pool.is_running = True
         pool.stop(graceful=False)              # hard stop DOES kill
         assert killed == [True]
+
+    def test_should_encode_now(self):
+        """Disabled = always OK to encode; enabled = within-window only."""
+        mgr = self._mgr()
+        mgr.is_enabled = False
+        assert mgr.should_encode_now() is True   # no restriction when off
+
+        # Enabled, window that excludes 'now' → not permitted
+        now = __import__('datetime').datetime.now()
+        far = (now.hour + 3) % 24
+        mgr.is_enabled = True
+        mgr.schedule_config = {
+            'enabled': True, 'days_of_week': '0,1,2,3,4,5,6',
+            'start_time': f'{far:02d}:00', 'end_time': f'{(far + 1) % 24:02d}:00',
+            'use_windows_rest_hours': False,
+        }
+        assert mgr.should_encode_now() is False
+
+        # Enabled, window that includes 'now' → permitted
+        mgr.schedule_config['start_time'] = '00:00'
+        mgr.schedule_config['end_time'] = '23:59'
+        assert mgr.should_encode_now() is True

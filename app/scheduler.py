@@ -302,6 +302,17 @@ class ScheduleManager:
                   f"{' after current job' if graceful else ''}")
             encoder_pool.stop(graceful=graceful)
     
+    def should_encode_now(self) -> bool:
+        """Whether encoding is permitted right now (schedule policy only).
+
+        Disabled schedule = no time restriction, encode anytime. Enabled =
+        only inside the configured window. Used to wake the encoder on new
+        work (webhooks, sync, boot) without fighting the schedule.
+        """
+        if not self.is_enabled:
+            return True
+        return self.is_within_schedule()
+
     def enable_manual_override(self):
         self.manual_override = True
         print("✓ Manual override enabled")
