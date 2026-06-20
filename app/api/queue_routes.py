@@ -252,6 +252,10 @@ async def start_encoding(
     except Exception:
         pass
 
+    # Remember the intent so we resume on the next boot ("start where you
+    # left off"). Cleared by a manual Stop.
+    db.set_setting('encoder_autostart', 'true')
+
     background_tasks.add_task(encoder_pool.process_queue)
 
     return MessageResponse(message="Encoding started")
@@ -273,6 +277,9 @@ async def stop_encoding(current_user: dict = Depends(get_current_user)):
         schedule_manager.enable_manual_override()
     except Exception:
         pass
+
+    # Remember that the user stopped — don't auto-resume on the next boot.
+    db.set_setting('encoder_autostart', 'false')
 
     encoder_pool.stop()
 

@@ -1515,3 +1515,30 @@ class TestScanRootPathExists:
         missing = _annotate_path_exists({'path': str(tmp_path / "gone_drive_X")})
         assert present['path_exists'] is True
         assert missing['path_exists'] is False
+
+
+# ---------------------------------------------------------------------------
+# Start-where-you-left-off intent (Patch 45)
+# ---------------------------------------------------------------------------
+
+class TestAutostartIntent:
+    def test_start_and_stop_persist_intent(self, fresh_db, monkeypatch):
+        import asyncio
+        from fastapi import BackgroundTasks
+        from app.api import queue_routes
+        monkeypatch.setattr(queue_routes, 'db', fresh_db)
+
+        # Manual Start records intent=true (background task is only queued)
+        monkeypatch.setattr(queue_routes.encoder_pool, 'is_running', False)
+        asyncio.run(queue_routes.start_encoding(BackgroundTasks(), current_user={}))
+        assert fresh_db.get_setting('encoder_autostart') == 'true'
+
+        # Manual Stop records intent=false
+        monkeypatch.setattr(queue_routes.encoder_pool, 'is_running', True)
+        monkeypatch.setattr(queue_routes.encoder_pool, 'stop', lambda *a, **k: None)
+        asyncio.run(queue_routes.stop_encoding(current_user={}))
+        assert fresh_db.get_setting('encoder_autostart') == 'false'
+
+    def test_default_intent_is_resume(self, fresh_db):
+        # Unset → default 'true' so a fresh/unattended box resumes on boot
+        assert fresh_db.get_setting('encoder_autostart', 'true') == 'true'
