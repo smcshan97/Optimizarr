@@ -56,5 +56,9 @@ temp/
 # Development artifacts
 *.patch
 
-# Runtime logs (devlog is local forensics, never committed)
-logs/devlog.jsonl*
+# Runtime logs & stats — never committed (regenerated at runtime)
+logs/
+!logs/.gitkeep
+
+# Local scratch scripts
+_*.py
