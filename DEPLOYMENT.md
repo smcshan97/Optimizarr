@@ -1,305 +1,145 @@
 # Optimizarr Deployment Guide
 
-## 🚀 Quick Start (Local Development)
-
-### Prerequisites
-- Python 3.11 or higher
-- HandBrakeCLI (optional, but recommended for full functionality)
-
-### Installation & Running
-
-```bash
-# Navigate to project directory
-cd /home/claude/optimizarr
-
-# Run the startup script
-./start.sh
-
-# Alternatively, run manually:
-pip install -r requirements.txt --break-system-packages
-python3 -m app.main
-```
-
-The server will start on **http://localhost:5000**
-
-**Default Credentials:**
-- Username: `admin`
-- Password: `admin`
-
-⚠️ **IMPORTANT:** Change the admin password immediately after first login!
+Optimizarr is a **native Windows** application. It talks directly to host
+hardware (NVENC, GPU temp via pynvml, CPU temp via WMI), reads Windows Active
+Hours from the registry, and works against local/removable/network drive
+paths. Run it as a normal Windows process — see *Packaging* below. Docker is
+**not** recommended on this host (see *Why not Docker*).
 
 ---
 
-## 📦 Pushing to GitHub
+## Prerequisites
 
-The repository is ready to push to https://github.com/smcshan97/Optimizarr.git
+- **Windows 10/11**
+- **Python 3.11+** (3.14 is fine)
+- **HandBrakeCLI** on `PATH` — the encoder (`HandBrakeCLI --version` should work)
+- **ffmpeg / ffprobe** on `PATH` — probing, stereo/3D, duration backfill
+- **NVIDIA GPU + current driver** for NVENC (H.264/H.265). AV1 falls back to
+  software SVT-AV1 on pre-RTX-40 cards.
 
-### First-Time Push
-
-```bash
-cd /home/claude/optimizarr
-
-# Verify remote is configured
-git remote -v
-# Should show: origin  https://github.com/smcshan97/Optimizarr.git
-
-# Check current status
-git status
-
-# If there are uncommitted changes, commit them:
-git add .
-git commit -m "Update: [describe your changes]"
-
-# Push to GitHub (main branch)
-git push -u origin main
-```
-
-### Subsequent Updates
-
-```bash
-# Stage changes
-git add .
-
-# Commit with message
-git commit -m "feat: add new feature" 
-# or
-git commit -m "fix: resolve bug"
-# or  
-git commit -m "docs: update documentation"
-
-# Push to GitHub
-git push
-```
+Optional: the AI upscalers (Real-ESRGAN / Real-CUGAN / Waifu2x) are downloaded
+on demand from the Upscaler tab.
 
 ---
 
-## 🔐 Security Configuration
+## Install & run
 
-### Generate Secure Secret Key
-
-```bash
-# Generate a secure random key
-openssl rand -hex 32
-
-# Update .env file
-OPTIMIZARR_SECRET_KEY=<paste-generated-key-here>
+```powershell
+cd D:\Downloads\optimizarr
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python -m app.main
 ```
 
-### Change Admin Password
+Server starts on **http://localhost:5000**.
 
-Via Web UI:
-1. Login as admin
-2. Navigate to Settings → Users (coming soon)
-3. Change password
+First-run credentials are `admin` / `admin` — you are forced to change the
+password on first login. The `SECRET_KEY` is auto-generated and persisted to
+`data\.secret_key` on first run.
 
-Via API:
-```bash
-curl -X POST http://localhost:5000/api/auth/change-password \
-  -H "Authorization: Bearer YOUR_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "current_password": "admin",
-    "new_password": "your_new_secure_password"
-  }'
-```
+Config is via `OPTIMIZARR_`-prefixed environment variables (or a `.env` file):
+`OPTIMIZARR_PORT`, `OPTIMIZARR_HOST`, `OPTIMIZARR_DB_PATH`,
+`OPTIMIZARR_CORS_ORIGINS`, `OPTIMIZARR_JWT_EXPIRATION_HOURS`, etc.
+
+Keep it bound to localhost (default) unless you intend to expose it; auth is
+JWT but this is a single-user home tool.
 
 ---
 
-## 🐳 Docker Deployment (Phase 4 - Coming Soon)
+## Packaging — launch when you want, not at Windows boot
 
-Docker support is planned for Phase 4. The Dockerfile will include:
-- HandBrakeCLI pre-installed
-- Proper PUID/PGID user mapping
-- Volume mounts for media, config, and data
-- GPU passthrough support (NVIDIA)
+By design the heavy startup work (orphan-temp sweep, encode resume, duration
+backfill) runs in background threads at **program start**, so launching is
+quick and it does **not** belong in Windows boot. Pick whichever launcher fits:
+
+**A. Shortcut / batch file (simplest).** A `start-optimizarr.bat`:
+
+```bat
+@echo off
+cd /d D:\Downloads\optimizarr
+call .venv\Scripts\activate.bat
+python -m app.main
+```
+
+Double-click it (or pin a shortcut). To get **CPU-temp throttling**, run it
+elevated: shortcut → Properties → Advanced → *Run as administrator*. (GPU temp
+via pynvml works without elevation; CPU temp via WMI needs admin. The app
+degrades gracefully — GPU temp is the primary trigger on RTX hardware.)
+
+**B. PyInstaller elevated .exe.** Build a single launchable exe that requests
+admin via its manifest, so a normal double-click gets CPU-temp monitoring:
+
+```powershell
+pip install pyinstaller
+pyinstaller --name Optimizarr --onefile --uac-admin ^
+  --add-data "web;web" app\main.py
+```
+
+Launch `dist\Optimizarr.exe` when you want it running. (Bundle/point it at
+HandBrakeCLI + ffmpeg on `PATH`.)
+
+**C. Start at login (optional, still not a boot service).** If you want it up
+after *you* log in (not slowing the OS boot): Task Scheduler → Create Task →
+Trigger *At log on* → Action run the bat/exe → check *Run with highest
+privileges*. This keeps it off the Windows boot path while still auto-starting
+your session.
+
+> Avoid registering it as an auto-start Windows **Service** (NSSM/WinSW) if you
+> don't want it touching Windows boot — that's exactly the "bog down boot"
+> case. The login-trigger task above gives auto-start without it.
+
+"Start where you left off" complements this: if the encoder was running when
+you closed it, it resumes on the next launch; if you stopped it manually, it
+stays stopped (intent persisted as the `encoder_autostart` setting).
 
 ---
 
-## 🌐 Production Deployment
+## Why not Docker (on this host)
 
-### Using Nginx Reverse Proxy
+Containerizing fights the app's core host integrations and buys nothing on a
+single Windows box:
 
-```nginx
-server {
-    listen 80;
-    server_name optimizarr.yourdomain.com;
+| Needs | In a Windows container |
+|---|---|
+| CPU temp via WMI | ❌ no host sensor access |
+| Windows Active Hours via registry | ❌ no host registry |
+| NVENC + GPU temp (pynvml) | ⚠️ requires WSL2 + NVIDIA Container Toolkit, fiddly |
+| Local/removable/network drives | ⚠️ each must be bind-mounted |
 
-    location / {
-        proxy_pass http://localhost:5000;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-    }
-}
-```
-
-### Using systemd Service
-
-Create `/etc/systemd/system/optimizarr.service`:
-
-```ini
-[Unit]
-Description=Optimizarr Media Optimization Service
-After=network.target
-
-[Service]
-Type=simple
-User=your_user
-WorkingDirectory=/path/to/optimizarr
-ExecStart=/usr/bin/python3 -m app.main
-Restart=always
-RestartSec=10
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Enable and start:
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable optimizarr
-sudo systemctl start optimizarr
-sudo systemctl status optimizarr
-```
+If you ever run a **headless Linux** box with mounted storage and don't need
+host temp sensors or Active Hours, a container is reasonable — temperature
+safety would then lean on GPU temp only. On Windows, native is the answer.
 
 ---
 
-## 📊 Monitoring & Logs
+## Operations
 
-### View Logs
-```bash
-# If running directly
-tail -f optimizarr_server.log
-
-# If running as systemd service
-sudo journalctl -u optimizarr -f
-```
-
-### Check Server Status
-```bash
-# Test health endpoint
-curl http://localhost:5000/api/health
-
-# Should return: {"status":"ok","service":"optimizarr"}
-```
+- **Health:** `GET /api/health` (no auth) — versions of HandBrake/ffprobe/
+  ffmpeg, DB + disk + queue depth + estimated hours remaining, connection
+  status, unprocessed webhook count.
+- **Dev log:** `python -m app.devlog 24` prints a compact digest of the last
+  24h (encodes, problems deduped, recent events). Run it at the start of a
+  troubleshooting session.
+- **Backups:** raw DB via `GET /api/backup` (and restore), or portable
+  human-readable config via `GET /api/backup/json` / `POST /api/restore/json`
+  (profiles, scan roots, settings — no API keys).
+- **Stray processes:** if you ever hard-kill the app mid-encode, end any
+  leftover `HandBrakeCLI.exe` in Task Manager before relaunching; orphaned
+  `*_optimized.*` partials are swept automatically on next start.
 
 ---
 
-## 🧪 Testing
+## Updating
 
-### Run API Tests
-```bash
-./test_api.sh
+```powershell
+cd D:\Downloads\optimizarr
+git pull
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt   # if deps changed
+python -m pytest tests -q          # optional sanity check
+python -m app.main
 ```
 
-### Manual Testing
-```bash
-# Login and get token
-TOKEN=$(curl -s -X POST http://localhost:5000/api/auth/login \
-  -H "Content-Type: application/json" \
-  -d '{"username":"admin","password":"admin"}' \
-  | grep -o '"access_token":"[^"]*"' | cut -d'"' -f4)
-
-# List profiles
-curl -H "Authorization: Bearer $TOKEN" http://localhost:5000/api/profiles
-
-# Get statistics
-curl -H "Authorization: Bearer $TOKEN" http://localhost:5000/api/stats
-```
-
----
-
-## 🔧 Troubleshooting
-
-### Server Won't Start
-
-**Issue:** Port 5000 already in use
-```bash
-# Find process using port 5000
-lsof -i :5000
-# or
-netstat -tlnp | grep 5000
-
-# Kill the process
-kill -9 <PID>
-```
-
-**Issue:** Module not found errors
-```bash
-# Reinstall dependencies
-pip install -r requirements.txt --break-system-packages --force-reinstall
-```
-
-### Database Issues
-
-**Reset Database:**
-```bash
-# WARNING: This deletes all data!
-rm -f data/optimizarr.db
-
-# Restart server to recreate
-./start.sh
-```
-
-### HandBrakeCLI Not Found
-
-**Ubuntu/Debian:**
-```bash
-sudo apt update
-sudo apt install handbrake-cli
-```
-
-**macOS:**
-```bash
-brew install handbrake
-```
-
-**Verify Installation:**
-```bash
-HandBrakeCLI --version
-```
-
----
-
-## 📁 Directory Structure
-
-```
-/home/claude/optimizarr/
-├── app/                    # Application code
-├── web/                    # Frontend templates
-├── data/                   # SQLite database (auto-created)
-├── config/                 # Configuration files
-├── .env                    # Environment configuration
-├── start.sh                # Startup script
-└── requirements.txt        # Python dependencies
-```
-
----
-
-## 🆘 Getting Help
-
-- **GitHub Issues:** https://github.com/smcshan97/Optimizarr/issues
-- **Documentation:** See PROJECT_STATUS.md and GETTING_STARTED.md
-- **API Docs:** http://localhost:5000/docs (when server is running)
-
----
-
-## ✅ Pre-Flight Checklist
-
-Before pushing to production:
-
-- [ ] Changed default admin password
-- [ ] Generated secure SECRET_KEY in .env
-- [ ] Tested all API endpoints with test_api.sh
-- [ ] Verified HandBrakeCLI is installed
-- [ ] Configured reverse proxy with HTTPS
-- [ ] Set up systemd service for auto-start
-- [ ] Configured firewall rules
-- [ ] Set up regular database backups
-- [ ] Reviewed security notes in PROJECT_STATUS.md
-
----
-
-**Last Updated:** February 2, 2026  
-**Version:** 1.0.0 (Phase 1)
+DB schema migrations run automatically on start (`PRAGMA table_info` →
+`ALTER TABLE`), so pulling and relaunching is enough.
