@@ -1329,7 +1329,7 @@ class TestTempCleanup:
         (tmp_path / "notes.txt").write_text("keep", encoding="utf-8")
         fresh_db.create_scan_root(path=str(tmp_path), profile_id=1)
 
-        removed = sc.cleanup_orphaned_outputs()
+        removed = sc.cleanup_orphaned_outputs(min_age_seconds=0)
         assert removed == 2
         assert (tmp_path / "movie.mkv").exists()       # source kept
         assert (tmp_path / "notes.txt").exists()       # non-video kept
@@ -1346,10 +1346,30 @@ class TestTempCleanup:
         (tmp_path / "dead_optimized.mkv").write_bytes(b"orphan")
         fresh_db.create_scan_root(path=str(tmp_path), profile_id=1)
 
-        removed = sc.cleanup_orphaned_outputs(exclude_paths=[str(active)])
+        removed = sc.cleanup_orphaned_outputs(exclude_paths=[str(active)], min_age_seconds=0)
         assert removed == 1
         assert active.exists()                          # protected
         assert not (tmp_path / "dead_optimized.mkv").exists()
+
+    def test_recent_files_are_skipped(self, fresh_db, tmp_path, monkeypatch):
+        """A freshly written temp (active encode) is not deleted; an old one is."""
+        import os, time
+        import app.scanner as sc
+        monkeypatch.setattr(sc, 'db', fresh_db)
+
+        fresh = tmp_path / "fresh_optimized.mkv"
+        fresh.write_bytes(b"being encoded right now")
+        old = tmp_path / "old_optimized.mkv"
+        old.write_bytes(b"crashed run")
+        # Backdate the old file's mtime well past the age threshold
+        past = time.time() - 3600
+        os.utime(old, (past, past))
+        fresh_db.create_scan_root(path=str(tmp_path), profile_id=1)
+
+        removed = sc.cleanup_orphaned_outputs(min_age_seconds=60)
+        assert removed == 1
+        assert fresh.exists()              # recent → skipped (could be live)
+        assert not old.exists()            # old orphan → removed
 
 
 # ---------------------------------------------------------------------------
@@ -1542,3 +1562,27 @@ class TestAutostartIntent:
     def test_default_intent_is_resume(self, fresh_db):
         # Unset → default 'true' so a fresh/unattended box resumes on boot
         assert fresh_db.get_setting('encoder_autostart', 'true') == 'true'
+
+
+# ---------------------------------------------------------------------------
+# Duration backfill picker (Patch 46)
+# ---------------------------------------------------------------------------
+
+class TestDurationBackfill:
+    def test_picks_only_unprobed_pending(self, fresh_db):
+        a = fresh_db.add_to_queue(file_path="/x/a.mkv", profile_id=1, duration_seconds=0)
+        fresh_db.add_to_queue(file_path="/x/known.mkv", profile_id=1, duration_seconds=600)
+        fresh_db.add_to_queue(file_path="/x/done.mkv", profile_id=1,
+                              duration_seconds=0, status='completed')
+
+        picks = fresh_db.get_pending_without_duration(limit=8)
+        assert [p['id'] for p in picks] == [a]   # only the pending, unprobed one
+
+    def test_sentinel_excludes_from_reprobe(self, fresh_db):
+        a = fresh_db.add_to_queue(file_path="/x/a.mkv", profile_id=1, duration_seconds=0)
+        # Probed but no usable duration → -1 sentinel; must not come back
+        fresh_db.update_queue_item(a, duration_seconds=-1)
+        assert fresh_db.get_pending_without_duration() == []
+        # And -1 is still treated as "unknown" by the estimator
+        from app.scanner import estimate_encode_seconds
+        assert estimate_encode_seconds(-1, 'av1', {'overall': 2.0, 'by_codec': {}}) is None

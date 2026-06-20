@@ -828,6 +828,21 @@ class Database:
             cursor.execute("SELECT COUNT(*) FROM queue WHERE status = 'pending'")
             return cursor.fetchone()[0]
 
+    def get_pending_without_duration(self, limit: int = 8) -> List[Dict]:
+        """Pending items whose duration was never probed (duration_seconds = 0).
+
+        Feeds the background backfill so fastest/slowest-first learns real
+        encode-time estimates. A -1 sentinel (probed, no usable duration) is
+        excluded so dead/corrupt files aren't re-probed forever.
+        """
+        with self.get_read_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT id, file_path FROM queue "
+                "WHERE status = 'pending' AND duration_seconds = 0 "
+                "ORDER BY priority ASC LIMIT ?", (limit,))
+            return [dict(row) for row in cursor.fetchall()]
+
     def get_queue_items(self, status: Optional[str] = None) -> List[Dict]:
         """Get queue items, optionally filtered by status.
 

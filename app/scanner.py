@@ -7,6 +7,7 @@ import json
 import subprocess
 import shutil
 import re
+import time
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 import os
@@ -558,18 +559,23 @@ def estimate_encode_seconds(duration_seconds, target_codec, speed_stats) -> Opti
     return duration_seconds * ratio
 
 
-def cleanup_orphaned_outputs(exclude_paths=None) -> int:
+def cleanup_orphaned_outputs(exclude_paths=None, min_age_seconds: float = 60.0) -> int:
     """Delete leftover ``*_optimized.*`` temp files across enabled scan roots.
 
     The encoder writes ``{stem}_optimized{ext}`` then renames it to the final
     name on success, so any surviving ``_optimized`` file is a partial output
-    from a killed or crashed encode. MUST only be called when the relevant
-    encode is not active — pass the in-flight temp paths via ``exclude_paths``
-    to be safe during a running queue.
+    from a killed or crashed encode.
+
+    Files modified within ``min_age_seconds`` are SKIPPED — a live encode's
+    temp is seconds old, a genuine orphan is hours/days old. That makes this
+    safe to run in the background even while an encode is in progress (an
+    in-flight temp won't be deleted out from under HandBrake). ``exclude_paths``
+    additionally protects specific known-active temps.
 
     Returns the number of files removed.
     """
     exclude = {str(Path(p)) for p in (exclude_paths or [])}
+    now = time.time()
     removed = 0
     for root in db.get_scan_roots(enabled_only=True):
         base = Path(root['path'])
@@ -580,12 +586,16 @@ def cleanup_orphaned_outputs(exclude_paths=None) -> int:
             pattern = base.rglob('*') if recursive else base.glob('*')
             for f in pattern:
                 try:
-                    if (f.is_file()
+                    if not (f.is_file()
                             and f.suffix.lower() in MediaScanner.VIDEO_EXTENSIONS
                             and f.stem.endswith('_optimized')
                             and str(f) not in exclude):
-                        f.unlink()
-                        removed += 1
+                        continue
+                    # Skip anything written recently — likely an active temp
+                    if now - f.stat().st_mtime < min_age_seconds:
+                        continue
+                    f.unlink()
+                    removed += 1
                 except (PermissionError, OSError):
                     continue
         except (PermissionError, OSError):
@@ -598,6 +608,52 @@ def cleanup_orphaned_outputs(exclude_paths=None) -> int:
         except Exception:
             pass
     return removed
+
+
+import threading as _threading
+
+_backfill_stop = _threading.Event()
+
+
+def _duration_backfill_loop():
+    """Gently ffprobe pending items missing a duration so fastest/slowest-first
+    learns real estimates. Light I/O (header reads), paced so it doesn't
+    compete with active encoding. Unprobeable files get a -1 sentinel so they
+    aren't retried forever."""
+    while not _backfill_stop.is_set():
+        try:
+            items = db.get_pending_without_duration(limit=8)
+            if not items:
+                _backfill_stop.wait(300)   # nothing to do — recheck in 5 min
+                continue
+            done = 0
+            for it in items:
+                if _backfill_stop.is_set():
+                    break
+                try:
+                    specs = scanner.analyze_file(it['file_path'])
+                    dur = float((specs or {}).get('duration', 0) or 0)
+                except Exception:
+                    dur = 0.0
+                db.update_queue_item(it['id'], duration_seconds=dur if dur > 0 else -1)
+                done += 1
+                _backfill_stop.wait(1.5)   # gentle pacing
+            if done:
+                try:
+                    from app.devlog import devlog
+                    devlog('dur_backfill', n=done)
+                except Exception:
+                    pass
+            _backfill_stop.wait(5)
+        except Exception:
+            _backfill_stop.wait(60)
+
+
+def start_duration_backfill():
+    """Launch the background duration-backfill worker (idempotent-ish)."""
+    _backfill_stop.clear()
+    _threading.Thread(target=_duration_backfill_loop, daemon=True,
+                      name="DurationBackfill").start()
 
 
 # Global scanner instance

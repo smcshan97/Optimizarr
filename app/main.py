@@ -92,36 +92,48 @@ async def lifespan(app: FastAPI):
     from app.upscaler import start_update_checker
     start_update_checker()
 
-    # Sweep leftover *_optimized.* temp files before anything starts encoding
-    # (orphans from a killed/crashed encode). Safe here — encoder isn't running.
-    try:
-        from app.scanner import cleanup_orphaned_outputs
-        n_temp = cleanup_orphaned_outputs()
-        if n_temp:
-            print(f"  Cleaned {n_temp} orphaned _optimized temp file(s)")
-            devlog('temp_cleanup', n=n_temp)
-    except Exception as e:
-        print(f"  ⚠ Temp cleanup failed: {e}")
+    # Background: backfill missing video durations so fastest/slowest-first
+    # learns real encode-time estimates (gentle, paced — see scanner).
+    from app.scanner import start_duration_backfill
+    start_duration_backfill()
 
     initialize_scheduler()
 
-    # Start where you left off: resume encoding on boot only if the user's
-    # last intent was "running" (default true), there's pending work, and the
-    # schedule permits. A manual Stop persists intent=false, so a box you
-    # deliberately stopped stays stopped across restarts.
-    try:
-        from app.encoder import encoder_pool
-        from app.scheduler import schedule_manager
-        import threading as _enc_t
-        pending = db.count_pending()
-        wants_autostart = db.get_setting('encoder_autostart', 'true') == 'true'
-        if (wants_autostart and not encoder_pool.is_running and pending > 0
-                and schedule_manager.should_encode_now()):
-            _enc_t.Thread(target=encoder_pool.process_queue, daemon=True).start()
-            print(f"▶ Resumed encoding on boot ({pending} pending)")
-            devlog('autostart', pending=pending)
-    except Exception as e:
-        print(f"  ⚠ Boot resume check failed: {e}")
+    # Heavy startup chores run OFF the boot path in one background thread so
+    # the UI is available immediately (a big/networked library walk must not
+    # bog down program start). Sequenced so the orphan sweep finishes before
+    # the resume encode begins — no racing the new encode's temp file.
+    def _startup_chores():
+        # 1. Sweep leftover *_optimized.* temps (skips recent files, so an
+        #    encode that a webhook kicked off meanwhile is never touched).
+        try:
+            from app.scanner import cleanup_orphaned_outputs
+            n_temp = cleanup_orphaned_outputs()
+            if n_temp:
+                print(f"  Cleaned {n_temp} orphaned _optimized temp file(s)")
+                devlog('temp_cleanup', n=n_temp)
+        except Exception as e:
+            print(f"  ⚠ Temp cleanup failed: {e}")
+
+        # 2. Start where you left off: resume encoding only if the user's last
+        #    intent was "running" (default true), there's pending work, and the
+        #    schedule permits. A manual Stop persists intent=false. process_queue
+        #    blocks here and becomes the encoder loop for this session.
+        try:
+            from app.encoder import encoder_pool
+            from app.scheduler import schedule_manager
+            pending = db.count_pending()
+            wants = db.get_setting('encoder_autostart', 'true') == 'true'
+            if (wants and not encoder_pool.is_running and pending > 0
+                    and schedule_manager.should_encode_now()):
+                print(f"▶ Resumed encoding on boot ({pending} pending)")
+                devlog('autostart', pending=pending)
+                encoder_pool.process_queue()
+        except Exception as e:
+            print(f"  ⚠ Boot resume failed: {e}")
+
+    import threading as _chores_t
+    _chores_t.Thread(target=_startup_chores, daemon=True, name="StartupChores").start()
 
     from app.watcher import folder_watcher
     watches = db.get_folder_watches(enabled_only=True)
