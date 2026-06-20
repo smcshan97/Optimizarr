@@ -558,5 +558,47 @@ def estimate_encode_seconds(duration_seconds, target_codec, speed_stats) -> Opti
     return duration_seconds * ratio
 
 
+def cleanup_orphaned_outputs(exclude_paths=None) -> int:
+    """Delete leftover ``*_optimized.*`` temp files across enabled scan roots.
+
+    The encoder writes ``{stem}_optimized{ext}`` then renames it to the final
+    name on success, so any surviving ``_optimized`` file is a partial output
+    from a killed or crashed encode. MUST only be called when the relevant
+    encode is not active — pass the in-flight temp paths via ``exclude_paths``
+    to be safe during a running queue.
+
+    Returns the number of files removed.
+    """
+    exclude = {str(Path(p)) for p in (exclude_paths or [])}
+    removed = 0
+    for root in db.get_scan_roots(enabled_only=True):
+        base = Path(root['path'])
+        if not base.exists():
+            continue
+        recursive = bool(root.get('recursive', True))
+        try:
+            pattern = base.rglob('*') if recursive else base.glob('*')
+            for f in pattern:
+                try:
+                    if (f.is_file()
+                            and f.suffix.lower() in MediaScanner.VIDEO_EXTENSIONS
+                            and f.stem.endswith('_optimized')
+                            and str(f) not in exclude):
+                        f.unlink()
+                        removed += 1
+                except (PermissionError, OSError):
+                    continue
+        except (PermissionError, OSError):
+            continue
+    if removed:
+        try:
+            from app.logger import optimizarr_logger
+            optimizarr_logger.app_logger.info(
+                "Cleaned %d orphaned _optimized file(s)", removed)
+        except Exception:
+            pass
+    return removed
+
+
 # Global scanner instance
 scanner = MediaScanner()

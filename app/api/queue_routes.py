@@ -525,6 +525,23 @@ async def recheck_item_permissions(
     )
 
 
+@router.post("/queue/cleanup-temp", response_model=MessageResponse)
+async def cleanup_temp_outputs(current_user: dict = Depends(get_current_admin_user)):
+    """Delete leftover *_optimized.* temp files (admin only).
+
+    Refused while encoding is active — the in-progress encode owns a live
+    temp file. Run it when idle to clear partials from killed/crashed jobs.
+    """
+    if encoder_pool.is_running:
+        return MessageResponse(
+            message="Encoder is running — stop it first, then clean up temp files",
+            success=False
+        )
+    from app.scanner import cleanup_orphaned_outputs
+    removed = await asyncio.to_thread(cleanup_orphaned_outputs)
+    return MessageResponse(message=f"Removed {removed} leftover _optimized file(s)")
+
+
 @router.post("/queue/retry-failed", response_model=MessageResponse)
 async def retry_all_failed(current_user: dict = Depends(get_current_user)):
     """Re-queue every failed item (resets retry counters)."""

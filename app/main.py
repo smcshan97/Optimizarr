@@ -92,6 +92,17 @@ async def lifespan(app: FastAPI):
     from app.upscaler import start_update_checker
     start_update_checker()
 
+    # Sweep leftover *_optimized.* temp files before anything starts encoding
+    # (orphans from a killed/crashed encode). Safe here — encoder isn't running.
+    try:
+        from app.scanner import cleanup_orphaned_outputs
+        n_temp = cleanup_orphaned_outputs()
+        if n_temp:
+            print(f"  Cleaned {n_temp} orphaned _optimized temp file(s)")
+            devlog('temp_cleanup', n=n_temp)
+    except Exception as e:
+        print(f"  ⚠ Temp cleanup failed: {e}")
+
     initialize_scheduler()
 
     # Resume encoding on boot when the schedule permits and there's pending

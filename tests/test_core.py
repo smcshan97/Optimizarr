@@ -1275,6 +1275,8 @@ class TestEncoderSingleLoop:
         """
         import threading, time
         import app.encoder as enc
+        # Don't let the loop's finally sweep the real filesystem
+        monkeypatch.setattr('app.scanner.cleanup_orphaned_outputs', lambda *a, **k: 0)
         pool = enc.EncoderPool()
 
         gate = threading.Event()
@@ -1306,5 +1308,45 @@ class TestEncoderSingleLoop:
         monkeypatch.setattr(enc.db, 'get_next_pending_item', lambda: None)
         monkeypatch.setattr(enc.db, 'count_pending', lambda: 0)
         monkeypatch.setattr('app.notifications.notify_queue_empty', lambda: None)
+        monkeypatch.setattr('app.scanner.cleanup_orphaned_outputs', lambda *a, **k: 0)
         pool.process_queue()              # empty queue → runs once, breaks
         assert pool.is_running is False
+
+
+# ---------------------------------------------------------------------------
+# Orphaned _optimized temp cleanup
+# ---------------------------------------------------------------------------
+
+class TestTempCleanup:
+    def test_removes_only_optimized_files(self, fresh_db, tmp_path, monkeypatch):
+        import app.scanner as sc
+        monkeypatch.setattr(sc, 'db', fresh_db)
+
+        # A scan root with a real source file + an orphaned _optimized temp
+        (tmp_path / "movie.mkv").write_bytes(b"source")
+        (tmp_path / "movie_optimized.mkv").write_bytes(b"partial")
+        (tmp_path / "show_optimized.mp4").write_bytes(b"partial2")
+        (tmp_path / "notes.txt").write_text("keep", encoding="utf-8")
+        fresh_db.create_scan_root(path=str(tmp_path), profile_id=1)
+
+        removed = sc.cleanup_orphaned_outputs()
+        assert removed == 2
+        assert (tmp_path / "movie.mkv").exists()       # source kept
+        assert (tmp_path / "notes.txt").exists()       # non-video kept
+        assert not (tmp_path / "movie_optimized.mkv").exists()
+        assert not (tmp_path / "show_optimized.mp4").exists()
+
+    def test_exclude_paths_protects_active_temp(self, fresh_db, tmp_path, monkeypatch):
+        """An in-flight temp passed in exclude_paths is NOT deleted."""
+        import app.scanner as sc
+        monkeypatch.setattr(sc, 'db', fresh_db)
+
+        active = tmp_path / "active_optimized.mkv"
+        active.write_bytes(b"encoding now")
+        (tmp_path / "dead_optimized.mkv").write_bytes(b"orphan")
+        fresh_db.create_scan_root(path=str(tmp_path), profile_id=1)
+
+        removed = sc.cleanup_orphaned_outputs(exclude_paths=[str(active)])
+        assert removed == 1
+        assert active.exists()                          # protected
+        assert not (tmp_path / "dead_optimized.mkv").exists()

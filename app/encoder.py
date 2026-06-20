@@ -1059,6 +1059,12 @@ class EncoderPool:
             # encoder can be started again (and isn't wedged "running").
             self.is_running = False
             print("Encoder pool stopped")
+            # Encoder is idle now — sweep any leftover _optimized temp files.
+            try:
+                from app.scanner import cleanup_orphaned_outputs
+                cleanup_orphaned_outputs()
+            except Exception:
+                pass
     
     def _load_resource_settings(self) -> Dict:
         """Load resource management settings from database."""
