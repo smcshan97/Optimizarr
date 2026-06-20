@@ -1004,51 +1004,61 @@ class EncoderPool:
         self.max_concurrent = max_concurrent
         self.active_jobs: list[EncodingJob] = []
         self.is_running = False
-    
+        # Guards the single running loop. Multiple near-simultaneous triggers
+        # (boot auto-start, BURSTY webhooks — Radarr fires Download+Test in the
+        # same second — the scheduler, manual Start) must not each spawn a
+        # process_queue loop: that ran many concurrent HandBrakeCLI processes
+        # that stop() couldn't fully track ("wouldn't close, stop didn't work").
+        self._lifecycle_lock = threading.Lock()
+
     def process_queue(self):
-        """Process the encoding queue."""
-        self.is_running = True
-        
+        """Process the encoding queue. Exactly one loop runs at a time."""
+        # Atomically claim the single running slot.
+        with self._lifecycle_lock:
+            if self.is_running:
+                print("Encoder already running — ignoring duplicate start")
+                return
+            self.is_running = True
+
         print("Starting encoder pool...")
-        
-        while self.is_running:
-            # Check if we can start a new job
-            if len(self.active_jobs) < self.max_concurrent:
-                # Next eligible item (skips items still in retry backoff)
-                item = db.get_next_pending_item()
+        try:
+            while self.is_running:
+                # Only one job at a time (job.start() is blocking, so a single
+                # loop already serializes encodes; the real risk was multiple
+                # loops, now prevented above).
+                if len(self.active_jobs) < self.max_concurrent:
+                    # Next eligible item (skips items still in retry backoff)
+                    item = db.get_next_pending_item()
 
-                if item:
-                    # Get profile
-                    profile = db.get_profile(item['profile_id'])
+                    if item:
+                        profile = db.get_profile(item['profile_id'])
+                        if profile:
+                            resource_limits = self._load_resource_settings()
+                            job = EncodingJob(item['id'], profile, resource_limits)
+                            self.active_jobs.append(job)
+                            try:
+                                job.start()  # blocking
+                            finally:
+                                if job in self.active_jobs:
+                                    self.active_jobs.remove(job)
+                    elif db.count_pending() == 0:
+                        # Truly empty — nothing pending at all
+                        print("✓ Queue is empty")
+                        try:
+                            from app.notifications import notify_queue_empty
+                            notify_queue_empty()
+                        except Exception:
+                            pass
+                        break
+                    # else: pending items exist but are all waiting on retry
+                    # backoff — keep looping until one becomes eligible
 
-                    if profile:
-                        # Load resource settings
-                        resource_limits = self._load_resource_settings()
-
-                        # Create and start job
-                        job = EncodingJob(item['id'], profile, resource_limits)
-                        self.active_jobs.append(job)
-
-                        # Start encoding (blocking for now - will be async later)
-                        success = job.start()
-
-                        # Remove from active jobs
-                        self.active_jobs.remove(job)
-                elif db.count_pending() == 0:
-                    # Truly empty — nothing pending at all
-                    print("✓ Queue is empty")
-                    try:
-                        from app.notifications import notify_queue_empty
-                        notify_queue_empty()
-                    except Exception:
-                        pass
-                    break
-                # else: pending items exist but are all waiting on retry
-                # backoff — keep looping until one becomes eligible
-
-            time.sleep(1)
-
-        print("Encoder pool stopped")
+                time.sleep(1)
+        finally:
+            # Always release the slot, even on an unexpected error, so the
+            # encoder can be started again (and isn't wedged "running").
+            self.is_running = False
+            print("Encoder pool stopped")
     
     def _load_resource_settings(self) -> Dict:
         """Load resource management settings from database."""

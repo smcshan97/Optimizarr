@@ -1252,3 +1252,59 @@ class TestSchedulerSafety:
         mgr.schedule_config['start_time'] = '00:00'
         mgr.schedule_config['end_time'] = '23:59'
         assert mgr.should_encode_now() is True
+
+
+# ---------------------------------------------------------------------------
+# Encoder single-loop concurrency guard (Patch 42)
+# ---------------------------------------------------------------------------
+
+class TestEncoderSingleLoop:
+    def test_duplicate_start_is_rejected(self):
+        """A second process_queue while one is 'running' returns immediately."""
+        from app.encoder import EncoderPool
+        pool = EncoderPool()
+        pool.is_running = True            # simulate a loop already active
+        pool.process_queue()              # must no-op, not run the loop
+        assert pool.is_running is True    # untouched (didn't enter try/finally)
+
+    def test_only_one_concurrent_loop(self, monkeypatch):
+        """Bursty triggers (webhooks/boot/scheduler) spawn one loop, not many.
+
+        This is the bug behind 'a bunch of HandBrakes running, stop didn't
+        work': N callers each passed `if not is_running` and started a loop.
+        """
+        import threading, time
+        import app.encoder as enc
+        pool = enc.EncoderPool()
+
+        gate = threading.Event()
+        entered = []
+        def fake_next():
+            entered.append(1)
+            gate.wait(timeout=3)   # hold the loop body open
+            return None
+        monkeypatch.setattr(enc.db, 'get_next_pending_item', fake_next)
+        monkeypatch.setattr(enc.db, 'count_pending', lambda: 0)
+
+        threads = [threading.Thread(target=pool.process_queue) for _ in range(6)]
+        for t in threads:
+            t.start()
+        time.sleep(0.5)            # let all six race the guard
+
+        assert pool.is_running is True
+        assert len(entered) == 1, f"{len(entered)} loops ran — must be exactly 1"
+
+        gate.set()                 # release the held loop
+        for t in threads:
+            t.join(timeout=5)
+        assert pool.is_running is False   # finally reset the slot
+
+    def test_loop_resets_running_on_exit(self, monkeypatch):
+        """is_running is always cleared on loop exit (no wedged 'running')."""
+        import app.encoder as enc
+        pool = enc.EncoderPool()
+        monkeypatch.setattr(enc.db, 'get_next_pending_item', lambda: None)
+        monkeypatch.setattr(enc.db, 'count_pending', lambda: 0)
+        monkeypatch.setattr('app.notifications.notify_queue_empty', lambda: None)
+        pool.process_queue()              # empty queue → runs once, breaks
+        assert pool.is_running is False
