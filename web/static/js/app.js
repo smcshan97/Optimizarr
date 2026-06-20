@@ -1420,10 +1420,19 @@ async function loadScanRoots() {
     }
     
     container.innerHTML = roots.map(r => `
-        <div class="bg-gray-700 rounded-lg p-4 mb-3">
+        <div class="bg-gray-700 rounded-lg p-4 mb-3 ${r.path_exists === false ? 'border border-red-600' : ''}">
+            ${r.path_exists === false ? `
+            <div class="mb-3 p-3 rounded" style="background:var(--danger-dim,rgba(220,50,50,0.12));border:1px solid rgba(220,50,50,0.4)">
+                <div style="color:var(--danger)" class="font-semibold text-sm">⚠️ Folder not found on disk</div>
+                <p class="text-xs text-gray-300 mt-1">This drive may be unplugged, or the folder was moved or deleted. Did it move (update the path) or should this library be removed?</p>
+                <div class="flex gap-2 mt-2">
+                    <button onclick="editScanRoot(${r.id})" class="btn btn-primary btn-xs">📁 It moved — update path</button>
+                    <button onclick="deleteScanRoot(${r.id}, '${(r.path||'').replace(/'/g,"\\'")}')" class="btn btn-danger btn-xs">🗑 Delete this library</button>
+                </div>
+            </div>` : ''}
             <div class="flex justify-between items-start">
                 <div class="flex-1">
-                    <h3 class="font-semibold text-lg">${r.path}</h3>
+                    <h3 class="font-semibold text-lg">${r.path_exists === false ? '🔌 ' : ''}${r.path}</h3>
                     <div class="flex gap-4 mt-2 text-sm text-gray-300">
                         <div><span class="text-gray-400">Type:</span> ${getLibraryTypeLabel(r.library_type)}</div>
                         <div><span class="text-gray-400">Profile:</span> ${r.profile_name || 'Unknown'}</div>

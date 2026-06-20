@@ -1,4 +1,5 @@
 """Scan root management routes."""
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from typing import List
 
@@ -10,11 +11,25 @@ from app.scanner import scanner
 router = APIRouter()
 
 
+def _annotate_path_exists(root: dict) -> dict:
+    """Flag whether the root's folder is currently reachable on disk.
+
+    A missing path means the drive was unplugged or the folder moved — the
+    UI surfaces this and offers 'update path' vs 'delete root'.
+    """
+    try:
+        from pathlib import Path as _P
+        root['path_exists'] = _P(root['path']).exists()
+    except Exception:
+        root['path_exists'] = False
+    return root
+
+
 @router.get("/scan-roots", response_model=List[ScanRootResponse])
 async def list_scan_roots(current_user: dict = Depends(get_current_user)):
-    """Get all scan roots."""
-    roots = db.get_scan_roots()
-    return roots
+    """Get all scan roots (with a live path-exists check)."""
+    roots = await asyncio.to_thread(db.get_scan_roots)
+    return [_annotate_path_exists(r) for r in roots]
 
 
 @router.post("/scan-roots", response_model=ScanRootResponse, status_code=status.HTTP_201_CREATED)

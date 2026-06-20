@@ -218,6 +218,8 @@ class ScanRootResponse(BaseModel):
     # Folder-watch state (eye toggle)
     watch_enabled: Optional[bool] = False
     watch_id: Optional[int] = None
+    # Whether the folder currently exists on disk (False = moved/unplugged)
+    path_exists: Optional[bool] = True
 
 
 # ============================================================

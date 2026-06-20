@@ -1502,3 +1502,16 @@ class TestFastestFirstFallback:
         asyncio.run(queue_routes.prioritize_queue(
             {'sort_by': 'fastest_first', 'order': 'asc'}, current_user={}))
         assert fresh_db.get_queue_item(short)['priority'] < fresh_db.get_queue_item(bigunknown)['priority']
+
+
+# ---------------------------------------------------------------------------
+# Scan-root path-exists detection (Patch 44)
+# ---------------------------------------------------------------------------
+
+class TestScanRootPathExists:
+    def test_annotate_path_exists(self, tmp_path):
+        from app.api.scan_routes import _annotate_path_exists
+        present = _annotate_path_exists({'path': str(tmp_path)})
+        missing = _annotate_path_exists({'path': str(tmp_path / "gone_drive_X")})
+        assert present['path_exists'] is True
+        assert missing['path_exists'] is False
