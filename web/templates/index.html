@@ -1517,6 +1517,16 @@
                         </label>
                     </div>
 
+                    <!-- Max concurrent encodes -->
+                    <div class="p-4 bg-gray-700 rounded-lg flex items-center justify-between">
+                        <div>
+                            <h3 class="font-semibold">Max concurrent encodes</h3>
+                            <p class="text-sm text-gray-400 mt-1">How many videos may encode at once. Automatically drops back to 1 when GPU/CPU temps get close to the pause thresholds. Leave at 1 unless you know your hardware handles parallel encodes.</p>
+                        </div>
+                        <input type="number" id="maxConcurrentJobs" min="1" max="8" step="1" value="1"
+                            class="w-20 bg-gray-800 border border-gray-600 rounded px-3 py-1.5 text-white text-center" style="font-size:14px">
+                    </div>
+
                     <!-- Current Status -->
                     <div class="p-4 bg-gray-700 rounded-lg">
                         <h3 class="font-semibold mb-2">Current Status</h3>

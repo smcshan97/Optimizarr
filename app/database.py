@@ -791,20 +791,27 @@ class Database:
             ))
             return cursor.lastrowid
 
-    def get_next_pending_item(self) -> Optional[Dict]:
+    def get_next_pending_item(self, exclude_ids=None) -> Optional[Dict]:
         """The next pending item eligible to encode (rank 1 first).
 
         Skips items still in retry backoff (retry_after in the future) and
         fetches only ONE row — the encoder no longer loads the whole pending
-        backlog just to pick the head.
+        backlog just to pick the head. ``exclude_ids`` omits items already
+        in flight (so a parallel controller doesn't dispatch the same row
+        twice before its job has flipped it to 'processing').
         """
+        exclude_ids = [int(i) for i in (exclude_ids or [])]
         with self.get_read_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute(
-                "SELECT * FROM queue WHERE status = 'pending' "
-                "AND (retry_after IS NULL OR retry_after <= CURRENT_TIMESTAMP) "
-                "ORDER BY priority ASC, created_at LIMIT 1"
-            )
+            sql = ("SELECT * FROM queue WHERE status = 'pending' "
+                   "AND (retry_after IS NULL OR retry_after <= CURRENT_TIMESTAMP)")
+            params = []
+            if exclude_ids:
+                placeholders = ",".join("?" * len(exclude_ids))
+                sql += f" AND id NOT IN ({placeholders})"
+                params.extend(exclude_ids)
+            sql += " ORDER BY priority ASC, created_at LIMIT 1"
+            cursor.execute(sql, params)
             row = cursor.fetchone()
             if not row:
                 return None

@@ -3048,7 +3048,7 @@ async function saveSchedule() {
         end_time: document.getElementById('endTime').value,
         timezone: 'local',
         use_windows_rest_hours: useWinEl ? useWinEl.checked : false,
-        max_concurrent_jobs: 1,
+        max_concurrent_jobs: parseInt((document.getElementById('maxConcurrentJobs') || {}).value) || 1,
         finish_before_stop: (document.getElementById('finishBeforeStop') || {}).checked || false,
     };
     const result = await apiRequest('/schedule', {
@@ -3094,6 +3094,9 @@ async function loadSchedule() {
 
     const finishEl = document.getElementById('finishBeforeStop');
     if (finishEl) finishEl.checked = config.finish_before_stop || false;
+
+    const maxConcEl = document.getElementById('maxConcurrentJobs');
+    if (maxConcEl) maxConcEl.value = config.max_concurrent_jobs || 1;
 
     // Status indicators
     const statusEl = document.getElementById('scheduleStatus');

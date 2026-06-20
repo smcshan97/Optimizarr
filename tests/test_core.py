@@ -1350,3 +1350,98 @@ class TestTempCleanup:
         assert removed == 1
         assert active.exists()                          # protected
         assert not (tmp_path / "dead_optimized.mkv").exists()
+
+
+# ---------------------------------------------------------------------------
+# Temperature-gated concurrency (Patch 43)
+# ---------------------------------------------------------------------------
+
+class TestConcurrency:
+    def test_get_next_pending_excludes_inflight(self, fresh_db):
+        """A parallel controller won't be handed an already-dispatched item."""
+        a = fresh_db.add_to_queue(file_path="/x/a.mkv", profile_id=1, priority=1)
+        b = fresh_db.add_to_queue(file_path="/x/b.mkv", profile_id=1, priority=2)
+        assert fresh_db.get_next_pending_item()['id'] == a
+        # With 'a' in flight, the next eligible is 'b'
+        assert fresh_db.get_next_pending_item(exclude_ids=[a])['id'] == b
+        assert fresh_db.get_next_pending_item(exclude_ids=[a, b]) is None
+
+    def test_effective_concurrency_default_is_one(self):
+        from app.encoder import EncoderPool
+        pool = EncoderPool()
+        assert pool._effective_concurrency(1) == 1   # never engages temp logic
+
+    def test_effective_concurrency_drops_when_hot(self, monkeypatch):
+        """Hot GPU/CPU forces concurrency back to 1; cool allows the max."""
+        import app.encoder as enc
+        pool = enc.EncoderPool()
+        monkeypatch.setattr(pool, '_load_resource_settings',
+                            lambda: {'gpu_temp_threshold': 83.0, 'cpu_temp_threshold': 85.0})
+
+        # Hot GPU (within 10°C of the 83° pause threshold) → 1
+        monkeypatch.setattr(enc.resource_monitor, 'get_all_resources',
+                            lambda: {'gpu': {'temperature_c': 80.0}, 'cpu': {'temperature_c': 50.0}})
+        pool._effective_cache = None
+        assert pool._effective_concurrency(3) == 1
+
+        # Cool → full max
+        monkeypatch.setattr(enc.resource_monitor, 'get_all_resources',
+                            lambda: {'gpu': {'temperature_c': 60.0}, 'cpu': {'temperature_c': 50.0}})
+        pool._effective_cache = None
+        pool._last_temp_check = 0.0
+        assert pool._effective_concurrency(3) == 3
+
+    def test_effective_concurrency_conservative_on_error(self, monkeypatch):
+        """If temps can't be read, fall back to 1 (don't pile on encodes)."""
+        import app.encoder as enc
+        pool = enc.EncoderPool()
+        monkeypatch.setattr(pool, '_load_resource_settings',
+                            lambda: {'gpu_temp_threshold': 83.0, 'cpu_temp_threshold': 85.0})
+        def boom():
+            raise RuntimeError("pynvml hung")
+        monkeypatch.setattr(enc.resource_monitor, 'get_all_resources', boom)
+        pool._effective_cache = None
+        assert pool._effective_concurrency(4) == 1
+
+    def test_parallel_dispatches_up_to_effective(self, monkeypatch):
+        """_run_parallel launches up to `effective` jobs, no item dispatched twice."""
+        import threading, time
+        import app.encoder as enc
+        pool = enc.EncoderPool()
+        pool.is_running = True
+
+        # Two pending items; effective concurrency pinned to 2
+        items = {1: {'id': 1, 'profile_id': 1}, 2: {'id': 2, 'profile_id': 1}}
+        remaining = dict(items)
+        def fake_next(exclude_ids=None):
+            ex = set(exclude_ids or [])
+            for i in sorted(remaining):
+                if i not in ex:
+                    return remaining[i]
+            return None
+        monkeypatch.setattr(enc.db, 'get_next_pending_item', fake_next)
+        monkeypatch.setattr(enc.db, 'get_profile', lambda pid: {'name': 'P', 'codec': 'av1', 'container': 'mkv'})
+        monkeypatch.setattr(enc.db, 'count_pending', lambda: len(remaining))
+        monkeypatch.setattr(pool, '_load_resource_settings', lambda: {})
+        monkeypatch.setattr(pool, '_effective_concurrency', lambda mc: 2)
+
+        started = []
+        gate = threading.Event()
+        class FakeJob:
+            def __init__(self, qid, profile, limits):
+                self.queue_item_id = qid
+            def start(self):
+                started.append(self.queue_item_id)
+                gate.wait(timeout=3)
+                remaining.pop(self.queue_item_id, None)
+        monkeypatch.setattr(enc, 'EncodingJob', FakeJob)
+
+        t = threading.Thread(target=pool._run_parallel, args=(2,), daemon=True)
+        t.start()
+        time.sleep(0.5)
+        # Both items dispatched concurrently, each exactly once
+        assert sorted(started) == [1, 2]
+        assert len(pool.active_jobs) == 2
+        gate.set()
+        pool.is_running = False
+        t.join(timeout=5)
