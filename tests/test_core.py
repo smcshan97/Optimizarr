@@ -1445,3 +1445,60 @@ class TestConcurrency:
         gate.set()
         pool.is_running = False
         t.join(timeout=5)
+
+
+# ---------------------------------------------------------------------------
+# Fastest/slowest prioritization with size fallback (Patch 43)
+# ---------------------------------------------------------------------------
+
+class TestFastestFirstFallback:
+    def _make_default_profile(self, db):
+        return db.create_profile(
+            name="P", resolution="", framerate=None, codec="av1",
+            encoder="svt_av1", quality=28, audio_codec="passthrough",
+            container="mkv", audio_handling="preserve_all",
+            subtitle_handling="none", chapter_markers=True,
+            enable_filters=False, hw_accel_enabled=False, preset="8",
+            two_pass=False, custom_args=None, is_default=True,
+        )
+
+    def test_unknown_duration_orders_by_size(self, fresh_db, monkeypatch):
+        """Fastest-first ranks a huge no-duration file AFTER a small clip."""
+        import asyncio
+        from app.api import queue_routes
+        monkeypatch.setattr(queue_routes, 'db', fresh_db)
+        self._make_default_profile(fresh_db)
+
+        big = fresh_db.add_to_queue(file_path="/x/vr_giant.mkv", profile_id=1,
+                                    duration_seconds=0, file_size_bytes=80_000_000_000,
+                                    target_specs={'codec': 'av1'})
+        small = fresh_db.add_to_queue(file_path="/x/clip.mkv", profile_id=1,
+                                      duration_seconds=0, file_size_bytes=200_000_000,
+                                      target_specs={'codec': 'av1'})
+
+        asyncio.run(queue_routes.prioritize_queue(
+            {'sort_by': 'fastest_first', 'order': 'asc'}, current_user={}))
+
+        # Small clip gets rank 1, giant VR last — even with no durations
+        assert fresh_db.get_queue_item(small)['priority'] < fresh_db.get_queue_item(big)['priority']
+
+    def test_known_duration_beats_size_proxy(self, fresh_db, monkeypatch):
+        """A short known-duration encode outranks a big unknown-duration file."""
+        import asyncio
+        from app.api import queue_routes
+        monkeypatch.setattr(queue_routes, 'db', fresh_db)
+        self._make_default_profile(fresh_db)
+        # Learned speed: av1 ~1x realtime
+        fresh_db.add_history(file_path="/x/h.mkv", encoding_time_seconds=600,
+                             duration_seconds=600, codec='av1')
+
+        short = fresh_db.add_to_queue(file_path="/x/short.mkv", profile_id=1,
+                                      duration_seconds=900, file_size_bytes=500_000_000,
+                                      target_specs={'codec': 'av1'})   # ~15 min
+        bigunknown = fresh_db.add_to_queue(file_path="/x/big.mkv", profile_id=1,
+                                           duration_seconds=0, file_size_bytes=60_000_000_000,
+                                           target_specs={'codec': 'av1'})
+
+        asyncio.run(queue_routes.prioritize_queue(
+            {'sort_by': 'fastest_first', 'order': 'asc'}, current_user={}))
+        assert fresh_db.get_queue_item(short)['priority'] < fresh_db.get_queue_item(bigunknown)['priority']

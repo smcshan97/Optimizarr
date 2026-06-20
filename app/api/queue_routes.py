@@ -345,9 +345,11 @@ async def prioritize_queue(
            fastest/slowest strategies, which embed their own direction)
 
     fastest_first / slowest_first sort by estimated encode time, derived from
-    each item's video duration and the average encode speed in history for
-    its target codec. Fastest-first suits short encoding windows; slowest-
-    first suits overnight runs. Items with unknown duration sort last.
+    each item's video duration and the learned average encode speed in history
+    for its target codec. Items missing a duration (not yet re-scanned) fall
+    back to a file-size proxy calibrated from items that DO have durations, so
+    a 25-hour VR file still sorts after a 15-minute clip without a re-scan.
+    Fastest-first suits short encoding windows; slowest-first suits overnight.
     """
     sort_by = data.get("sort_by", "default")
     order = data.get("order", "desc")
@@ -369,18 +371,34 @@ async def prioritize_queue(
         speed_stats = db.get_encode_speed_stats()
         slowest = (sort_by == "slowest_first")
 
-        def _sort_key(item):
-            target = item.get("target_specs") or {}
-            est = estimate_encode_seconds(
-                item.get("duration_seconds") or 0,
-                target.get("codec") if isinstance(target, dict) else None,
-                speed_stats,
-            )
-            if est is None:
-                return (1, 0)  # unknown duration → always last
-            return (0, -est if slowest else est)
+        def _codec(item):
+            t = item.get("target_specs") or {}
+            return t.get("codec") if isinstance(t, dict) else None
 
-        items.sort(key=_sort_key)
+        # Calibrate seconds-per-byte from items that HAVE a duration, then use
+        # it to estimate a cost for items that don't — so unknowns order by
+        # size instead of all piling at the end.
+        spb_samples = []
+        for it in items:
+            dur = it.get("duration_seconds") or 0
+            size = it.get("file_size_bytes") or 0
+            if dur > 0 and size > 0:
+                est = estimate_encode_seconds(dur, _codec(it), speed_stats)
+                if est:
+                    spb_samples.append(est / size)
+        avg_spb = (sum(spb_samples) / len(spb_samples)) if spb_samples else None
+
+        def _cost(item):
+            est = estimate_encode_seconds(
+                item.get("duration_seconds") or 0, _codec(item), speed_stats)
+            if est is not None:
+                return est
+            size = item.get("file_size_bytes") or 0
+            # Calibrated proxy when we have samples; else raw size keeps a
+            # consistent big-after-small ordering among unknowns.
+            return size * avg_spb if avg_spb is not None else size * 1e-6
+
+        items.sort(key=_cost, reverse=slowest)
     # default: leave current order but we still write priorities below
 
     # Assign rank-based priorities: 1 = first to encode, 2 = second, etc.
