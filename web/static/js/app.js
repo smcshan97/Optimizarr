@@ -2008,11 +2008,14 @@ async function changePassword() {
 
 // Load account info when settings tab opens
 function loadAccountInfo() {
-    const username = localStorage.getItem('username') || 'admin';
-    const isAdmin = localStorage.getItem('is_admin') === 'true';
-    
-    document.getElementById('accountUsername').value = username;
-    document.getElementById('accountRole').value = isAdmin ? 'Administrator' : 'User';
+    // Login stores a single 'user' JSON blob (login.html) — the old code
+    // read 'username'/'is_admin' keys nothing ever set, so this panel
+    // always showed "admin / Administrator" regardless of who logged in.
+    let user = {};
+    try { user = JSON.parse(localStorage.getItem('user') || '{}'); } catch (_) {}
+
+    document.getElementById('accountUsername').value = user.username || '';
+    document.getElementById('accountRole').value = user.is_admin ? 'Administrator' : 'User';
 }
 
 
