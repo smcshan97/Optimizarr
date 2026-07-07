@@ -1705,3 +1705,39 @@ class TestThrottlerVerdictCache:
         assert t.should_pause_encoding() == (False, "")
         assert t.should_pause_encoding() == (False, "")
         assert t.monitor.calls == 1
+
+
+# ---------------------------------------------------------------------------
+# Audit fixes round 2: route ordering, seed dedupe, stereo crop filters
+# ---------------------------------------------------------------------------
+
+class TestProfileExportRouteOrder:
+    def test_export_registered_before_id_param(self):
+        """GET /profiles/export must be matched before /profiles/{profile_id},
+        otherwise 'export' is coerced to an int path param and 422s."""
+        from app.api.profile_routes import router
+        paths = [r.path for r in router.routes if "GET" in getattr(r, "methods", set())]
+        assert "/profiles/export" in paths
+        assert paths.index("/profiles/export") < paths.index("/profiles/{profile_id}")
+
+
+class TestDefaultProfilesShared:
+    def test_single_source_of_truth(self):
+        from app.main import DEFAULT_PROFILES
+        assert len(DEFAULT_PROFILES) == 5
+        names = {p["name"] for p in DEFAULT_PROFILES}
+        assert len(names) == 5
+        # Exactly one built-in default
+        assert sum(1 for p in DEFAULT_PROFILES if p["is_default"]) == 1
+
+
+class TestStereoCropFilters:
+    def test_half_formats_restore_aspect(self):
+        """Half-SBS/TB store each eye anamorphic — 2D extraction must scale
+        the cropped eye back to the original aspect ratio."""
+        from app.stereo import STEREO_FORMATS
+        assert "scale=2*iw:ih" in STEREO_FORMATS["half_sbs"]["crop_filter"]
+        assert "scale=iw:2*ih" in STEREO_FORMATS["half_tb"]["crop_filter"]
+        # Full formats: each eye is already full resolution — crop only
+        assert "scale" not in STEREO_FORMATS["sbs"]["crop_filter"]
+        assert "scale" not in STEREO_FORMATS["tb"]["crop_filter"]

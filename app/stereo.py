@@ -53,7 +53,9 @@ STEREO_FORMATS: Dict[str, Dict] = {
         "name": "Half Side-by-Side",
         "description": "Same resolution as input, compatible with most VR players",
         "iw3_flag": "--half-sbs",
-        "crop_filter": "crop=iw/2:ih:0:0",
+        # Half-SBS stores each eye squeezed to half width — after cropping
+        # the left eye, stretch it back to the original aspect ratio.
+        "crop_filter": "crop=iw/2:ih:0:0,scale=2*iw:ih,setsar=1",
     },
     "sbs": {
         "name": "Full Side-by-Side",
@@ -65,7 +67,8 @@ STEREO_FORMATS: Dict[str, Dict] = {
         "name": "Half Top-Bottom",
         "description": "Same resolution, stacked vertically",
         "iw3_flag": "--half-tb",
-        "crop_filter": "crop=iw:ih/2:0:0",
+        # Half-TB squeezes each eye to half height — restore after cropping.
+        "crop_filter": "crop=iw:ih/2:0:0,scale=iw:2*ih,setsar=1",
     },
     "tb": {
         "name": "Full Top-Bottom",

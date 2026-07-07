@@ -541,7 +541,9 @@ function displayQueueItems(items) {
     `;
 
     items.forEach(item => {
-        const fileName = item.file_path.split(/[/\\]/).pop();
+        // _esc: file names arrive from downloads/webhooks — a name like
+        // "<img src=x onerror=...>.mkv" must render as text, not HTML.
+        const fileName = _esc(item.file_path.split(/[/\\]/).pop());
         const codec = getSpec(item, 'codec');
         const resolution = getSpec(item, 'resolution');
         const fps = getSpec(item, 'framerate');
@@ -597,7 +599,7 @@ function displayQueueItems(items) {
                     <div class="flex-1 bg-gray-600 rounded-full h-2.5 overflow-hidden">
                         <div class="bg-red-500 h-2.5 rounded-full" style="width: ${progress}%"></div>
                     </div>
-                    <span class="text-red-400 font-mono text-xs w-14 text-right" title="${item.error_message || ''}">${progress > 0 ? progress.toFixed(1) + '%' : 'ERR'}</span>
+                    <span class="text-red-400 font-mono text-xs w-14 text-right" title="${_esc(item.error_message || '')}">${progress > 0 ? progress.toFixed(1) + '%' : 'ERR'}</span>
                 </div>`;
         } else if (item.status === 'cancelled') {
             progressBar = `
@@ -643,7 +645,7 @@ function displayQueueItems(items) {
         const codecColor = codecColors[codec.toLowerCase()] || 'text-gray-300';
 
         // File info tooltip
-        const tooltip = `Path: ${item.file_path}\nCodec: ${codec}\nResolution: ${resolution}\nFPS: ${fps}\nBitrate: ${bitrate}`;
+        const tooltip = _esc(`Path: ${item.file_path}\nCodec: ${codec}\nResolution: ${resolution}\nFPS: ${fps}\nBitrate: ${bitrate}`);
 
         html += `
             <tr class="border-b border-gray-700 hover:bg-gray-750 ${isSelected ? 'bg-gray-700' : ''}" draggable="true" data-queue-id="${item.id}">
@@ -661,7 +663,7 @@ function displayQueueItems(items) {
                 <td class="py-2 px-2 text-xs">${formatSize(item.file_size_bytes)}</td>
                 <td class="py-2 px-2 text-xs">${savingsDisplay}</td>
                 <td class="py-2 px-2 text-xs" style="color:var(--text-secondary)">${durDisplay}</td>
-                <td class="py-2 px-2"><span class="${sc.color} text-xs" title="${(item.permission_message || item.error_message || '').replace(/"/g, '&quot;')}">${sc.emoji} ${item.status}</span></td>
+                <td class="py-2 px-2"><span class="${sc.color} text-xs" title="${_esc(item.permission_message || item.error_message || '')}">${sc.emoji} ${item.status}</span></td>
                 <td class="py-2 px-2">${progressBar}</td>
                 <td class="py-2 px-2 text-xs text-gray-400">
                     <span class="cursor-pointer hover:text-white" style="border-bottom:1px dotted var(--text-muted)"
@@ -1034,16 +1036,16 @@ async function loadNotifications() {
                 <div class="flex justify-between items-start">
                     <div>
                         <div class="flex items-center gap-2 mb-2">
-                            <span class="font-medium text-gray-100">${n.name}</span>
+                            <span class="font-medium text-gray-100">${_esc(n.name)}</span>
                             ${typeBadge} ${enabledBadge}
                         </div>
-                        <div class="text-xs text-gray-500 mb-2 truncate max-w-[400px]" title="${n.webhook_url}">${n.webhook_url}</div>
+                        <div class="text-xs text-gray-500 mb-2 truncate max-w-[400px]" title="${_esc(n.webhook_url)}">${_esc(n.webhook_url)}</div>
                         <div class="flex gap-1 flex-wrap">${events}</div>
                     </div>
                     <div class="flex gap-2">
                         <button onclick="testNotification(${n.id})" class="btn btn-secondary btn-xs">Test</button>
                         <button onclick="toggleNotification(${n.id}, ${n.enabled ? 'false' : 'true'})" class="btn btn-secondary btn-xs">${n.enabled ? 'Disable' : 'Enable'}</button>
-                        <button onclick="deleteNotification(${n.id}, '${n.name}')" class="btn btn-danger btn-xs">Delete</button>
+                        <button onclick="deleteNotification(${n.id}, '${(n.name||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;')}')" class="btn btn-danger btn-xs">Delete</button>
                     </div>
                 </div>
             </div>`;
@@ -1200,7 +1202,7 @@ async function loadProfiles() {
             <div class="flex justify-between items-start">
                 <div class="flex-1">
                     <div class="flex items-center gap-2">
-                        <h3 class="font-semibold text-lg">${p.name}</h3>
+                        <h3 class="font-semibold text-lg">${_esc(p.name)}</h3>
                         ${p.is_default ? '<span class="px-2 py-1 bg-blue-900 text-blue-300 text-xs rounded">DEFAULT</span>' : ''}
                     </div>
                     <div class="grid grid-cols-2 gap-2 mt-2 text-sm text-gray-300">
@@ -1427,12 +1429,12 @@ async function loadScanRoots() {
                 <p class="text-xs text-gray-300 mt-1">This drive may be unplugged, or the folder was moved or deleted. Did it move (update the path) or should this library be removed?</p>
                 <div class="flex gap-2 mt-2">
                     <button onclick="editScanRoot(${r.id})" class="btn btn-primary btn-xs">📁 It moved — update path</button>
-                    <button onclick="deleteScanRoot(${r.id}, '${(r.path||'').replace(/'/g,"\\'")}')" class="btn btn-danger btn-xs">🗑 Delete this library</button>
+                    <button onclick="deleteScanRoot(${r.id}, '${(r.path||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;')}')" class="btn btn-danger btn-xs">🗑 Delete this library</button>
                 </div>
             </div>` : ''}
             <div class="flex justify-between items-start">
                 <div class="flex-1">
-                    <h3 class="font-semibold text-lg">${r.path_exists === false ? '🔌 ' : ''}${r.path}</h3>
+                    <h3 class="font-semibold text-lg">${r.path_exists === false ? '🔌 ' : ''}${_esc(r.path)}</h3>
                     <div class="flex gap-4 mt-2 text-sm text-gray-300">
                         <div><span class="text-gray-400">Type:</span> ${getLibraryTypeLabel(r.library_type)}</div>
                         <div><span class="text-gray-400">Profile:</span> ${r.profile_name || 'Unknown'}</div>
@@ -1918,12 +1920,15 @@ async function loadDirectoryListing(path) {
         }
 
         data.dirs.forEach(dir => {
-            const escapedPath = dir.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+            // Escapes for a JS string inside an HTML attribute: backslashes +
+            // single quotes for JS, then double quotes so a quoted directory
+            // name can't break out of the attribute.
+            const escapedPath = dir.path.replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
             html += `
                 <div class="flex items-center gap-3 px-4 py-2 hover:bg-gray-600 cursor-pointer rounded group"
                      ondblclick="loadDirectoryListing('${escapedPath}')">
                     <span class="text-yellow-400">📁</span>
-                    <span class="flex-1" onclick="loadDirectoryListing('${escapedPath}')">${dir.name}</span>
+                    <span class="flex-1" onclick="loadDirectoryListing('${escapedPath}')">${_esc(dir.name)}</span>
                     <button onclick="event.stopPropagation(); selectBrowsedFolder('${escapedPath}')"
                         class="hidden group-hover:block btn btn-primary btn-xs">
                         Select
@@ -2292,9 +2297,9 @@ async function clearLogs() {
 }
 
 function escapeHtml(text) {
-    const div = document.createElement('div');
-    div.textContent = text;
-    return div.innerHTML;
+    // Delegates to _esc so double quotes are escaped too — the textContent
+    // trick left " intact, which is unsafe inside HTML attributes.
+    return _esc(text);
 }
 
 
@@ -3220,12 +3225,12 @@ function buildProfileSelect(item) {
         : `Profile #${currentId}`;
 
     const options = profiles
-        .map(p => `<option value="${p.id}" ${p.id === currentId ? 'selected' : ''}>${p.name}</option>`)
+        .map(p => `<option value="${p.id}" ${p.id === currentId ? 'selected' : ''}>${_esc(p.name)}</option>`)
         .join('');
 
     return `
         <select
-            title="Profile: ${currentName}"
+            title="Profile: ${_esc(currentName)}"
             onchange="changeQueueProfile(${item.id}, parseInt(this.value))"
             ${isLocked ? 'disabled' : ''}
             class="bg-gray-700 border border-gray-600 rounded px-1 py-0.5 text-xs

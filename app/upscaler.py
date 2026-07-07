@@ -109,10 +109,16 @@ def _find_binary(key: str) -> Optional[str]:
     found = shutil.which(binary)
     if found:
         return found
-    # 2. Optimizarr install dir
+    # 2. Optimizarr install dir (legacy flat layout)
     local = _upscaler_install_dir() / binary
     if local.exists():
         return str(local)
+    # 3. Per-upscaler subdirectory — downloads extract the full release tree
+    #    here so the binary keeps its required models/ directory beside it
+    sub = _upscaler_install_dir() / key
+    if sub.exists():
+        for p in sub.rglob(binary):
+            return str(p)
     return None
 
 
@@ -304,39 +310,38 @@ def _download_worker(key: str):
         state["progress"] = 90
         state["message"] = "Extracting archive…"
 
-        # 3. Extract
+        # 3. Extract the FULL archive tree. The ncnn-vulkan upscalers need
+        #    their models/ directory (and bundled DLLs on Windows) next to
+        #    the executable — extracting the bare binary produced an install
+        #    that immediately failed with "models not found".
         binary_name = _binary_name(key)
+        extract_dir = install_dir / key
         if asset_name.endswith(".zip"):
             with zipfile.ZipFile(archive_path, "r") as zf:
-                # Find the binary inside the zip
-                names = zf.namelist()
-                target = next((n for n in names if Path(n).name == binary_name), None)
-                if target is None:
-                    # Just extract everything
-                    zf.extractall(install_dir / key)
-                    # Try to find binary in extracted tree
-                    for p in (install_dir / key).rglob(binary_name):
-                        p.rename(install_dir / binary_name)
-                        break
-                else:
-                    data = zf.read(target)
-                    dest = install_dir / binary_name
-                    with open(dest, "wb") as bf:
-                        bf.write(data)
+                zf.extractall(extract_dir)
         elif asset_name.endswith((".tar.gz", ".tgz")):
             with tarfile.open(archive_path, "r:gz") as tf:
-                for member in tf.getmembers():
-                    if Path(member.name).name == binary_name:
-                        f_obj = tf.extractfile(member)
-                        if f_obj:
-                            dest = install_dir / binary_name
-                            with open(dest, "wb") as bf:
-                                bf.write(f_obj.read())
-                        break
+                tf.extractall(extract_dir)
+        else:
+            raise RuntimeError(f"Unsupported archive format: {asset_name}")
+
+        # Remove a stale flat-layout binary so _find_binary can't return an
+        # old version from the install-dir root over the fresh tree.
+        legacy = install_dir / binary_name
+        if legacy.exists():
+            try:
+                legacy.unlink()
+            except OSError:
+                pass
+
+        binary_path = next(extract_dir.rglob(binary_name), None)
+        if binary_path is None:
+            raise RuntimeError(
+                f"Archive extracted but '{binary_name}' was not found inside it"
+            )
 
         # 4. Make binary executable on Linux/macOS
-        binary_path = install_dir / binary_name
-        if binary_path.exists() and not is_win:
+        if not is_win:
             binary_path.chmod(0o755)
 
         # 5. Clean up archive

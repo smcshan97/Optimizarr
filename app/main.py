@@ -247,9 +247,10 @@ async def login_page():
 # Default profile seeder
 # ============================================================
 
-def _seed_default_profiles():
-    """Seed sensible default profiles on first run."""
-    profiles = [
+# Single source of truth for the built-in profiles — also used by the
+# POST /profiles/seed-defaults route (which previously kept its own copy
+# that could drift from this one).
+DEFAULT_PROFILES = [
         {
             "name": "🎬 Movies — AV1 1080p High Quality",
             "resolution": "", "framerate": None,
@@ -302,8 +303,12 @@ def _seed_default_profiles():
             "hw_accel_enabled": False, "preset": "fast",
             "two_pass": False, "custom_args": None, "is_default": False,
         },
-    ]
-    for p in profiles:
+]
+
+
+def _seed_default_profiles():
+    """Seed sensible default profiles on first run."""
+    for p in DEFAULT_PROFILES:
         try:
             db.create_profile(**p)
             print(f"  ✓ Created profile: {p['name']}")
