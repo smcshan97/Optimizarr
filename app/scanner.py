@@ -105,6 +105,10 @@ class MediaScanner:
                 w, h = stream.get('width', 0), stream.get('height', 0)
                 if w and h:
                     specs['resolution'] = f"{w}x{h}"
+                    # Numeric width/height feed the upscale-eligibility check
+                    # and the queue's resolution sort (json_extract '$.height')
+                    specs['width'] = int(w)
+                    specs['height'] = int(h)
                 for fr_key in ('r_frame_rate', 'avg_frame_rate'):
                     fr_str = stream.get(fr_key, '')
                     if fr_str and fr_str not in ('0/0', '0', ''):
@@ -192,6 +196,8 @@ class MediaScanner:
                 w, h = geo.get('Width', 0), geo.get('Height', 0)
                 if w and h:
                     specs['resolution'] = f"{w}x{h}"
+                    specs['width'] = int(w)
+                    specs['height'] = int(h)
             fr = title.get('FrameRate', {})
             if isinstance(fr, dict):
                 num, den = fr.get('Num', 0), fr.get('Den', 1)
@@ -264,15 +270,26 @@ class MediaScanner:
         added_count = 0
 
         # Build a set of already-queued paths ONCE — avoids O(n²) DB round-trips
-        existing_paths = {item['file_path'] for item in db.get_queue_items()}
+        existing_paths = db.get_queue_file_paths()
 
-        for file_path in video_files:
-            if file_path in existing_paths:
-                continue
-            perm_status, _ = self.check_file_permissions(file_path)
-            current_specs = self.analyze_file(file_path)
+        to_scan = [f for f in video_files if f not in existing_paths]
+
+        # Probe in parallel batches: ffprobe startup + I/O dominates scan time
+        # and files are independent. Small batches keep queueing incremental,
+        # so encoding can begin while a large library is still scanning.
+        from concurrent.futures import ThreadPoolExecutor
+        batch_size = 8
+
+        def _probe_batches():
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                for start in range(0, len(to_scan), batch_size):
+                    batch = to_scan[start:start + batch_size]
+                    yield from zip(batch, pool.map(self.analyze_file, batch))
+
+        for file_path, current_specs in _probe_batches():
             if not current_specs:
                 continue
+            perm_status, _ = self.check_file_permissions(file_path)
             target_specs = {
                 'codec': profile['codec'],
                 'resolution': profile['resolution'],

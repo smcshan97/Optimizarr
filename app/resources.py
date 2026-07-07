@@ -45,6 +45,12 @@ class ResourceMonitor:
         self._last_sample = None
         self._last_cpu_percent = 0.0     # cached non-blocking CPU reading
         self._last_cpu_per_core = []     # cached non-blocking per-core reading
+        # CPU temp cache — on Windows each reading spawns a PowerShell/WMI
+        # process (~1s); the dashboard, per-job monitors, and the concurrency
+        # gate all poll every few seconds, so share one reading for 5s.
+        self._cpu_temp_cache_ts = 0.0
+        self._cpu_temp_cache_val: Optional[float] = None
+        self._CPU_TEMP_CACHE_SEC = 5.0
         self._cpu_temp_method = self._detect_cpu_temp_method()
 
     # ------------------------------------------------------------------
@@ -170,11 +176,18 @@ class ResourceMonitor:
         "N/A" and the CPU-temp pause trigger will be automatically
         disabled).
         """
+        if self._cpu_temp_method is None:
+            return None
+        now = time.monotonic()
+        if now - self._cpu_temp_cache_ts < self._CPU_TEMP_CACHE_SEC:
+            return self._cpu_temp_cache_val
         if self._cpu_temp_method == 'psutil':
-            return self._cpu_temp_psutil()
-        elif self._cpu_temp_method == 'wmi':
-            return self._cpu_temp_wmi()
-        return None
+            val = self._cpu_temp_psutil()
+        else:  # 'wmi'
+            val = self._cpu_temp_wmi()
+        self._cpu_temp_cache_ts = now
+        self._cpu_temp_cache_val = val
+        return val
 
     def _cpu_temp_psutil(self) -> Optional[float]:
         """Read CPU temp via psutil (Linux / macOS)."""
@@ -545,6 +558,7 @@ class ResourceThrottler:
         self.monitor = monitor
         self.check_interval = 5.0  # seconds between checks
         self.last_check = 0
+        self._last_verdict: Tuple[bool, str] = (False, "")
 
     def should_pause_encoding(self, **kwargs) -> Tuple[bool, str]:
         """
@@ -553,23 +567,29 @@ class ResourceThrottler:
         Accepts the same keyword arguments as
         ResourceMonitor.check_thresholds().
 
+        Rate-limited calls return the LAST verdict, not False — this
+        throttler is shared by every job's monitor thread, and returning
+        False on a rate-limited call made callers resume paused encodes
+        while temps were still over threshold.
+
         Returns:
             Tuple of (should_pause: bool, reason_string: str)
         """
         current_time = time.time()
 
-        # Rate-limit checks
+        # Rate-limit checks — repeat the last verdict instead of re-probing
         if current_time - self.last_check < self.check_interval:
-            return False, ""
+            return self._last_verdict
 
         self.last_check = current_time
 
         result = self.monitor.check_thresholds(**kwargs)
 
         if not result['should_pause']:
-            return False, ""
-
-        return True, "; ".join(result.get('reasons', []))
+            self._last_verdict = (False, "")
+        else:
+            self._last_verdict = (True, "; ".join(result.get('reasons', [])))
+        return self._last_verdict
 
     def set_process_priority(self, pid: int, nice_level: int = 10):
         """Set process priority (nice level / Windows priority class)."""

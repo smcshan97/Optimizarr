@@ -372,7 +372,7 @@ async def prioritize_queue(
     elif sort_by == "estimated_savings":
         items.sort(key=lambda i: i.get("estimated_savings_bytes", 0), reverse=reverse)
     elif sort_by == "filename":
-        items.sort(key=lambda i: Path(i.get("file_path", "")).name.lower(), reverse=reverse)
+        items.sort(key=lambda i: _Path(i.get("file_path", "")).name.lower(), reverse=reverse)
     elif sort_by in ("fastest_first", "slowest_first"):
         from app.scanner import estimate_encode_seconds
         speed_stats = db.get_encode_speed_stats()
@@ -409,10 +409,10 @@ async def prioritize_queue(
     # default: leave current order but we still write priorities below
 
     # Assign rank-based priorities: 1 = first to encode, 2 = second, etc.
-    # Matches DB ORDER BY priority ASC
-    total = len(items)
-    for rank, item in enumerate(items):
-        db.update_queue_item(item["id"], priority=rank + 1)
+    # Matches DB ORDER BY priority ASC. One transaction for the whole queue.
+    total = db.set_queue_priorities(
+        (item["id"], rank + 1) for rank, item in enumerate(items)
+    )
 
     return {
         "message": f"Prioritized {total} pending items by {sort_by} ({order})",
@@ -427,8 +427,10 @@ async def reprobe_queue_items(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Re-run ffprobe on all queue items with UNKNOWN codec or resolution.
-    Useful after updating the scanner or adding new media.
+    Re-run ffprobe on all queue items with UNKNOWN codec or missing height.
+    Useful after updating the scanner or adding new media. (Items queued
+    before numeric width/height were recorded lack '$.height', which the
+    resolution sort and upscale-eligibility check rely on.)
     """
     import json
     from app.scanner import MediaScanner
@@ -436,7 +438,7 @@ async def reprobe_queue_items(
     scanner = MediaScanner()
     items = db.get_queue_items()
 
-    # Filter to items where codec is unknown/missing
+    # Filter to items where codec is unknown/missing or height was never stored
     to_probe = []
     for item in items:
         specs = item.get("current_specs") or {}
@@ -446,7 +448,7 @@ async def reprobe_queue_items(
             except Exception:
                 specs = {}
         codec = specs.get("codec", "unknown")
-        if codec in ("unknown", "", None):
+        if codec in ("unknown", "", None) or not specs.get("height"):
             to_probe.append(item)
 
     if not to_probe:
@@ -610,10 +612,9 @@ async def reorder_queue(
     if not items:
         raise HTTPException(status_code=400, detail="No items provided")
 
-    for entry in items:
-        item_id = entry.get('id')
-        priority = entry.get('priority')
-        if item_id is not None and priority is not None:
-            db.update_queue_item(int(item_id), priority=int(priority))
+    count = db.set_queue_priorities(
+        (e['id'], e['priority']) for e in items
+        if e.get('id') is not None and e.get('priority') is not None
+    )
 
-    return MessageResponse(message=f"Reordered {len(items)} items")
+    return MessageResponse(message=f"Reordered {count} items")

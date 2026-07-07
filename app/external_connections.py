@@ -9,6 +9,7 @@ Manages Sonarr and Radarr API integrations.
 """
 import base64
 import hashlib
+import re
 import requests
 from typing import Dict, List, Optional, Any
 from datetime import datetime
@@ -45,6 +46,21 @@ CODEC_MAP: Dict[str, str] = {
 
 # Request timeout for external API calls (seconds)
 _REQUEST_TIMEOUT = 10
+
+
+def parse_height(resolution) -> int:
+    """Best-effort pixel height from Sonarr/Radarr resolution strings.
+
+    Accepts '1920x1080', '1080p', '1080', 2160, … Returns 0 when unparseable.
+    Feeds the upscale-eligibility check, which needs a numeric height.
+    """
+    if not resolution:
+        return 0
+    s = str(resolution).lower().strip()
+    if 'x' in s:
+        s = s.split('x')[-1]
+    m = re.search(r'(\d{3,4})', s)
+    return int(m.group(1)) if m else 0
 
 
 # ---------------------------------------------------------------------------
@@ -325,6 +341,7 @@ class ExternalConnectionManager:
                 "current_specs": {
                     "codec": codec,
                     "resolution": resolution,
+                    "height": parse_height(resolution),
                     "bit_rate": bitrate,
                     "source": "radarr",
                     "radarr_movie_id": movie.get("id"),
@@ -367,6 +384,7 @@ class ExternalConnectionManager:
                     "current_specs": {
                         "codec": codec,
                         "resolution": resolution,
+                        "height": parse_height(resolution),
                         "bit_rate": bitrate,
                         "source": "sonarr",
                         "sonarr_series_id": series_id,

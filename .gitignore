@@ -62,3 +62,8 @@ logs/
 
 # Local scratch scripts
 _*.py
+
+# TLS certificates/keys — never commit
+*.crt
+*.key
+*.pem

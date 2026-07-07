@@ -318,12 +318,16 @@ def _seed_default_profiles():
 def main():
     """Main entry point for running the application."""
     import os
-    is_production = os.environ.get("OPTIMIZARR_ENV", "").lower() == "production"
+    # Reload is opt-in (OPTIMIZARR_ENV=development). The old default enabled
+    # the dev auto-reloader for anyone who never set OPTIMIZARR_ENV — a
+    # service restart trap: the reloader spawns a second process and file
+    # writes in the tree bounce the server mid-encode.
+    is_dev = os.environ.get("OPTIMIZARR_ENV", "").lower() in ("dev", "development")
     uvicorn.run(
         "app.main:app",
         host=settings.host,
         port=settings.port,
-        reload=not is_production,
+        reload=is_dev,
         log_level=settings.log_level.lower()
     )
 

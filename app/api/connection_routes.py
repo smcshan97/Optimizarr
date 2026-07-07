@@ -1,4 +1,6 @@
 """External connections (Sonarr, Radarr, Stash) and webhook routes."""
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from typing import List
 
@@ -232,7 +234,7 @@ def _sync_connection_task(conn_id: int):
         return
 
     # Build set of already-queued paths
-    existing_paths = {item["file_path"] for item in db.get_queue_items()}
+    existing_paths = db.get_queue_file_paths()
 
     added = 0
     skipped = 0
@@ -470,11 +472,12 @@ def process_webhook_payload(app_type: str, payload: dict) -> dict:
         return {"ok": False, "message": "Profile not found"}
 
     # Skip if already queued
-    existing = {item["file_path"] for item in db.get_queue_items()}
-    if file_path in existing:
+    if file_path in db.get_queue_file_paths():
         return {"ok": True, "message": "File already in queue"}
 
-    current_specs = {"codec": codec, "resolution": resolution, "bit_rate": 0}
+    from app.external_connections import parse_height
+    current_specs = {"codec": codec, "resolution": resolution,
+                     "height": parse_height(resolution), "bit_rate": 0}
     target_specs = {
         "codec": profile["codec"],
         "resolution": profile.get("resolution", ""),

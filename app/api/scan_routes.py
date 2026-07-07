@@ -52,6 +52,12 @@ async def create_scan_root(
             upscale_model=scan_root.upscale_model,
             upscale_factor=scan_root.upscale_factor,
             upscale_key=scan_root.upscale_key,
+            stereo_enabled=scan_root.stereo_enabled,
+            stereo_mode=scan_root.stereo_mode,
+            stereo_format=scan_root.stereo_format,
+            stereo_divergence=scan_root.stereo_divergence,
+            stereo_convergence=scan_root.stereo_convergence,
+            stereo_depth_model=scan_root.stereo_depth_model,
         )
         roots = db.get_scan_roots()
         created_root = next((r for r in roots if r['id'] == root_id), None)

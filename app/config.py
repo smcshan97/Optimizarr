@@ -34,7 +34,10 @@ def _resolve_secret_key() -> str:
     _SECRET_FILE.parent.mkdir(parents=True, exist_ok=True)
     new_key = secrets.token_hex(32)
     _SECRET_FILE.write_text(new_key, encoding='utf-8')
-    print(f"✓ Generated new SECRET_KEY → {_SECRET_FILE}")
+    # ASCII only: this runs at import time, possibly before main.py has
+    # reconfigured a cp1252 Windows console — a Unicode arrow here crashed
+    # any entry point that imports app.config directly on first run.
+    print(f"Generated new SECRET_KEY -> {_SECRET_FILE}")
     return new_key
 
 

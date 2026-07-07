@@ -4,6 +4,7 @@ Handles video transcoding using HandBrakeCLI with progress tracking.
 """
 import subprocess
 import re
+import shlex
 import time
 import threading
 from datetime import datetime, timedelta
@@ -179,9 +180,19 @@ class EncodingJob:
         if self.profile.get('two_pass'):
             cmd.append('--multi-pass')
         
-        # Custom arguments (always last so they can override)
+        # Custom arguments (always last so they can override).
+        # shlex keeps quoted values intact (--encoder-options "a=1:b=2 c") but
+        # POSIX-mode would eat backslashes in bare Windows paths — so only use
+        # it when the string actually contains quotes.
         if self.profile.get('custom_args'):
-            custom_args = self.profile['custom_args'].split()
+            raw_args = self.profile['custom_args']
+            if '"' in raw_args or "'" in raw_args:
+                try:
+                    custom_args = shlex.split(raw_args)
+                except ValueError:
+                    custom_args = raw_args.split()
+            else:
+                custom_args = raw_args.split()
             cmd.extend(custom_args)
         
         return cmd
@@ -699,6 +710,51 @@ class EncodingJob:
         new_size = output_path.stat().st_size
         savings = original_size - new_size
 
+        # ── Sanity-check the output BEFORE deleting the original ──────────
+        # HandBrake can exit 0 with a truncated file (disk full mid-mux, bad
+        # source tail). Deleting the original is irreversible, so compare
+        # durations first; a short output fails the item and keeps the source.
+        source_duration = 0.0
+        specs_for_check = self.queue_item.get('current_specs')
+        if isinstance(specs_for_check, str):
+            try:
+                import json as _cjson
+                specs_for_check = _cjson.loads(specs_for_check)
+            except (ValueError, TypeError):
+                specs_for_check = {}
+        if isinstance(specs_for_check, dict):
+            source_duration = float(specs_for_check.get('duration') or 0)
+        if not source_duration:
+            source_duration = float(self.queue_item.get('duration_seconds') or 0)
+
+        if source_duration > 0:
+            try:
+                from app.scanner import scanner as _probe_scanner
+                out_specs = _probe_scanner.analyze_file(str(output_path)) or {}
+                out_duration = float(out_specs.get('duration') or 0)
+            except Exception:
+                out_duration = 0.0
+            # Tolerance: 5s or 2% of runtime, whichever is larger. Only fail
+            # when we could actually measure the output (ffprobe available).
+            tolerance = max(5.0, source_duration * 0.02)
+            if out_duration > 0 and out_duration < source_duration - tolerance:
+                msg = (f"Output duration {out_duration:.0f}s is shorter than "
+                       f"source {source_duration:.0f}s — output looks truncated; "
+                       f"original file kept")
+                optimizarr_logger.app_logger.error(
+                    "Truncated output for %s: %s", input_path.name, msg)
+                try:
+                    output_path.unlink()
+                except OSError:
+                    pass
+                db.update_queue_item(
+                    self.queue_item_id,
+                    status='failed',
+                    error_message=msg,
+                )
+                optimizarr_logger.log_handbrake_error(str(input_path), msg)
+                return
+
         # Calculate encoding duration
         encoding_time = 0
         started_at = self.queue_item.get('started_at')
@@ -1191,10 +1247,10 @@ class EncoderPool:
     def _load_resource_settings(self) -> Dict:
         """Load resource management settings from database."""
         try:
-            with db.get_connection() as conn:
+            with db.get_read_connection() as conn:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT key, value FROM settings 
+                    SELECT key, value FROM settings
                     WHERE key LIKE 'resource_%'
                 """)
                 settings = {row[0]: row[1] for row in cursor.fetchall()}
@@ -1252,8 +1308,16 @@ class EncoderPool:
             job.stop(mark_cancelled=mark_cancelled)
 
 
+# Cached once per process: build_command calls this for every encode, and the
+# installed HandBrakeCLI's encoder list can't change while we're running.
+_hw_accel_cache: Optional[Dict] = None
+
+
 def detect_hardware_acceleration() -> Dict:
-    """Detect available hardware encoders by querying HandBrakeCLI."""
+    """Detect available hardware encoders by querying HandBrakeCLI (cached)."""
+    global _hw_accel_cache
+    if _hw_accel_cache is not None:
+        return _hw_accel_cache
     available = {
         "nvidia": False,
         "amd": False,
@@ -1315,7 +1379,11 @@ def detect_hardware_acceleration() -> Dict:
         available["error"] = "HandBrakeCLI timed out"
     except Exception as e:
         available["error"] = str(e)
-    
+
+    # Don't cache a probe failure — HandBrake may be mid-install/on a flaky
+    # network mount; retry next call.
+    if "error" not in available:
+        _hw_accel_cache = available
     return available
 
 

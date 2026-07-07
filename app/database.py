@@ -534,6 +534,19 @@ class Database:
                 cursor.execute("UPDATE profiles SET is_default = 0 WHERE is_default = 1 AND id != ?", (keep_id,))
                 print(f"  ↳ Migrated: enforced single default profile (kept id={keep_id})")
 
+            # Indexes — the queue is scanned constantly (next-pending poll every
+            # second while encoding, status counts on every dashboard poll,
+            # file-path dedupe on every scan/webhook/sync).
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_queue_status_priority "
+                "ON queue(status, priority)")
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_queue_file_path "
+                "ON queue(file_path)")
+            cursor.execute(
+                "CREATE INDEX IF NOT EXISTS idx_history_completed_at "
+                "ON history(completed_at)")
+
             print("✓ Database schema initialized")
     
     # Profile CRUD
@@ -954,6 +967,32 @@ class Database:
                 'total_pages': total_pages,
                 'counts': counts,
             }
+
+    def get_queue_file_paths(self) -> set:
+        """Every file_path currently in the queue (any status).
+
+        Dedupe helper for scan/watch/webhook/sync — replaces loading and
+        JSON-parsing the entire queue just to build a path set.
+        """
+        with self.get_read_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT file_path FROM queue")
+            return {row[0] for row in cursor.fetchall()}
+
+    def set_queue_priorities(self, pairs) -> int:
+        """Batch-write (item_id, priority) pairs in ONE transaction.
+
+        A full-queue reprioritize used to issue one commit per row — thousands
+        of fsyncs under the write lock. Returns the number of rows written.
+        """
+        pairs = [(int(p), int(i)) for i, p in pairs]
+        if not pairs:
+            return 0
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.executemany(
+                "UPDATE queue SET priority = ? WHERE id = ?", pairs)
+            return len(pairs)
 
     def get_queue_item(self, item_id: int) -> Optional[Dict]:
         """Get a single queue item by ID."""
@@ -1397,15 +1436,14 @@ class Database:
         imported = 0
         skipped = 0
         errors = []
+        existing_names = {ep['name'] for ep in self.get_profiles()}
         for p in profiles:
             try:
-                # Skip if name already exists
-                existing = self.get_profiles()
-                existing_names = {ep['name'] for ep in existing}
                 if p.get('name') in existing_names:
                     skipped += 1
                     continue
                 self.create_profile(**p)
+                existing_names.add(p.get('name'))
                 imported += 1
             except Exception as e:
                 errors.append(f"{p.get('name', '?')}: {str(e)}")

@@ -1586,3 +1586,122 @@ class TestDurationBackfill:
         # And -1 is still treated as "unknown" by the estimator
         from app.scanner import estimate_encode_seconds
         assert estimate_encode_seconds(-1, 'av1', {'overall': 2.0, 'by_codec': {}}) is None
+
+
+# ---------------------------------------------------------------------------
+# Audit fixes (2026-07): probe height, resolution-string parsing,
+# batch priorities, dedupe helper, throttler verdict caching
+# ---------------------------------------------------------------------------
+
+class TestProbeHeight:
+    """The upscale-eligibility check and the queue's resolution sort read a
+    numeric current_specs['height'] — the parsers must populate it."""
+
+    def test_ffprobe_parser_stores_width_and_height(self, scanner):
+        specs = scanner._parse_ffprobe_json({
+            "format": {"duration": "10.0", "bit_rate": "1000"},
+            "streams": [{"codec_type": "video", "codec_name": "hevc",
+                         "width": 1920, "height": 800,
+                         "r_frame_rate": "24000/1001"}],
+        })
+        assert specs["width"] == 1920
+        assert specs["height"] == 800
+        assert specs["resolution"] == "1920x800"
+
+    def test_handbrake_parser_stores_width_and_height(self, scanner):
+        specs = scanner._parse_handbrake_json({
+            "TitleList": [{
+                "VideoCodec": "h264",
+                "Geometry": {"Width": 1280, "Height": 720},
+                "FrameRate": {"Num": 24, "Den": 1},
+                "AudioList": [],
+            }]
+        })
+        assert specs["width"] == 1280
+        assert specs["height"] == 720
+
+
+class TestParseHeight:
+    """Sonarr/Radarr resolution strings → numeric height for upscale checks."""
+
+    def test_common_forms(self):
+        from app.external_connections import parse_height
+        assert parse_height("1920x1080") == 1080
+        assert parse_height("1080p") == 1080
+        assert parse_height("720") == 720
+        assert parse_height(2160) == 2160
+
+    def test_unparseable_returns_zero(self):
+        from app.external_connections import parse_height
+        assert parse_height("") == 0
+        assert parse_height(None) == 0
+        assert parse_height("unknown") == 0
+
+
+class TestBatchQueueHelpers:
+    def test_set_queue_priorities_batch(self, fresh_db):
+        pid = fresh_db.create_profile(
+            name="bp", codec="av1", encoder="svt_av1", quality=30,
+            audio_codec="aac")
+        ids = [fresh_db.add_to_queue(file_path=f"/m/f{i}.mkv", profile_id=pid)
+               for i in range(4)]
+        # Reverse the order in one batch
+        n = fresh_db.set_queue_priorities(
+            (iid, rank + 1) for rank, iid in enumerate(reversed(ids)))
+        assert n == 4
+        ordered = [i["id"] for i in fresh_db.get_queue_items()]
+        assert ordered == list(reversed(ids))
+
+    def test_set_queue_priorities_empty(self, fresh_db):
+        assert fresh_db.set_queue_priorities([]) == 0
+
+    def test_get_queue_file_paths(self, fresh_db):
+        pid = fresh_db.create_profile(
+            name="fp", codec="av1", encoder="svt_av1", quality=30,
+            audio_codec="aac")
+        fresh_db.add_to_queue(file_path="/m/a.mkv", profile_id=pid)
+        fresh_db.add_to_queue(file_path="/m/b.mkv", profile_id=pid,
+                              status="completed")
+        assert fresh_db.get_queue_file_paths() == {"/m/a.mkv", "/m/b.mkv"}
+
+    def test_queue_indexes_exist(self, fresh_db):
+        with fresh_db.get_read_connection() as conn:
+            names = {r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index'").fetchall()}
+        assert "idx_queue_status_priority" in names
+        assert "idx_queue_file_path" in names
+
+
+class TestThrottlerVerdictCache:
+    """Rate-limited should_pause_encoding() calls must repeat the last
+    verdict — returning (False, '') resumed paused encodes while hot."""
+
+    def _make(self, should_pause):
+        from app.resources import ResourceThrottler
+
+        class _FakeMonitor:
+            def __init__(self):
+                self.calls = 0
+
+            def check_thresholds(self, **kw):
+                self.calls += 1
+                return {"should_pause": should_pause,
+                        "reasons": ["GPU temp 90C > 83C"] if should_pause else []}
+
+        t = ResourceThrottler(_FakeMonitor())
+        t.check_interval = 9999   # everything after the first call is limited
+        t.last_check = 0
+        return t
+
+    def test_hot_verdict_persists_when_rate_limited(self):
+        t = self._make(should_pause=True)
+        first = t.should_pause_encoding()
+        assert first == (True, "GPU temp 90C > 83C")
+        assert t.should_pause_encoding() == first      # limited → repeat
+        assert t.monitor.calls == 1                    # no re-probe
+
+    def test_cool_verdict_persists_when_rate_limited(self):
+        t = self._make(should_pause=False)
+        assert t.should_pause_encoding() == (False, "")
+        assert t.should_pause_encoding() == (False, "")
+        assert t.monitor.calls == 1

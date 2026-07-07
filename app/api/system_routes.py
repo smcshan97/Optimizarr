@@ -5,6 +5,7 @@ from typing import List, Optional
 from pathlib import Path
 import asyncio
 import os
+import string
 
 from app.api.models import MessageResponse
 from app.api.dependencies import get_current_user, get_current_admin_user
@@ -462,10 +463,10 @@ async def health_check():
     # Scheduler status
     try:
         from app.scheduler import schedule_manager
-        sched = db.get_schedule()
+        sched = schedule_manager.schedule_config or {}
         health["scheduler"] = {
-            "enabled": sched.get("enabled", False),
-            "running": schedule_manager.running if schedule_manager else False,
+            "enabled": bool(sched.get("enabled", False)),
+            "running": schedule_manager.scheduler.running,
             "next_window": f"{sched.get('start_time','?')} – {sched.get('end_time','?')}",
         }
     except Exception:
@@ -577,6 +578,16 @@ async def restore_backup_upload(
         tmp.write(contents)
         tmp.close()
         _shutil.move(tmp.name, str(db_path))
+        # Remove stale WAL/SHM sidecars from the PREVIOUS database — left in
+        # place, SQLite would replay old WAL pages over the restored file on
+        # next open, silently corrupting the restore.
+        for suffix in ("-wal", "-shm"):
+            side = Path(str(db_path) + suffix)
+            try:
+                if side.exists():
+                    side.unlink()
+            except OSError:
+                pass
     except Exception as e:
         import os
         try: os.unlink(tmp.name)
@@ -845,7 +856,7 @@ async def get_windows_active_hours(current_user: dict = Depends(get_current_user
 async def list_notifications(current_user: dict = Depends(get_current_user)):
     """List all notification webhooks."""
     import json as _json
-    with db.get_connection() as conn:
+    with db.get_read_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM notifications ORDER BY created_at DESC")
         cols = [d[0] for d in cursor.description]
@@ -935,7 +946,7 @@ async def test_notification(
 ):
     """Send a test notification to verify webhook connectivity."""
     import json as _json
-    with db.get_connection() as conn:
+    with db.get_read_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM notifications WHERE id = ?", (notif_id,))
         row = cursor.fetchone()

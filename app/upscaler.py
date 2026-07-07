@@ -622,15 +622,7 @@ def run_upscale_pipeline(
         optimizarr_logger.app_logger.info("Extracting frames from %s…", input_p.name)
         extract_cmd = [
             "ffmpeg", "-i", input_path,
-            "-vf", "fps=fps=source_fps",   # extract all frames at native fps
-            "-q:v", "1",                   # maximum PNG quality
-            str(frames_in / "%08d.png"),
-            "-y",
-        ]
-        # Use actual fps value rather than the literal placeholder
-        extract_cmd = [
-            "ffmpeg", "-i", input_path,
-            "-vsync", "0",
+            "-vsync", "0",                 # every frame, native timing
             str(frames_in / "%08d.png"),
             "-y",
         ]
