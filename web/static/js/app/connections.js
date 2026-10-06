@@ -79,6 +79,9 @@ function renderConnections(connections) {
                 <button onclick="syncConnection(${c.id})"
                     class="bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded text-sm transition-colors"
                     title="Import library into queue">⬇️ Sync</button>
+                ${c.app_type !== 'stash' ? `<button onclick="registerConnectionWebhook(${c.id})"
+                    class="bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded text-sm transition-colors"
+                    title="Add Optimizarr as a webhook in ${_esc(c.name)} so new downloads queue automatically">🔔 Webhook</button>` : ''}
                 <button onclick="editConnection(${c.id})"
                     class="bg-gray-600 hover:bg-gray-500 px-3 py-1.5 rounded text-sm transition-colors"
                     title="Edit">✏️</button>
@@ -375,4 +378,21 @@ async function detectConnectionMappings() {
     if (!res.ok) { _showConnectionTestResult(false, res.error || 'Detection failed'); return; }
     document.getElementById('connectionPathMappings').value = _formatMappings(res.mappings);
     _showConnectionTestResult(true, `Found container "${res.container}" — ${res.mappings.length} mapping(s) filled in`);
+}
+
+async function registerConnectionWebhook(id) {
+    // Sonarr/Radarr in Docker reach the host via host.docker.internal; a
+    // native install would use localhost or this PC's LAN address.
+    const port = location.port || '5757';
+    const suggested = `http://host.docker.internal:${port}`;
+    const url = prompt('Address Sonarr/Radarr should use to reach Optimizarr:', suggested);
+    if (!url) return;
+    const res = await apiRequest(`/connections/${id}/register-webhook`, {
+        method: 'POST', body: JSON.stringify({ optimizarr_url: url.trim() }),
+    });
+    if (res && res.ok) {
+        showMessage(`✓ Webhook ${res.updated ? 'updated' : 'added'} (${res.url})`, 'success');
+    } else {
+        showMessage('Webhook registration failed — check the connection and try again', 'error');
+    }
 }
