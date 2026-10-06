@@ -2574,6 +2574,33 @@ class TestDestinationCollision:
 # Upscale cost model — AI time scales with output pixels, not runtime
 # ---------------------------------------------------------------------------
 
+class TestUpscaleModelScale:
+    def test_x4_only_models_run_at_4(self):
+        from app.upscaler import model_scale_for
+        assert model_scale_for('realesrgan', 'realesrgan-x4plus', 2) == 4
+        assert model_scale_for('realesrgan', 'realesrgan-x4plus', 4) == 4
+        assert model_scale_for('realesrgan', 'realesr-animevideov3', 2) == 2
+        assert model_scale_for('realesrgan', 'realesr-animevideov3', 3) == 3
+
+    def test_falls_back_to_largest_scale(self):
+        from app.upscaler import model_scale_for
+        assert model_scale_for('realcugan', 'models-nose', 4) == 2
+        assert model_scale_for('realcugan', 'models-pro', 4) == 3
+
+    def test_unknown_model_uses_requested(self):
+        from app.upscaler import model_scale_for
+        assert model_scale_for('realesrgan', 'custom-model', 2) == 2
+
+    def test_color_matrix_defaults(self):
+        from app.upscaler import _color_matrix, _color_tag_args
+        assert _color_matrix({'color_space': 'bt709', 'height': 480}) == 'bt709'
+        assert _color_matrix({'height': 1080}) == 'bt709'
+        assert _color_matrix({'height': 480}) == 'smpte170m'
+        assert _color_matrix({'color_space': 'bt2020nc'}) == 'bt2020'
+        args = _color_tag_args({'color_primaries': 'unknown'}, 'bt709')
+        assert '-color_primaries' not in args and args[:2] == ['-colorspace', 'bt709']
+
+
 class TestUpscaleCostModel:
     SD = {'width': 640, 'height': 480, 'duration': 7200, 'framerate': 24}
     UHD = {'width': 3840, 'height': 2160, 'duration': 600, 'framerate': 60}

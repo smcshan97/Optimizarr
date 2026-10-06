@@ -31,6 +31,14 @@ UPSCALERS = {
         "binary_win": "realesrgan-ncnn-vulkan.exe",
         "models": ["realesrgan-x4plus", "realesrgan-x4plus-anime", "realesr-animevideov3"],
         "default_model": "realesrgan-x4plus",
+        # Scales each model was trained for. realesrgan-ncnn-vulkan only
+        # appends -x<scale> to the file name for animevideov3; the x4plus
+        # models are 4x-only and "-s 2" just mis-sizes the output buffer.
+        "model_scales": {
+            "realesrgan-x4plus": [4],
+            "realesrgan-x4plus-anime": [4],
+            "realesr-animevideov3": [2, 3, 4],
+        },
         "scale_options": [2, 3, 4],
         "default_scale": 2,
         "github_owner": "xinntao",
@@ -48,6 +56,11 @@ UPSCALERS = {
         "binary_win": "realcugan-ncnn-vulkan.exe",
         "models": ["models-se", "models-pro", "models-nose"],
         "default_model": "models-se",
+        "model_scales": {
+            "models-se": [2, 3, 4],
+            "models-pro": [2, 3],
+            "models-nose": [2],
+        },
         "scale_options": [2, 3, 4],
         "default_scale": 2,
         "github_owner": "nihui",
@@ -65,6 +78,10 @@ UPSCALERS = {
         "binary_win": "waifu2x-ncnn-vulkan.exe",
         "models": ["models-cunet", "models-upconv_7_anime_style_art_rgb"],
         "default_model": "models-cunet",
+        "model_scales": {
+            "models-cunet": [1, 2],
+            "models-upconv_7_anime_style_art_rgb": [1, 2],
+        },
         "scale_options": [1, 2],
         "default_scale": 2,
         "github_owner": "nihui",
@@ -493,13 +510,62 @@ def _check_disk_space(path: str, required_bytes: int) -> bool:
         return True  # if we can't check, proceed and let ffmpeg fail naturally
 
 
+def model_scale_for(upscaler_key: str, model: str, factor: int) -> int:
+    """Scale to run ``model`` at so the result can reach ``factor``.
+
+    The requested factor when the model supports it; otherwise the smallest
+    supported scale above it (the pipeline then downscales to the target),
+    or the largest one available.
+    """
+    scales = (UPSCALERS.get(upscaler_key, {}).get("model_scales", {})
+              .get(model))
+    if not scales or factor in scales:
+        return factor
+    above = [s for s in scales if s > factor]
+    return min(above) if above else max(scales)
+
+
+# ffprobe color_space -> swscale colour-matrix name
+_SWS_MATRIX = {
+    "bt709": "bt709", "smpte170m": "smpte170m", "bt470bg": "bt470",
+    "bt601": "bt601", "smpte240m": "smpte240m", "fcc": "fcc",
+    "bt2020nc": "bt2020", "bt2020c": "bt2020",
+}
+
+
+def _color_matrix(info: Dict) -> str:
+    """swscale matrix for the source: its tag, else the HD/SD convention.
+
+    Untagged sources made ffmpeg assume BT.601 for the YUV<->RGB round trip
+    through PNG, shifting colours on HD content.
+    """
+    return _SWS_MATRIX.get(info.get("color_space") or "",
+                           "bt709" if (info.get("height") or 0) >= 720 else "smpte170m")
+
+
+def _fps_value(raw: str, default: float = 0.0) -> float:
+    try:
+        num, den = str(raw).split("/")
+        return float(num) / float(den) if float(den) else default
+    except Exception:
+        try:
+            return float(raw)
+        except Exception:
+            return default
+
+
 def _get_video_info(input_path: str) -> Dict:
-    """Use ffprobe to get width, height, fps, duration of a video."""
+    """Use ffprobe to get width, height, fps, duration, colour info of a video.
+
+    ``fps`` is the rate frames are extracted/reassembled at: the nominal
+    r_frame_rate for constant-frame-rate sources, the average rate for
+    variable-frame-rate ones (``vfr``).
+    """
     try:
         result = subprocess.run(
             [
                 "ffprobe", "-v", "quiet", "-print_format", "json",
-                "-show_streams", "-select_streams", "v:0", input_path,
+                "-show_streams", "-show_format", "-select_streams", "v:0", input_path,
             ],
             capture_output=True, text=True, timeout=30,
             encoding='utf-8', errors='replace',
@@ -516,11 +582,37 @@ def _get_video_info(input_path: str) -> Dict:
             fps = float(num) / float(den)
         except Exception:
             fps = 24.0
-        duration = float(stream.get("duration", 0))
-        return {"width": width, "height": height, "fps": fps, "duration": duration}
+        duration = float(stream.get("duration", 0) or 0)
+        if not duration:
+            duration = float((data.get("format") or {}).get("duration", 0) or 0)
+        avg = _fps_value(stream.get("avg_frame_rate", ""), 0.0)
+        vfr = bool(avg) and abs(avg - fps) / max(fps, 1e-6) > 0.01
+        if vfr:
+            fps = avg
+        from app.scanner import video_color_info
+        info = {"width": width, "height": height, "fps": fps, "duration": duration,
+                "vfr": vfr}
+        info.update(video_color_info(stream))
+        return info
     except Exception as e:
         optimizarr_logger.app_logger.warning("ffprobe failed: %s", e)
-        return {"width": 0, "height": 0, "fps": 24.0, "duration": 0}
+        return {"width": 0, "height": 0, "fps": 24.0, "duration": 0, "vfr": False}
+
+
+def _color_tag_args(info: Dict, matrix: str) -> list:
+    """ffmpeg output flags that carry the source's colour description over,
+    so HandBrake doesn't have to guess (and mis-guess) it."""
+    def known(v):
+        return v and v not in ("unknown", "reserved", "unspecified")
+
+    tag_space = {"bt470": "bt470bg", "bt2020": "bt2020nc"}.get(matrix, matrix)
+    args = ["-colorspace", info.get("color_space") if known(info.get("color_space")) else tag_space,
+            "-color_range", "tv"]
+    if known(info.get("color_primaries")):
+        args += ["-color_primaries", info["color_primaries"]]
+    if known(info.get("color_transfer")):
+        args += ["-color_trc", info["color_transfer"]]
+    return args
 
 
 def run_upscale_pipeline(
@@ -617,14 +709,32 @@ def run_upscale_pipeline(
         optimizarr_logger.app_logger.error("Could not determine video dimensions: %s", input_path)
         return None
 
+    # Frames pass through 8-bit RGB PNGs, which would flatten HDR to a
+    # washed-out SDR picture — refuse; the caller encodes the original.
+    if info.get("hdr"):
+        optimizarr_logger.app_logger.warning(
+            "Skipping upscale of HDR source %s — the frame pipeline is 8-bit SDR",
+            input_p.name)
+        return None
+
     out_w = src_w * factor
     out_h = src_h * factor
+    model_scale = model_scale_for(upscaler_key, model, factor)
+    if model_scale != factor:
+        optimizarr_logger.app_logger.info(
+            "Model %s runs at x%d; downscaling its output to x%d",
+            model, model_scale, factor)
+    if info.get("vfr"):
+        optimizarr_logger.app_logger.info(
+            "Variable frame rate source — extracting at a constant %.3f fps "
+            "so audio stays in sync", fps)
+    matrix = _color_matrix(info)
 
     # Estimate frame count and disk requirement
-    # PNG at out_h resolution: rough estimate ~3 bytes/pixel (pre-compression, but
+    # PNG at the model's output size: rough estimate ~3 bytes/pixel (pre-compression, but
     # PNG tends to compress well; we use a conservative 1.5 bytes/pixel for estimate)
     frame_count_approx = int(fps * duration) if duration > 0 else 2000
-    bytes_per_frame_approx = int(out_w * out_h * 1.5)
+    bytes_per_frame_approx = int(src_w * model_scale * src_h * model_scale * 1.5)
     # Source + output frames + reassembly buffer
     required_bytes = (frame_count_approx * bytes_per_frame_approx * 2) + (500 * 1024 * 1024)
 
@@ -652,7 +762,7 @@ def run_upscale_pipeline(
     # one server restart threw away 25 hours of upscaling.)
     import hashlib
     job_key = hashlib.md5(
-        f"{input_path}|{upscaler_key}|{model}|{factor}".encode('utf-8', 'replace')
+        f"{input_path}|{upscaler_key}|{model}|{factor}|x{model_scale}|cfr".encode('utf-8', 'replace')
     ).hexdigest()[:12]
     safe_stem = re.sub(r'[^\w.-]+', '_', input_p.stem)[:40]
     work_dir = tmp_base / f"optimizarr_upscale_{safe_stem}_{job_key}"
@@ -687,7 +797,13 @@ def run_upscale_pipeline(
             optimizarr_logger.app_logger.info("Extracting frames from %s…", input_p.name)
             extract_cmd = [
                 "ffmpeg", "-i", input_path,
-                "-vsync", "0",                 # every frame, native timing
+                "-map", "0:v:0",
+                # Constant frame rate: the frames are reassembled at a single
+                # rate, so a VFR source extracted frame-for-frame (the old
+                # -vsync 0) drifted out of sync with its audio. For CFR
+                # sources this is a no-op.
+                "-fps_mode", "cfr", "-r", fps_str,
+                "-vf", f"scale=in_color_matrix={matrix}:in_range=auto,format=rgb24",
                 str(frames_in / "%08d.png"),
                 "-y",
             ]
@@ -737,7 +853,7 @@ def run_upscale_pipeline(
             "-i", str(frames_in),
             "-o", str(frames_out),
             "-n", model,
-            "-s", str(factor),
+            "-s", str(model_scale),
             "-f", "png",
             # load:proc:save threads. Default 1:2:2 starves the GPU on small
             # video frames — single-threaded PNG decode can't feed it. 4:4:4
@@ -853,6 +969,12 @@ def run_upscale_pipeline(
             "-map", "0:v:0",             # upscaled video
             "-map", "1:a?",              # all audio from original (? = optional)
             "-map", "1:s?",              # subtitle streams (? = optional)
+            # Back to YUV with the SAME matrix used on the way in (and down to
+            # the target size when the model ran at a larger native scale)
+            "-vf", ",".join(
+                ([f"scale={out_w}:{out_h}:flags=lanczos"] if model_scale != factor else [])
+                + [f"scale=out_color_matrix={matrix}:out_range=tv", "format=yuv420p"]),
+            *_color_tag_args(info, matrix),
             "-c:v", "ffv1",              # lossless intermediate — HandBrake re-encodes
             "-c:a", "copy",
             "-c:s", "copy",
