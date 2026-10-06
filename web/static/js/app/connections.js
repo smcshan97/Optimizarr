@@ -103,6 +103,7 @@ function showAddConnectionModal() {
     document.getElementById('connectionShowInStats').checked = true;
     document.getElementById('connectionSyncInterval').value = '0';
     document.getElementById('connectionScanRoot').value = '';
+    document.getElementById('connectionPathMappings').value = '';
     _hideConnectionTestResult();
     _populateConnectionScanRootDropdown();
     handleConnectionTypeChange();   // set URL placeholder / hints for default type
@@ -124,6 +125,7 @@ function editConnection(id) {
     document.getElementById('connectionApiKey').placeholder = `Key on file: ${c.api_key_masked} — leave blank to keep`;
     document.getElementById('connectionShowInStats').checked = !!c.show_in_stats;
     document.getElementById('connectionSyncInterval').value = String(c.sync_interval_hours || 0);
+    document.getElementById('connectionPathMappings').value = _formatMappings(c.path_mappings);
     _hideConnectionTestResult();
     _populateConnectionScanRootDropdown(c.linked_scan_root_id);
     handleConnectionTypeChange();   // update URL hints / privacy note for this type
@@ -240,6 +242,13 @@ async function saveConnection() {
 
     const body = { app_type: appType, name, base_url: url, show_in_stats: stats };
     body.sync_interval_hours = parseInt(document.getElementById('connectionSyncInterval').value) || 0;
+    const parsed = _parseMappings(document.getElementById('connectionPathMappings').value);
+    if (parsed.error) {
+        _showConnectionTestResult(false, parsed.error);
+        if (btn) { btn.disabled = false; btn.textContent = origText; }
+        return;
+    }
+    body.path_mappings = parsed.mappings;
     if (apiKey) body.api_key = apiKey;
 
     let result;
@@ -334,3 +343,36 @@ function _timeAgo(isoString) {
 }
 
 
+
+
+// ── Path mappings (container path => host path) ──────────────────────────
+function _formatMappings(raw) {
+    let list = raw;
+    if (typeof raw === 'string') { try { list = JSON.parse(raw || '[]'); } catch (_) { list = []; } }
+    return (list || []).map(m => `${m.remote} => ${m.local}`).join('\n');
+}
+
+function _parseMappings(text) {
+    const mappings = [];
+    for (const [i, line] of text.split('\n').entries()) {
+        if (!line.trim()) continue;
+        const parts = line.split('=>');
+        if (parts.length !== 2 || !parts[0].trim() || !parts[1].trim()) {
+            return { error: `Path mapping line ${i + 1} should look like: /tv => F:\\tv shows` };
+        }
+        mappings.push({ remote: parts[0].trim(), local: parts[1].trim() });
+    }
+    return { mappings };
+}
+
+async function detectConnectionMappings() {
+    const url = document.getElementById('connectionUrl').value.trim();
+    if (!url) { _showConnectionTestResult(false, 'Enter the URL first'); return; }
+    const res = await apiRequest('/connections/detect-mappings', {
+        method: 'POST', body: JSON.stringify({ base_url: url }),
+    });
+    if (!res) return;
+    if (!res.ok) { _showConnectionTestResult(false, res.error || 'Detection failed'); return; }
+    document.getElementById('connectionPathMappings').value = _formatMappings(res.mappings);
+    _showConnectionTestResult(true, `Found container "${res.container}" — ${res.mappings.length} mapping(s) filled in`);
+}

@@ -949,6 +949,68 @@ class TestAtomicQueueDedupe:
         assert len(fresh_db.get_queue_items()) == 1
 
 
+class TestArrPaths:
+    CONN = {'id': 1, 'name': 'Sonarr', 'app_type': 'sonarr', 'enabled': 1,
+            'path_mappings': '[{"remote": "/tv", "local": "F:\\\\tv shows"},'
+                             ' {"remote": "/downloads", "local": "D:\\\\Downloads"}]'}
+
+    def test_remote_to_local_and_back(self):
+        from app.arr_paths import to_local, to_remote
+        assert to_local(self.CONN, '/tv/Show/S01/e1.mkv') == 'F:\\tv shows\\Show\\S01\\e1.mkv'
+        assert to_local(self.CONN, '/tvx/a.mkv') == '/tvx/a.mkv'     # prefix must be whole
+        assert to_remote(self.CONN, 'F:\\TV Shows\\Show\\e1.mkv') == '/tv/Show/e1.mkv'  # case-insensitive
+        assert to_remote(self.CONN, 'E:\\other\\x.mkv') is None
+        assert to_remote({'path_mappings': '[]'}, 'E:\\x.mkv') == 'E:\\x.mkv'
+
+    def test_validate_mappings(self):
+        import json
+        from app.arr_paths import validate_mappings
+        assert json.loads(validate_mappings([{'remote': ' /tv ', 'local': 'F:\\tv'}])) == \
+            [{'remote': '/tv', 'local': 'F:\\tv'}]
+        with pytest.raises(ValueError):
+            validate_mappings([{'remote': '/tv'}])
+
+    def test_webhook_path_is_translated(self, fresh_db, monkeypatch):
+        import json
+        from app.api import connection_routes as cr
+        monkeypatch.setattr(cr, 'db', fresh_db)
+        from app.encoder import encoder_pool
+        monkeypatch.setattr(encoder_pool, 'is_running', True)
+        fresh_db.create_profile(name="P", codec="av1", encoder="svt_av1_10bit",
+                                quality=30, audio_codec="aac", is_default=True)
+        fresh_db.create_scan_root(path="F:\\tv shows", profile_id=1)
+        fresh_db.create_external_connection(
+            name='Sonarr', app_type='sonarr', base_url='http://localhost:8989',
+            api_key_encrypted='x', path_mappings=json.dumps(
+                [{'remote': '/tv', 'local': 'F:\\tv shows'}]))
+        res = cr.process_webhook_payload('sonarr', {
+            'eventType': 'Download',
+            'episodeFile': {'path': '/tv/Show/S01E01.mkv', 'size': 1,
+                            'mediaInfo': {'videoCodec': 'x264'}}})
+        assert res['ok'], res
+        assert fresh_db.is_queued('F:\\tv shows\\Show\\S01E01.mkv')
+
+    def test_refresh_rescans_owning_series(self, fresh_db, monkeypatch):
+        import json
+        import app.arr_paths as ap
+        from app.external_connections import connection_manager
+        monkeypatch.setattr('app.database.db', fresh_db)
+        fresh_db.create_external_connection(
+            name='Sonarr', app_type='sonarr', base_url='http://x', api_key_encrypted='k',
+            path_mappings=json.dumps([{'remote': '/tv', 'local': 'F:\\tv shows'}]))
+        ap._cache.clear()
+        monkeypatch.setattr(connection_manager, '_get', lambda c, ep, params=None: [
+            {'id': 7, 'title': 'Show', 'path': '/tv/Show'},
+            {'id': 8, 'title': 'Show 2', 'path': '/tv/Show 2'}])
+        posts = []
+        monkeypatch.setattr(connection_manager, '_post', lambda c, ep, body: posts.append((ep, body)))
+        done = ap.refresh_for_path('F:\\tv shows\\Show 2\\S01E01.mkv')
+        assert posts == [('/command', {'name': 'RescanSeries', 'seriesId': 8})]
+        assert done == ['Sonarr: Show 2']
+        posts.clear()
+        assert ap.refresh_for_path('E:\\unrelated\\x.mkv') == [] and posts == []
+
+
 class TestWebhookKeyUrls:
     def test_with_webhook_key_replaces_existing(self):
         from app.external_connections import with_webhook_key, redact_webhook_key

@@ -14,8 +14,8 @@ class ConnectionsMixin:
             cursor.execute("""
                 INSERT INTO external_connections
                     (name, app_type, base_url, api_key_encrypted, enabled,
-                     show_in_stats, sync_interval_hours)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                     show_in_stats, sync_interval_hours, path_mappings)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 kwargs["name"],
                 kwargs["app_type"],
@@ -24,6 +24,7 @@ class ConnectionsMixin:
                 kwargs.get("enabled", True),
                 kwargs.get("show_in_stats", True),
                 kwargs.get("sync_interval_hours", 0),
+                kwargs.get("path_mappings", "[]"),
             ))
             return cursor.lastrowid
 
@@ -49,7 +50,7 @@ class ConnectionsMixin:
             allowed = [
                 "name", "app_type", "base_url", "api_key_encrypted",
                 "enabled", "show_in_stats", "last_tested", "last_synced",
-                "sync_interval_hours",
+                "sync_interval_hours", "path_mappings",
             ]
             updates, values = [], []
             for field in allowed:

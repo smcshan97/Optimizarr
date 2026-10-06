@@ -698,6 +698,18 @@
                         <p class="text-xs text-gray-500 mt-1">Files from this connection will use the linked scan root's profile</p>
                     </div>
 
+                    <!-- Path mappings (Docker) -->
+                    <div>
+                        <div class="flex items-center justify-between mb-2">
+                            <label class="block text-sm font-medium text-gray-300">Path Mappings <span class="text-gray-500 font-normal">(if it runs in Docker)</span></label>
+                            <button type="button" onclick="detectConnectionMappings()" class="text-xs text-blue-400 hover:text-blue-300">🐳 Detect from Docker</button>
+                        </div>
+                        <textarea id="connectionPathMappings" rows="3" spellcheck="false"
+                            placeholder="/tv => F:\tv shows&#10;/movies => F:\movies"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white font-mono text-xs"></textarea>
+                        <p class="text-xs text-gray-500 mt-1">One per line: <code>path inside the container =&gt; path on this PC</code>. Needed for webhooks, library sync and the post-encode rescan to find your files.</p>
+                    </div>
+
                     <!-- Test result banner -->
                     <div id="connectionTestResult" class="hidden rounded px-4 py-2 text-sm"></div>
                 </form>

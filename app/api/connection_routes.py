@@ -121,7 +121,14 @@ def create_connection(
             detail=f"Connection test failed: {result['error']}",
         )
 
+    from app.arr_paths import validate_mappings
+    try:
+        mappings_json = validate_mappings(data.get("path_mappings") or [])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     conn_id = db.create_external_connection(
+        path_mappings=mappings_json,
         name=name,
         app_type=app_type,
         base_url=base_url,
@@ -144,6 +151,17 @@ def create_connection(
         "test_result": result,
         "message": f"Connected to {result.get('app_name', app_type)} {result.get('version', '')}",
     }
+
+
+@router.post("/connections/detect-mappings")
+def detect_path_mappings(data: dict, current_user: dict = Depends(get_current_admin_user)):
+    """Suggest remote->local path mappings from the Docker container that
+    publishes this URL's port (Sonarr/Radarr usually run in Docker)."""
+    from app.arr_paths import detect_docker_mappings
+    base_url = (data or {}).get("base_url", "").strip()
+    if not base_url:
+        raise HTTPException(status_code=400, detail="base_url is required")
+    return detect_docker_mappings(base_url)
 
 
 @router.put("/connections/{conn_id}")
@@ -169,6 +187,12 @@ def update_connection(
             update_kwargs[field] = data[field]
     if "sync_interval_hours" in data:
         update_kwargs["sync_interval_hours"] = int(data["sync_interval_hours"] or 0)
+    if "path_mappings" in data:
+        from app.arr_paths import validate_mappings
+        try:
+            update_kwargs["path_mappings"] = validate_mappings(data["path_mappings"] or [])
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     # Only re-encrypt if a new key was actually supplied
     new_key = data.get("api_key", "").strip()
@@ -258,6 +282,9 @@ def _sync_connection_task(conn_id: int):
             items = connection_manager.fetch_stash_library(conn)
         else:
             return
+        from app.arr_paths import to_local
+        for item in items:
+            item["file_path"] = to_local(conn, item["file_path"])
     except Exception as e:
         optimizarr_logger.app_logger.error("Sync failed for %s: %s", conn["name"], e)
         return
@@ -517,6 +544,15 @@ def process_webhook_payload(app_type: str, payload: dict) -> dict:
 
     if not file_path:
         return {"ok": False, "message": "No file path in webhook payload"}
+
+    # Sonarr/Radarr name files by their (usually Docker) path — translate
+    from app.arr_paths import to_local
+    for c in db.get_external_connections():
+        if c.get("app_type") == app_type and c.get("enabled"):
+            mapped = to_local(c, file_path)
+            if mapped != file_path:
+                file_path = mapped
+                break
 
     if not _path_in_scan_roots(file_path):
         optimizarr_logger.app_logger.warning(

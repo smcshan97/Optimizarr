@@ -1171,6 +1171,14 @@ class EncodingJob:
                 completed_at=utc_now().strftime('%Y-%m-%d %H:%M:%S')
             )
 
+            # Tell Sonarr/Radarr the file changed (size, codec, maybe its
+            # extension) so they rescan instead of showing stale info.
+            try:
+                from app.arr_paths import refresh_in_background
+                refresh_in_background(str(final_path))
+            except Exception as e:
+                optimizarr_logger.app_logger.warning("Arr refresh not started: %s", e)
+
             # Add to history — use db.add_history so all fields are populated
             # Extract video duration from current_specs for encode speed tracking
             specs = self.queue_item.get('current_specs', {})
