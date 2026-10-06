@@ -227,10 +227,37 @@ class TestDatabase:
 
         required = {
             'profiles', 'scan_roots', 'queue', 'history',
-            'users', 'sessions', 'api_keys', 'settings', 'schedule',
+            'users', 'settings', 'schedule',
         }
         missing = required - tables
         assert not missing, f"Missing tables: {missing}"
+        assert not {'sessions', 'api_keys'} & tables  # dropped by migration 2
+
+    def test_fresh_db_is_at_latest_schema_version(self, fresh_db):
+        from app.database import SCHEMA_VERSION
+        with fresh_db.get_connection() as conn:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+
+    def test_migrations_upgrade_old_db_once(self, tmp_path):
+        """A pre-migration DB (user_version 0, legacy tables) is upgraded,
+        and re-opening it doesn't re-run anything."""
+        import sqlite3
+        from app.database import Database, SCHEMA_VERSION
+        path = str(tmp_path / "old.db")
+        Database(db_path=path)
+        con = sqlite3.connect(path)
+        con.execute("PRAGMA user_version = 0")
+        con.execute("CREATE TABLE sessions (id INTEGER)")
+        con.commit(); con.close()
+
+        Database(db_path=path)
+        con = sqlite3.connect(path)
+        assert con.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        names = {r[0] for r in con.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        cols = {r[1] for r in con.execute("PRAGMA table_info(profiles)")}
+        con.close()
+        assert 'sessions' not in names and 'film_grain' in cols
+        Database(db_path=path)  # idempotent
 
     def test_fresh_db_has_must_change_password(self, fresh_db):
         """The must_change_password column should exist on users."""
@@ -2223,6 +2250,30 @@ class TestEncoderSelection:
                         {'bit_depth': 10, 'hdr': True},
                         ['svt_av1', 'nvenc_av1', 'nvenc_av1_10bit'], {'nvidia': True})
         assert job.select_encoder() == 'nvenc_av1_10bit'
+
+    def test_film_grain_svt_av1(self, fresh_db, monkeypatch):
+        job = self._job(fresh_db, monkeypatch, {'film_grain': 10, 'two_pass': True},
+                        {'bit_depth': 8}, ['svt_av1', 'svt_av1_10bit'])
+        cmd = job.build_command()
+        i = cmd.index('--encopts')
+        assert cmd[i + 1] == 'film-grain=10:film-grain-denoise=0'
+        assert '--multi-pass' not in cmd  # no-op for constant quality
+
+    def test_film_grain_x265_tune_skips_crashing_presets(self, fresh_db, monkeypatch):
+        prof = {'codec': 'h265', 'encoder': 'x265', 'film_grain': 5, 'preset': 'slow'}
+        cmd = self._job(fresh_db, monkeypatch, prof, {'bit_depth': 8}, ['x265']).build_command()
+        assert cmd[cmd.index('--encoder-tune') + 1] == 'grain'
+        prof['preset'] = 'ultrafast'
+        cmd = self._job(fresh_db, monkeypatch, prof, {'bit_depth': 8}, ['x265']).build_command()
+        assert '--encoder-tune' not in cmd
+
+    def test_film_grain_persists(self, fresh_db):
+        pid = fresh_db.create_profile(
+            name="G", resolution="", framerate=None, codec="av1",
+            encoder="svt_av1_10bit", quality=30, audio_codec="aac", film_grain=12)
+        assert fresh_db.get_profile(pid)['film_grain'] == 12
+        fresh_db.update_profile(pid, film_grain=0)
+        assert fresh_db.get_profile(pid)['film_grain'] == 0
 
     def test_hw_unknown_list_keeps_conservative_codecs(self, fresh_db, monkeypatch):
         job = self._job(fresh_db, monkeypatch, {'hw_accel_enabled': True},

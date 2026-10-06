@@ -111,9 +111,12 @@ class ProfileCreate(BaseModel):
     chapter_markers: bool = True
     hw_accel_enabled: bool = False
     preset: Optional[str] = None
-    two_pass: bool = False
+    two_pass: bool = False  # no effect: HandBrake multi-pass needs a bitrate target
     custom_args: Optional[str] = None
     is_default: bool = False
+    # Film-grain mode: 0 = off. SVT-AV1 synthesises grain at this strength
+    # (1-50) instead of spending bits on it; x265 switches to --tune grain.
+    film_grain: int = Field(default=0, ge=0, le=50)
     # AI upscale settings
     upscale_enabled: bool = False
     upscale_trigger_below: int = 720
@@ -149,6 +152,7 @@ class ProfileResponse(BaseModel):
     two_pass: bool
     custom_args: Optional[str]
     is_default: bool
+    film_grain: Optional[int] = 0
     created_at: Optional[str]
     # AI upscale settings
     upscale_enabled: Optional[bool] = False

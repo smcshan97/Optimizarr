@@ -112,6 +112,7 @@ def update_profile(
         stereo_divergence=profile.stereo_divergence,
         stereo_convergence=profile.stereo_convergence,
         stereo_depth_model=profile.stereo_depth_model,
+        film_grain=profile.film_grain,
     )
     
     if success:

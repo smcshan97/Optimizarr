@@ -165,32 +165,6 @@ class Database:
                 )
             """)
             
-            # Sessions table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    token TEXT UNIQUE NOT NULL,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    expires_at TIMESTAMP NOT NULL,
-                    last_used TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-                )
-            """)
-            
-            # API keys table
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS api_keys (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER NOT NULL,
-                    key TEXT UNIQUE NOT NULL,
-                    name TEXT,
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    last_used TIMESTAMP,
-                    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
-                )
-            """)
-            
             # Schedule table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS schedule (
@@ -603,13 +577,10 @@ class Database:
                 cursor.execute("UPDATE users SET must_change_password = 1 WHERE username = 'admin'")
                 print("  ↳ Migrated: added 'must_change_password' to users")
 
-            # Security: token_version — bumped on password change so tokens
-            # issued before the change stop working.
-            try:
-                cursor.execute("SELECT token_version FROM users LIMIT 1")
-            except Exception:
-                cursor.execute("ALTER TABLE users ADD COLUMN token_version INTEGER DEFAULT 0")
-                print("  ↳ Migrated: added 'token_version' to users")
+            # Everything above is the legacy "add it if it's missing" upgrade
+            # path, kept because existing databases are in every state it
+            # handles. New schema changes go in MIGRATIONS (bottom of file).
+            _run_migrations(cursor)
 
             # Enforce single default profile — keep only the lowest-id one
             cursor.execute("SELECT id FROM profiles WHERE is_default = 1 ORDER BY id")
@@ -650,8 +621,8 @@ class Database:
                  upscale_enabled, upscale_trigger_below, upscale_target_height,
                  upscale_model, upscale_factor, upscale_key,
                  stereo_enabled, stereo_mode, stereo_format,
-                 stereo_divergence, stereo_convergence, stereo_depth_model)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 stereo_divergence, stereo_convergence, stereo_depth_model, film_grain)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 kwargs.get('name'),
                 kwargs.get('resolution'),
@@ -682,6 +653,7 @@ class Database:
                 kwargs.get('stereo_divergence', 2.0),
                 kwargs.get('stereo_convergence', 0.5),
                 kwargs.get('stereo_depth_model', 'Any_V2_S'),
+                kwargs.get('film_grain', 0) or 0,
             ))
             return cursor.lastrowid
     
@@ -706,6 +678,7 @@ class Database:
                 'upscale_model', 'upscale_factor', 'upscale_key',
                 'stereo_enabled', 'stereo_mode', 'stereo_format',
                 'stereo_divergence', 'stereo_convergence', 'stereo_depth_model',
+                'film_grain',
             ]
             
             for field in allowed_fields:
@@ -1782,6 +1755,65 @@ class Database:
             )
             cursor.execute("DELETE FROM external_connections WHERE id = ?", (conn_id,))
             return cursor.rowcount > 0
+
+
+# ============================================================
+# Versioned schema migrations
+# ============================================================
+# Each entry runs once, in order, and bumps PRAGMA user_version. To change
+# the schema, append a new (version, description, function) — never edit or
+# reorder a released one. Functions receive the open cursor and run inside
+# initialize_database's transaction, so a failing migration rolls back.
+
+def _has_column(cursor, table: str, column: str) -> bool:
+    cursor.execute(f"PRAGMA table_info({table})")
+    return any(row[1] == column for row in cursor.fetchall())
+
+
+def _add_column(cursor, table: str, column: str, decl: str):
+    """ADD COLUMN unless present (a DB upgraded by the legacy path may
+    already have it)."""
+    if not _has_column(cursor, table, column):
+        cursor.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
+def _m1_token_version(cursor):
+    _add_column(cursor, "users", "token_version", "INTEGER DEFAULT 0")
+
+
+def _m2_drop_unused_auth_tables(cursor):
+    # Never read or written — auth is stateless JWT + token_version.
+    cursor.execute("DROP TABLE IF EXISTS sessions")
+    cursor.execute("DROP TABLE IF EXISTS api_keys")
+
+
+def _m3_profile_film_grain(cursor):
+    _add_column(cursor, "profiles", "film_grain", "INTEGER DEFAULT 0")
+
+
+MIGRATIONS = [
+    (1, "users.token_version", _m1_token_version),
+    (2, "drop unused sessions/api_keys tables", _m2_drop_unused_auth_tables),
+    (3, "profiles.film_grain", _m3_profile_film_grain),
+]
+
+SCHEMA_VERSION = MIGRATIONS[-1][0]
+
+
+def _run_migrations(cursor):
+    cursor.execute("PRAGMA user_version")
+    current = cursor.fetchone()[0]
+    if current > SCHEMA_VERSION:
+        print(f"  ⚠ Database schema v{current} is newer than this build "
+              f"(v{SCHEMA_VERSION}) — was Optimizarr downgraded?")
+        return
+    for version, description, fn in MIGRATIONS:
+        if version <= current:
+            continue
+        fn(cursor)
+        # PRAGMA can't take parameters; version is an int from the list above
+        cursor.execute(f"PRAGMA user_version = {int(version)}")
+        print(f"  ↳ Migration {version}: {description}")
 
 
 # Global database instance

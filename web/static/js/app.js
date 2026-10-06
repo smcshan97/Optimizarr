@@ -1368,7 +1368,8 @@ async function loadProfiles() {
                         ${p.enable_filters ? '<span class="px-2 py-0.5 bg-purple-900 text-purple-300 text-xs rounded">Filters</span>' : ''}
                         ${p.chapter_markers ? '<span class="px-2 py-0.5 bg-gray-600 text-gray-300 text-xs rounded">Chapters</span>' : ''}
                         ${p.hw_accel_enabled ? '<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">GPU</span>' : ''}
-                        ${p.two_pass ? '<span class="px-2 py-0.5 bg-yellow-900 text-yellow-300 text-xs rounded">2-Pass</span>' : ''}
+                        ${p.film_grain ? `<span class="px-2 py-0.5 bg-yellow-900 text-yellow-300 text-xs rounded">Grain ${p.film_grain}</span>` : ''}
+                        ${/_10bit$/.test(p.encoder || '') ? '<span class="px-2 py-0.5 bg-gray-600 text-gray-300 text-xs rounded">10-bit</span>' : ''}
                         ${p.upscale_enabled ? `<span class="px-2 py-0.5 bg-blue-900 text-blue-300 text-xs rounded" title="AI Upscale: ${p.upscale_key || 'realesrgan'} ×${p.upscale_factor || 2}, trigger below ${p.upscale_trigger_below || 720}px">🤖 Upscale ×${p.upscale_factor || 2}</span>` : ''}
                         ${p.stereo_enabled ? `<span class="px-2 py-0.5 bg-purple-900 text-purple-300 text-xs rounded" title="3D: ${p.stereo_mode || '2d_to_3d'}, ${p.stereo_format || 'half_sbs'}, divergence ${p.stereo_divergence || 2.0}">🎥 ${p.stereo_mode === '3d_to_2d' ? '3D→2D' : '2D→3D'}</span>` : ''}
                     </div>
@@ -1402,6 +1403,7 @@ function showCreateProfileForm() {
     document.getElementById('profileChapterMarkers').checked = true;
     document.getElementById('profileHwAccel').checked = false;
     document.getElementById('profileContainer').value = 'mkv';
+    _setFilmGrain(0);
 
     // Reset AI upscale section to defaults and collapse it
     _fillProfileUpscaleFields({
@@ -1470,6 +1472,7 @@ async function editProfile(id) {
     document.getElementById('profileChapterMarkers').checked = profile.chapter_markers !== false;
     document.getElementById('profileHwAccel').checked = profile.hw_accel_enabled || false;
     document.getElementById('profileTwoPass').checked = profile.two_pass;
+    _setFilmGrain(profile.film_grain || 0);
     document.getElementById('profileIsDefault').checked = profile.is_default;
     document.getElementById('profileCustomArgs').value = profile.custom_args || '';
 
@@ -1515,6 +1518,7 @@ document.getElementById('profileForm').addEventListener('submit', async (e) => {
         chapter_markers: document.getElementById('profileChapterMarkers').checked,
         hw_accel_enabled: document.getElementById('profileHwAccel').checked,
         two_pass: document.getElementById('profileTwoPass').checked,
+        film_grain: parseInt(document.getElementById('profileFilmGrain')?.value || '0', 10) || 0,
         custom_args: document.getElementById('profileCustomArgs').value || null,
         is_default: document.getElementById('profileIsDefault').checked,
         // AI upscale settings
@@ -2014,6 +2018,13 @@ function showCodecGuide() {
 `;
     
     alert(guide);
+}
+
+function _setFilmGrain(value) {
+    const slider = document.getElementById('profileFilmGrain');
+    const label = document.getElementById('profileFilmGrainValue');
+    if (slider) slider.value = value;
+    if (label) label.textContent = value ? String(value) : 'Off';
 }
 
 // Grey out encoders the installed HandBrake can't run (it only lists GPU

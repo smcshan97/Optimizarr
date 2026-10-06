@@ -847,10 +847,15 @@
                     </div>
                     
                     <div>
-                        <label class="flex items-center">
-                            <input type="checkbox" id="profileTwoPass" class="mr-2">
-                            <span class="text-sm">Enable two-pass encoding (better quality, slower)</span>
-                        </label>
+                        <label class="block text-sm font-medium mb-2">Film grain</label>
+                        <div class="flex items-center gap-3">
+                            <input type="range" id="profileFilmGrain" min="0" max="50" step="1" value="0" class="flex-1"
+                                oninput="document.getElementById('profileFilmGrainValue').textContent = this.value === '0' ? 'Off' : this.value">
+                            <span id="profileFilmGrainValue" class="text-sm w-10 text-right">Off</span>
+                        </div>
+                        <p class="text-xs text-gray-400 mt-1">For grainy film sources. SVT-AV1 removes the grain and re-synthesises it on playback (8–15 is typical), saving a lot of space; x265 switches to its grain tune. Leave off for clean/animated content.</p>
+                        <!-- Two-pass has no effect on constant-quality encodes; kept hidden so saved profiles round-trip -->
+                        <input type="checkbox" id="profileTwoPass" class="hidden">
                     </div>
                     
                     <!-- Phase 2: Audio/Subtitle/Filters Section -->

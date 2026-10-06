@@ -298,9 +298,23 @@ class EncodingJob:
         if self.profile.get('chapter_markers', True):
             cmd.append('--markers')
         
-        # Two-pass encoding
-        if self.profile.get('two_pass'):
-            cmd.append('--multi-pass')
+        # Film-grain mode. Grain is noise to an encoder: preserving it eats
+        # bits, smoothing it looks plasticky. SVT-AV1 can strip it and
+        # re-synthesise it on playback (film-grain=N); x265 has a grain tune.
+        grain = int(self.profile.get('film_grain') or 0)
+        if grain > 0:
+            if hb_encoder.startswith('svt_av1'):
+                cmd.extend(['--encopts',
+                            f'film-grain={min(grain, 50)}:film-grain-denoise=0'])
+            elif hb_encoder.startswith('x265'):
+                # x265's grain tune segfaults HandBrake (1.10.2 verified)
+                # with the ultrafast/superfast presets — skip it there.
+                if (self.profile.get('preset') or '') not in ('ultrafast', 'superfast'):
+                    cmd.extend(['--encoder-tune', 'grain'])
+
+        # (two_pass is intentionally not emitted: HandBrake's --multi-pass
+        # only applies to average-bitrate encodes and every profile here is
+        # constant-quality --quality, so it did nothing but imply otherwise.)
         
         # Custom arguments (always last so they can override).
         # shlex keeps quoted values intact (--encoder-options "a=1:b=2 c") but
