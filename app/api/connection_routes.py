@@ -1,8 +1,12 @@
 """External connections (Sonarr, Radarr, Stash) and webhook routes."""
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
-from typing import List
+import hmac
+import os
+import secrets
+
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Header
+from typing import List, Optional
 
 from app.api.models import MessageResponse
 from app.api.dependencies import get_current_user, get_current_admin_user
@@ -10,6 +14,57 @@ from app.database import db
 from app.logger import optimizarr_logger
 
 router = APIRouter()
+
+
+def get_webhook_secret() -> str:
+    """The shared secret Sonarr/Radarr must send with webhook calls.
+
+    Generated on first use and kept in the settings table. Sent as the
+    ``key`` query parameter (works with every Sonarr/Radarr version) or the
+    ``X-Optimizarr-Key`` header.
+    """
+    secret = db.get_setting('webhook_secret')
+    if not secret:
+        secret = secrets.token_urlsafe(32)
+        db.set_setting('webhook_secret', secret)
+    return secret
+
+
+def _path_in_scan_roots(file_path: str) -> bool:
+    """True if ``file_path`` lies inside an enabled scan root.
+
+    Webhook payloads name the file to encode — and an encode REPLACES the
+    original — so only files inside a configured library are accepted.
+    """
+    try:
+        target = os.path.normcase(os.path.abspath(file_path))
+    except (TypeError, ValueError):
+        return False
+    for root in db.get_scan_roots(enabled_only=True):
+        base = os.path.normcase(os.path.abspath(root['path']))
+        try:
+            if os.path.commonpath([target, base]) == base:
+                return True
+        except ValueError:  # different drives on Windows
+            continue
+    return False
+
+
+def upgrade_registered_webhooks() -> int:
+    """Startup migration: add the secret key to webhooks registered before
+    the receiver required one. Returns how many notifications were updated."""
+    from app.external_connections import connection_manager
+    secret = get_webhook_secret()
+    total = 0
+    for conn in db.get_external_connections():
+        if conn.get('app_type') not in ('sonarr', 'radarr') or not conn.get('enabled'):
+            continue
+        try:
+            total += connection_manager.upgrade_webhook_secret(conn, secret)
+        except Exception as e:
+            optimizarr_logger.app_logger.warning(
+                "Could not update webhook secret on %s: %s", conn.get('name'), e)
+    return total
 
 
 @router.get("/connections")
@@ -351,7 +406,7 @@ async def register_webhook(
     if not optimizarr_url:
         raise HTTPException(status_code=400, detail="optimizarr_url is required")
 
-    result = connection_manager.register_webhook(conn, optimizarr_url)
+    result = connection_manager.register_webhook(conn, optimizarr_url, get_webhook_secret())
     if not result["ok"]:
         raise HTTPException(status_code=400, detail=f"Webhook registration failed: {result['error']}")
     return result
@@ -361,12 +416,25 @@ async def register_webhook(
 # WEBHOOKS — Receive download events from Sonarr / Radarr
 # ============================================================
 
+@router.get("/webhooks/info")
+def webhook_info(current_user: dict = Depends(get_current_admin_user)):
+    """Webhook URL paths (with key) to paste into Sonarr/Radarr manually."""
+    secret = get_webhook_secret()
+    return {app: f"/api/webhooks/{app}?key={secret}" for app in ("sonarr", "radarr")}
+
+
 @router.post("/webhooks/{app_type}")
-async def receive_webhook(app_type: str, payload: dict):
+def receive_webhook(
+    app_type: str,
+    payload: dict,
+    key: Optional[str] = None,
+    x_optimizarr_key: Optional[str] = Header(None),
+):
     """
     Receive download completion events from Sonarr or Radarr.
-    No authentication — the caller is on the local network.
-    Files are queued as pending (respects scheduler rest hours).
+    Requires the webhook secret (``?key=`` or ``X-Optimizarr-Key``) — an
+    unauthenticated caller could otherwise get any file re-encoded and its
+    original replaced. Files are queued as pending (respects scheduler rest hours).
 
     Dead-letter pattern (Patch 34): the raw event is persisted BEFORE any
     processing, so a webhook that arrives mid-restart or dies on an
@@ -374,7 +442,14 @@ async def receive_webhook(app_type: str, payload: dict):
     """
     import json as _json
 
+    supplied = key or x_optimizarr_key or ''
+    if not hmac.compare_digest(supplied.encode(), get_webhook_secret().encode()):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Missing or invalid webhook key")
+
     app_type = app_type.lower()
+    if app_type not in ("sonarr", "radarr"):
+        raise HTTPException(status_code=400, detail=f"Unsupported app_type: {app_type}")
     event_id = db.add_webhook_event(app_type, _json.dumps(payload))
 
     try:
@@ -442,6 +517,12 @@ def process_webhook_payload(app_type: str, payload: dict) -> dict:
 
     if not file_path:
         return {"ok": False, "message": "No file path in webhook payload"}
+
+    if not _path_in_scan_roots(file_path):
+        optimizarr_logger.app_logger.warning(
+            "Webhook: rejected %s — not inside any enabled scan root", file_path)
+        return {"ok": False,
+                "message": "File is not inside an enabled scan root — add its library folder first"}
 
     codec = CODEC_MAP.get(raw_codec.lower(), raw_codec.lower() or "unknown")
 

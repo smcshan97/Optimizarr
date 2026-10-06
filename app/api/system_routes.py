@@ -661,7 +661,8 @@ async def export_config_json(current_user: dict = Depends(get_current_admin_user
         "exported_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
         "profiles": export_profiles,
         "scan_roots": export_roots,
-        "settings": db.get_all_settings(),
+        "settings": {k: v for k, v in db.get_all_settings().items()
+                     if k != 'webhook_secret'},
         "connections": export_connections,
     }
 
@@ -722,6 +723,8 @@ async def import_config_json(
 
     # ---- Settings (upsert by key) ----
     for key, value in (config.get("settings") or {}).items():
+        if key == 'webhook_secret':
+            continue  # per-instance secret; never imported
         db.set_setting(key, value)
         summary["settings_applied"] += 1
 

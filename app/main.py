@@ -104,6 +104,17 @@ async def lifespan(app: FastAPI):
     # bog down program start). Sequenced so the orphan sweep finishes before
     # the resume encode begins — no racing the new encode's temp file.
     def _startup_chores():
+        # 0. Webhooks registered before the receiver required a key would
+        #    now be rejected — add the key to them in Sonarr/Radarr.
+        try:
+            from app.api.connection_routes import upgrade_registered_webhooks
+            n_hooks = upgrade_registered_webhooks()
+            if n_hooks:
+                print(f"  Added webhook key to {n_hooks} Sonarr/Radarr webhook(s)")
+                devlog('webhook_key_upgrade', n=n_hooks)
+        except Exception as e:
+            print(f"  ⚠ Webhook key upgrade failed: {e}")
+
         # 1. Sweep leftover *_optimized.* temps (skips recent files, so an
         #    encode that a webhook kicked off meanwhile is never touched).
         try:

@@ -783,6 +783,7 @@ class TestWebhookDeadLetter:
             hw_accel_enabled=False, preset="8",
             two_pass=False, custom_args=None, is_default=True,
         )
+        fresh_db.create_scan_root(path="/movies", profile_id=1)
         payload = {
             "eventType": "Download",
             "movieFile": {
@@ -807,6 +808,105 @@ class TestWebhookDeadLetter:
         # Ignored event types are deterministic non-actions
         result3 = connection_routes.process_webhook_payload('radarr', {"eventType": "Test"})
         assert result3['ok'] and 'ignored' in result3['message'].lower()
+
+
+class TestWebhookAuth:
+    """Webhook receiver requires the shared key and an in-library path."""
+
+    def _setup(self, fresh_db, monkeypatch):
+        from app.api import connection_routes
+        monkeypatch.setattr(connection_routes, 'db', fresh_db)
+        from app.encoder import encoder_pool
+        monkeypatch.setattr(encoder_pool, 'is_running', True)
+        fresh_db.create_profile(
+            name="WH", resolution="", framerate=None,
+            codec="av1", encoder="svt_av1", quality=28,
+            audio_codec="passthrough", container="mkv",
+            audio_handling="preserve_all", subtitle_handling="none",
+            chapter_markers=True, enable_filters=False,
+            hw_accel_enabled=False, preset="8",
+            two_pass=False, custom_args=None, is_default=True,
+        )
+        return connection_routes
+
+    @staticmethod
+    def _payload(path):
+        return {"eventType": "Download",
+                "movieFile": {"path": path, "size": 1,
+                              "mediaInfo": {"videoCodec": "x264"}}}
+
+    def test_missing_or_wrong_key_rejected(self, fresh_db, monkeypatch):
+        from fastapi import HTTPException
+        cr = self._setup(fresh_db, monkeypatch)
+        for bad in (None, '', 'wrong'):
+            with pytest.raises(HTTPException) as exc:
+                cr.receive_webhook('radarr', self._payload('/m/a.mkv'),
+                                   key=bad, x_optimizarr_key=None)
+            assert exc.value.status_code == 401
+        # Rejected calls must not be persisted for replay
+        assert fresh_db.count_unprocessed_webhooks() == 0
+
+    def test_key_via_query_or_header(self, fresh_db, monkeypatch):
+        cr = self._setup(fresh_db, monkeypatch)
+        fresh_db.create_scan_root(path="/m", profile_id=1)
+        secret = cr.get_webhook_secret()
+        r1 = cr.receive_webhook('radarr', self._payload('/m/a.mkv'),
+                                key=secret, x_optimizarr_key=None)
+        r2 = cr.receive_webhook('radarr', self._payload('/m/b.mkv'),
+                                key=None, x_optimizarr_key=secret)
+        assert r1['ok'] and r2['ok']
+        assert len(fresh_db.get_queue_items()) == 2
+
+    def test_secret_is_stable(self, fresh_db, monkeypatch):
+        cr = self._setup(fresh_db, monkeypatch)
+        assert cr.get_webhook_secret() == cr.get_webhook_secret()
+        assert len(cr.get_webhook_secret()) >= 32
+
+    def test_path_outside_scan_roots_refused(self, fresh_db, monkeypatch):
+        cr = self._setup(fresh_db, monkeypatch)
+        fresh_db.create_scan_root(path="/m", profile_id=1)
+        for path in ('/etc/passwd.mkv', '/m2/a.mkv', '/m/../other/a.mkv'):
+            res = cr.process_webhook_payload('radarr', self._payload(path))
+            assert not res['ok'], path
+            assert 'scan root' in res['message']
+        assert fresh_db.get_queue_items() == []
+
+    def test_unknown_app_type_rejected(self, fresh_db, monkeypatch):
+        from fastapi import HTTPException
+        cr = self._setup(fresh_db, monkeypatch)
+        with pytest.raises(HTTPException) as exc:
+            cr.receive_webhook('evil', {}, key=cr.get_webhook_secret(),
+                               x_optimizarr_key=None)
+        assert exc.value.status_code == 400
+
+
+class TestWebhookKeyUrls:
+    def test_with_webhook_key_replaces_existing(self):
+        from app.external_connections import with_webhook_key, redact_webhook_key
+        url = with_webhook_key('http://h:5757/api/webhooks/sonarr?key=old&x=1', 'NEW')
+        assert 'key=NEW' in url and 'key=old' not in url and 'x=1' in url
+        assert redact_webhook_key(url).count('****') == 1
+        assert 'NEW' not in redact_webhook_key(url)
+
+    def test_upgrade_updates_only_our_webhooks(self, monkeypatch):
+        from app.external_connections import ExternalConnectionManager
+        mgr = ExternalConnectionManager()
+        notes = [
+            {"id": 1, "name": "Optimizarr", "implementation": "Webhook",
+             "fields": [{"name": "url", "value": "http://h:5757/api/webhooks/sonarr"}]},
+            {"id": 2, "name": "Discord", "implementation": "Discord", "fields": []},
+            {"id": 3, "name": "Other", "implementation": "Webhook",
+             "fields": [{"name": "url", "value": "http://elsewhere/hook"}]},
+        ]
+        puts = []
+        monkeypatch.setattr(mgr, '_get', lambda conn, path, params=None: notes)
+        monkeypatch.setattr(mgr, '_put', lambda conn, path, body: puts.append((path, body)) or body)
+        n = mgr.upgrade_webhook_secret({"app_type": "sonarr"}, 'SEC')
+        assert n == 1
+        assert puts[0][0] == '/notification/1'
+        assert 'key=SEC' in puts[0][1]['fields'][0]['value']
+        # Second run is a no-op once the key is present
+        assert mgr.upgrade_webhook_secret({"app_type": "sonarr"}, 'SEC') == 0
 
 
 # ---------------------------------------------------------------------------

@@ -158,6 +158,17 @@ class ExternalConnectionManager:
         resp.raise_for_status()
         return resp.json()
 
+    def _put(self, conn: Dict, path: str, body: Dict) -> Any:
+        url = f"{self._base(conn)}/api/v3{path}"
+        resp = requests.put(
+            url,
+            headers={**self._headers(conn), "Content-Type": "application/json"},
+            json=body,
+            timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     # ------------------------------------------------------------------ #
     #  Public API                                                          #
     # ------------------------------------------------------------------ #
@@ -393,33 +404,105 @@ class ExternalConnectionManager:
                 })
         return items
 
-    def register_webhook(self, conn: Dict, optimizarr_url: str) -> Dict:
+    @staticmethod
+    def _optimizarr_webhooks(notifications: List[Dict], app_type: str) -> List[Dict]:
+        """Sonarr/Radarr notifications that point at our webhook route."""
+        marker = f"/api/webhooks/{app_type}"
+        found = []
+        for n in notifications or []:
+            if n.get("implementation") != "Webhook":
+                continue
+            url = next((f.get("value") for f in n.get("fields", [])
+                        if f.get("name") == "url"), "") or ""
+            if marker in url or n.get("name") == "Optimizarr":
+                found.append(n)
+        return found
+
+    @staticmethod
+    def _set_url_field(notification: Dict, url: str) -> Dict:
+        for f in notification.get("fields", []):
+            if f.get("name") == "url":
+                f["value"] = url
+                return notification
+        notification.setdefault("fields", []).append({"name": "url", "value": url})
+        return notification
+
+    def register_webhook(self, conn: Dict, optimizarr_url: str, secret: str) -> Dict:
         """
         Register Optimizarr as a webhook notification in Sonarr or Radarr.
-        The webhook URL will be: {optimizarr_url}/api/webhooks/{app_type}
+        The webhook URL is {optimizarr_url}/api/webhooks/{app_type}?key=<secret>.
+        An existing Optimizarr notification is updated in place rather than
+        duplicated, so re-registering (e.g. after a URL change) is safe.
         """
         app_type = conn["app_type"]
-        webhook_url = f"{optimizarr_url.rstrip('/')}/api/webhooks/{app_type}"
+        webhook_url = with_webhook_key(
+            f"{optimizarr_url.rstrip('/')}/api/webhooks/{app_type}", secret)
 
-        payload = {
-            "name": "Optimizarr",
-            "implementation": "Webhook",
-            "configContract": "WebhookSettings",
-            "fields": [
-                {"name": "url", "value": webhook_url},
-                {"name": "method", "value": 1},  # 1 = POST
-            ],
-            "onDownload": True,
-            "onUpgrade": True,
-            "onRename": False,
-            "onDelete": False,
-            "tags": [],
-        }
         try:
+            existing = self._optimizarr_webhooks(
+                self._get(conn, "/notification"), app_type)
+            if existing:
+                n = self._set_url_field(existing[0], webhook_url)
+                result = self._put(conn, f"/notification/{n['id']}", n)
+                return {"ok": True, "webhook_id": result.get("id"),
+                        "url": redact_webhook_key(webhook_url), "updated": True}
+
+            payload = {
+                "name": "Optimizarr",
+                "implementation": "Webhook",
+                "configContract": "WebhookSettings",
+                "fields": [
+                    {"name": "url", "value": webhook_url},
+                    {"name": "method", "value": 1},  # 1 = POST
+                ],
+                "onDownload": True,
+                "onUpgrade": True,
+                "onRename": False,
+                "onDelete": False,
+                "tags": [],
+            }
             result = self._post(conn, "/notification", payload)
-            return {"ok": True, "webhook_id": result.get("id"), "url": webhook_url}
+            return {"ok": True, "webhook_id": result.get("id"),
+                    "url": redact_webhook_key(webhook_url), "updated": False}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    def upgrade_webhook_secret(self, conn: Dict, secret: str) -> int:
+        """Add/refresh ?key=<secret> on existing Optimizarr webhooks.
+
+        Webhooks registered before the receiver required a key would
+        otherwise start failing. Only notifications that already point at
+        /api/webhooks/{app_type} are touched; the host part is kept as-is.
+        Returns the number of notifications updated. Raises on HTTP errors.
+        """
+        app_type = conn["app_type"]
+        updated = 0
+        for n in self._optimizarr_webhooks(self._get(conn, "/notification"), app_type):
+            url = next((f.get("value") for f in n.get("fields", [])
+                        if f.get("name") == "url"), "") or ""
+            if f"/api/webhooks/{app_type}" not in url:
+                continue
+            new_url = with_webhook_key(url, secret)
+            if new_url == url:
+                continue
+            self._put(conn, f"/notification/{n['id']}", self._set_url_field(n, new_url))
+            updated += 1
+        return updated
+
+
+def with_webhook_key(url: str, secret: str) -> str:
+    """Return ``url`` with its ``key`` query parameter set to ``secret``."""
+    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+    parts = urlsplit(url)
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+             if k != "key"]
+    query.append(("key", secret))
+    return urlunsplit(parts._replace(query=urlencode(query)))
+
+
+def redact_webhook_key(url: str) -> str:
+    """Mask the webhook key in a URL for display/logging."""
+    return re.sub(r"(key=)[^&]+", r"\g<1>****", url)
 
 
 
