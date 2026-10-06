@@ -85,7 +85,9 @@ class EncodingJob:
         if not self.queue_item:
             raise ValueError(f"Queue item {queue_item_id} not found")
     
-    def build_command(self, input_override: str = None, size_override=None) -> list:
+    def build_command(self, input_override: str = None, size_override=None,
+                      output_override: str = None, quality_override: int = None,
+                      video_only: bool = False) -> list:
         """Build HandBrakeCLI command from profile settings.
         
         Args:
@@ -94,6 +96,10 @@ class EncodingJob:
             size_override: (width, height) to scale to when the profile sets no
                            resolution — an upscale whose model overshot the
                            requested factor is brought down here.
+            output_override / quality_override / video_only: used by the
+                           target-quality search to encode short samples
+                           with the profile's real settings at a candidate
+                           quality, without audio, subtitles or chapters.
         """
         input_file = input_override if input_override else self.queue_item['file_path']
         original_file = self.queue_item['file_path']
@@ -110,7 +116,8 @@ class EncodingJob:
         # Output always goes next to the ORIGINAL file, not the temp upscale file
         original_path = Path(original_file)
         output_ext = container_info['ext']
-        output_file = str(original_path.parent / f"{original_path.stem}_optimized{output_ext}")
+        output_file = output_override or str(
+            original_path.parent / f"{original_path.stem}_optimized{output_ext}")
 
         # Base command. --json emits structured Progress/scan blocks instead
         # of the human text lines — exact progress/fps/ETA, immune to output
@@ -135,8 +142,11 @@ class EncodingJob:
             elif hw.get('intel'):
                 cmd.extend(['--enable-hw-decoding', 'qsv'])
         
-        # Quality
-        cmd.extend(['--quality', str(self.profile['quality'])])
+        # Quality — per-file value from the target-quality search when one ran
+        quality = quality_override
+        if quality is None:
+            quality = getattr(self, '_tq_quality', None) or self.profile['quality']
+        cmd.extend(['--quality', str(quality)])
         
         # Preset
         if self.profile.get('preset'):
@@ -157,13 +167,17 @@ class EncodingJob:
             # Variable framerate (preserve source)
             cmd.append('--vfr')
         
-        # ---- Audio Handling ----
-        audio_args = self._build_audio_args()
-        cmd.extend(audio_args)
-        
-        # ---- Subtitle Handling ----
-        subtitle_args = self._build_subtitle_args()
-        cmd.extend(subtitle_args)
+        if video_only:
+            # Samples for the VMAF search: no audio/subs, and no auto-crop —
+            # cropping a sample changes its geometry, so VMAF would compare
+            # shifted pixels (a 1918-wide encode of a 1920 reference scored
+            # ~70 regardless of quality).
+            cmd.extend(['--audio', 'none', '--subtitle', 'none', '--crop-mode', 'none'])
+        else:
+            # ---- Audio Handling ----
+            cmd.extend(self._build_audio_args())
+            # ---- Subtitle Handling ----
+            cmd.extend(self._build_subtitle_args())
         
         # ---- Video Filters ----
         if self.profile.get('enable_filters'):
@@ -171,7 +185,7 @@ class EncodingJob:
             cmd.extend(filter_args)
         
         # ---- Chapter Markers ----
-        if self.profile.get('chapter_markers', True):
+        if self.profile.get('chapter_markers', True) and not video_only:
             cmd.append('--markers')
         
         # Film-grain mode. Grain is noise to an encoder: preserving it eats
@@ -478,6 +492,78 @@ class EncodingJob:
                         current_memory_mb=process_resources['memory_mb']
                     )
     
+    def _run_target_quality(self) -> Optional[str]:
+        """Pick this file's encoder quality from the profile's VMAF target.
+
+        Sets self._tq_quality. Returns 'skip' when the samples predict the
+        encode won't shrink the file enough (item marked kept_original).
+        Any failure falls back to the profile's fixed quality.
+        """
+        from app.logger import optimizarr_logger
+        from app import target_quality as tq
+        target = float(self.profile.get('target_vmaf') or 0)
+        cached = self.queue_item.get('tq_quality')
+        if cached:
+            self._tq_quality = int(cached)
+            return None
+        hb_encoder = self.select_encoder()
+        if tq.quality_range(hb_encoder) is None:
+            return None
+        info = self.source_video_info()
+        if info.get('hdr'):
+            return None   # VMAF isn't meaningful for PQ/HLG
+        source = self.queue_item['file_path']
+        try:
+            from app.scanner import scanner as _scanner
+            specs = _scanner._probe_with_ffprobe(source) or {}
+        except Exception:
+            specs = {}
+        duration = float(specs.get('duration') or 0)
+        width, height = int(specs.get('width') or 0), int(specs.get('height') or 0)
+
+        def register(proc):
+            self.pipeline_process = proc
+
+        def encode_sample(ref, q, out):
+            cmd = self.build_command(input_override=str(ref), output_override=str(out),
+                                     quality_override=q, video_only=True)
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    stdin=subprocess.DEVNULL)
+            register(proc)
+            try:
+                return proc.wait() == 0
+            finally:
+                register(None)
+
+        db.update_queue_item(self.queue_item_id, phase='analyze', phase_progress=0.0,
+                             phase_eta_seconds=0)
+        result = tq.find_quality(
+            source=source, duration=duration, width=width, height=height,
+            hb_encoder=hb_encoder, start_quality=int(self.profile['quality']),
+            target=target, encode_sample=encode_sample, register=register,
+            progress=lambda pct: db.update_queue_item(self.queue_item_id,
+                                                      phase_progress=round(pct, 1)))
+        if self._manually_stopped or not result:
+            return None
+        self._tq_quality = int(result['quality'])
+        db.update_queue_item(self.queue_item_id, tq_quality=self._tq_quality,
+                             tq_vmaf=result['vmaf'])
+        optimizarr_logger.app_logger.info(
+            "Target VMAF %.1f: using quality %d (VMAF %.2f%s) for %s", target,
+            self._tq_quality, result['vmaf'] or 0,
+            '' if result['met_target'] else ', best reachable', Path(source).name)
+
+        ratio = result.get('size_ratio')
+        min_pct = min_savings_percent()
+        if ratio is not None and ratio > 1 - min_pct / 100.0:
+            msg = (f"Skipped — at VMAF {target:g} the video would be {ratio * 100:.0f}% "
+                   f"of its current size (needs ≥{min_pct:g}% savings)")
+            db.update_queue_item(self.queue_item_id, status='kept_original', progress=0.0,
+                                 phase=None, phase_progress=0.0, error_message=msg)
+            optimizarr_logger.app_logger.info("%s: %s", Path(source).name, msg)
+            return 'skip'
+        return None
+
     def _low_bitrate_skip_reason(self) -> Optional[str]:
         """Reason to skip a plain encode of a low-bitrate source, else None."""
         import json as _json
@@ -796,6 +882,11 @@ class EncodingJob:
                     "Upscale failed for %s — encoding original file instead",
                     original_input,
                 )
+
+        # ── Target quality: choose --quality from a VMAF goal (plain encodes) ─
+        if not self._preprocessed and float(self.profile.get('target_vmaf') or 0) > 0:
+            if self._run_target_quality() == 'skip':
+                return False
 
         # ── Build HandBrake command (encode_input may be stereo/upscaled) ────
         cmd = self.build_command(input_override=encode_input,

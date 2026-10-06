@@ -117,6 +117,9 @@ class ProfileCreate(BaseModel):
     # Film-grain mode: 0 = off. SVT-AV1 synthesises grain at this strength
     # (1-50) instead of spending bits on it; x265 switches to --tune grain.
     film_grain: int = Field(default=0, ge=0, le=50)
+    # Target quality: 0 = off (fixed `quality`); otherwise the VMAF score to
+    # aim for — the quality value is searched per file (see target_quality).
+    target_vmaf: float = Field(default=0, ge=0, le=99.5)
     # AI upscale settings
     upscale_enabled: bool = False
     upscale_trigger_below: int = 720
@@ -153,6 +156,7 @@ class ProfileResponse(BaseModel):
     custom_args: Optional[str]
     is_default: bool
     film_grain: Optional[int] = 0
+    target_vmaf: Optional[float] = 0
     created_at: Optional[str]
     # AI upscale settings
     upscale_enabled: Optional[bool] = False

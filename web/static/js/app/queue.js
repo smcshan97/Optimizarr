@@ -208,6 +208,7 @@ async function bulkClearCompleted() {
 // so a multi-hour AI phase is never mistaken for a stalled HandBrake encode,
 // which is exactly what one blue bar for everything used to look like.
 const PHASE_CONFIG = {
+    'analyze':  { label: 'Finding quality (VMAF)', emoji: '🔬', color: 'text-amber-300', barColor: 'bg-amber-500' },
     'stereo':   { label: '3D conversion', emoji: '🎥', color: 'text-purple-300', barColor: 'bg-purple-500' },
     'upscale':  { label: 'AI upscale',    emoji: '🔼', color: 'text-cyan-300',   barColor: 'bg-cyan-500'   },
     'encode':   { label: 'Encoding',      emoji: '⚙️', color: 'text-blue-400',   barColor: 'bg-blue-500'   },

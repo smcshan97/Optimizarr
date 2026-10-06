@@ -43,6 +43,7 @@ async function loadProfiles() {
                         ${p.chapter_markers ? '<span class="px-2 py-0.5 bg-gray-600 text-gray-300 text-xs rounded">Chapters</span>' : ''}
                         ${p.hw_accel_enabled ? '<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">GPU</span>' : ''}
                         ${p.film_grain ? `<span class="px-2 py-0.5 bg-yellow-900 text-yellow-300 text-xs rounded">Grain ${p.film_grain}</span>` : ''}
+                        ${p.target_vmaf ? `<span class="px-2 py-0.5 bg-amber-900 text-amber-300 text-xs rounded" title="Quality searched per file to reach this VMAF score">🎯 VMAF ${p.target_vmaf}</span>` : ''}
                         ${/_10bit$/.test(p.encoder || '') ? '<span class="px-2 py-0.5 bg-gray-600 text-gray-300 text-xs rounded">10-bit</span>' : ''}
                         ${p.upscale_enabled ? `<span class="px-2 py-0.5 bg-blue-900 text-blue-300 text-xs rounded" title="AI Upscale: ${p.upscale_key || 'realesrgan'} ×${p.upscale_factor || 2}, trigger below ${p.upscale_trigger_below || 720}px">🤖 Upscale ×${p.upscale_factor || 2}</span>` : ''}
                         ${p.stereo_enabled ? `<span class="px-2 py-0.5 bg-purple-900 text-purple-300 text-xs rounded" title="3D: ${p.stereo_mode || '2d_to_3d'}, ${p.stereo_format || 'half_sbs'}, divergence ${p.stereo_divergence || 2.0}">🎥 ${p.stereo_mode === '3d_to_2d' ? '3D→2D' : '2D→3D'}</span>` : ''}
@@ -138,6 +139,7 @@ async function editProfile(id) {
     }
     
     document.getElementById('profileQuality').value = profile.quality;
+    _setTargetVmaf(profile.target_vmaf || 0);
     document.getElementById('profilePreset').value = profile.preset || '';
     document.getElementById('profileAudioCodec').value = profile.audio_codec;
     document.getElementById('profileAudioHandling').value = profile.audio_handling || 'preserve_all';
@@ -183,6 +185,7 @@ document.getElementById('profileForm').addEventListener('submit', async (e) => {
         resolution: document.getElementById('profileResolution').value || null,
         framerate: parseInt(framerate) || null,
         quality: parseInt(document.getElementById('profileQuality').value),
+        target_vmaf: parseFloat(document.getElementById('profileTargetVmaf')?.value || '0') || 0,
         preset: document.getElementById('profilePreset').value || null,
         audio_codec: document.getElementById('profileAudioCodec').value,
         container: document.getElementById('profileContainer').value,
@@ -237,3 +240,12 @@ async function deleteProfile(id, name) {
     }
 }
 
+
+
+function _setTargetVmaf(value) {
+    const sel = document.getElementById('profileTargetVmaf');
+    if (!sel) return;
+    const v = String(Number(value) || 0);
+    if (![...sel.options].some(o => o.value === v)) sel.add(new Option(`${v} (custom)`, v));
+    sel.value = v;
+}

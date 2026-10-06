@@ -113,6 +113,7 @@ def update_profile(
         stereo_convergence=profile.stereo_convergence,
         stereo_depth_model=profile.stereo_depth_model,
         film_grain=profile.film_grain,
+        target_vmaf=profile.target_vmaf,
     )
     
     if success:

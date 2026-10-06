@@ -839,12 +839,23 @@
                         </div>
                     </div>
                     
+                    <div>
+                        <label class="block text-sm font-medium mb-2">Target Quality (VMAF)</label>
+                        <select id="profileTargetVmaf" class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                            <option value="0">Off — use the fixed Quality value below</option>
+                            <option value="93">93 — smaller files, slight softening on close inspection</option>
+                            <option value="95">95 — recommended: visually transparent for most viewing</option>
+                            <option value="97">97 — near-lossless, larger files</option>
+                        </select>
+                        <p class="text-xs text-gray-400 mt-1">Per file, encodes three 10-second samples, scores them against the original with VMAF and picks the most compression that still reaches this score. Adds a few minutes of analysis per file; files that wouldn't shrink are skipped. Not used for HDR sources or upscale/3D jobs.</p>
+                    </div>
+
                     <div class="grid grid-cols-2 gap-4">
                         <div>
                             <label class="block text-sm font-medium mb-2">Quality (CRF) *</label>
                             <input type="number" id="profileQuality" required min="18" max="51" value="28"
                                 class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
-                            <p class="text-xs text-gray-400 mt-1">Lower = better quality (18-28 recommended)</p>
+                            <p class="text-xs text-gray-400 mt-1">Lower = better quality (18-28 recommended). With a VMAF target this is only the search's starting point.</p>
                         </div>
                         
                         <div>

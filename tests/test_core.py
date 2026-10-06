@@ -949,6 +949,66 @@ class TestAtomicQueueDedupe:
         assert len(fresh_db.get_queue_items()) == 1
 
 
+class TestTargetQuality:
+    @staticmethod
+    def _curve(q):
+        # Monotonic like real data: VMAF falls, size falls as q rises
+        return 100 - (q - 10) * 0.6, 2.0 - q * 0.04
+
+    def test_search_finds_largest_passing_quality(self):
+        from app.target_quality import search
+        calls = []
+
+        def ev(q):
+            calls.append(q)
+            return self._curve(q)
+        r = search(ev, 15, 55, 30, target=90)
+        # 100-(q-10)*0.6 >= 90  ->  q <= 26.67  ->  26
+        assert r['quality'] == 26 and r['met_target']
+        assert len(calls) <= 6
+
+    def test_search_unreachable_target_stops_when_already_bigger(self):
+        from app.target_quality import search
+        calls = []
+
+        def ev(q):
+            calls.append(q)
+            return 50.0, 1.3        # never reaches target, already bigger
+        r = search(ev, 15, 55, 30, target=95)
+        assert not r['met_target'] and calls == [30]
+
+    def test_search_all_pass_goes_to_max(self):
+        from app.target_quality import search
+        r = search(lambda q: (99.0, 0.3), 15, 55, 30, target=90)
+        assert r['quality'] == 55
+
+    def test_ranges_and_samples(self):
+        from app.target_quality import quality_range, sample_starts
+        assert quality_range('svt_av1_10bit') == (15, 55)
+        assert quality_range('nvenc_h265_10bit') == (15, 40)
+        assert quality_range('vt_h265') is None          # inverted scale: unsupported
+        s = sample_starts(100, 3, 10)
+        assert s == [22.5, 45.0, 67.5]
+
+    def test_sample_command_is_video_only_uncropped(self, fresh_db, monkeypatch):
+        import app.encoder as enc
+        monkeypatch.setattr(enc, 'db', fresh_db)
+        monkeypatch.setattr(enc, 'detect_hardware_acceleration', lambda: {'encoder_names': []})
+        qid = fresh_db.add_to_queue(file_path='/x/a.mkv', root_id=1, profile_id=1,
+                                    current_specs={'bit_depth': 8}, target_specs={})
+        job = enc.EncodingJob(qid, {'name': 'p', 'codec': 'av1', 'encoder': 'svt_av1_10bit',
+                                    'quality': 30, 'container': 'mkv', 'chapter_markers': True})
+        cmd = job.build_command(input_override='/t/s.mkv', output_override='/t/o.mkv',
+                                quality_override=24, video_only=True)
+        assert cmd[cmd.index('-o') + 1] == '/t/o.mkv'
+        assert cmd[cmd.index('--quality') + 1] == '24'
+        assert cmd[cmd.index('--audio') + 1] == 'none'
+        assert cmd[cmd.index('--crop-mode') + 1] == 'none'
+        assert '--markers' not in cmd
+        job._tq_quality = 27                       # chosen value used for the real encode
+        assert job.build_command()[job.build_command().index('--quality') + 1] == '27'
+
+
 class TestLowBitrateSkip:
     SPECS = {'codec': 'h264', 'width': 1920, 'height': 1080, 'framerate': 24.0}
 

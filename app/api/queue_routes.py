@@ -219,6 +219,10 @@ def update_queue_item(
     """Update a queue item (e.g., change priority or status)."""
     try:
         update_data = update.model_dump(exclude_none=True)
+        if 'profile_id' in update_data:
+            # A different profile means a different encoder/target — the
+            # cached target-quality result no longer applies.
+            update_data.update(tq_quality=None, tq_vmaf=None)
         db.update_queue_item(item_id, **update_data)
         
         return MessageResponse(message=f"Queue item {item_id} updated")
