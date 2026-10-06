@@ -1669,6 +1669,22 @@
         </main><!-- /.main-content -->
     </div><!-- /.app-layout -->
 
-    <script src="/static/js/app.js"></script>
+    <!-- Load order matters: these share one global scope, in this order -->
+    <script src="/static/js/app/core.js"></script>
+    <script src="/static/js/app/queue.js"></script>
+    <script src="/static/js/app/notifications.js"></script>
+    <script src="/static/js/app/profiles.js"></script>
+    <script src="/static/js/app/scan-roots.js"></script>
+    <script src="/static/js/app/profile-ui.js"></script>
+    <script src="/static/js/app/folder-account.js"></script>
+    <script src="/static/js/app/queue-tools.js"></script>
+    <script src="/static/js/app/duplicates.js"></script>
+    <script src="/static/js/app/library-logs.js"></script>
+    <script src="/static/js/app/stats.js"></script>
+    <script src="/static/js/app/presets.js"></script>
+    <script src="/static/js/app/upscalers.js"></script>
+    <script src="/static/js/app/schedule.js"></script>
+    <script src="/static/js/app/connections.js"></script>
+    <script src="/static/js/app/upscale-stereo.js"></script>
 </body>
 </html>
