@@ -365,7 +365,7 @@ function displayQueueItems(items) {
         } else if (item.status === 'kept_original') {
             progressBar = `
                 <div class="flex items-center gap-2">
-                    <span class="text-teal-300 text-xs truncate" title="${_esc(item.error_message || '')}">Kept original — encode wasn't smaller</span>
+                    <span class="text-teal-300 text-xs truncate" title="${_esc(item.error_message || '')}">${(item.error_message || '').startsWith('Skipped') ? 'Skipped — already efficient' : "Kept original — encode wasn't smaller"}</span>
                 </div>`;
         } else if (item.status === 'cancelled') {
             progressBar = `
@@ -807,6 +807,8 @@ async function loadSettings() {
         document.getElementById('maxRetries').value = parseInt(encSettings.max_retries || '3');
         const ms = document.getElementById('minSavingsPercent');
         if (ms) ms.value = parseFloat(encSettings.min_savings_percent ?? '5');
+        const mb = document.getElementById('minSourceBpp');
+        if (mb) mb.value = parseFloat(encSettings.min_source_bpp ?? '0.03');
     }
 }
 
@@ -835,6 +837,7 @@ async function saveResourceSettings() {
         body: JSON.stringify({
             max_retries: document.getElementById('maxRetries').value,
             min_savings_percent: document.getElementById('minSavingsPercent')?.value ?? '5',
+            min_source_bpp: document.getElementById('minSourceBpp')?.value ?? '0.03',
         })
     });
 

@@ -464,6 +464,18 @@
                         <span style="font-size:13px;color:var(--text-muted)">% — if an encode doesn't shrink the file by at least this much, the new file is discarded and the original kept (upscale/3D jobs exempt)</span>
                     </div>
                 </div>
+
+                <!-- Skip already-efficient sources -->
+                <div style="margin-top:20px">
+                    <label style="font-size:14px;font-weight:500;color:var(--text-heading);display:block;margin-bottom:6px">
+                        Skip Sources Below (bits per pixel)
+                    </label>
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <input type="number" id="minSourceBpp" min="0" max="1" step="0.005" value="0.03"
+                            class="w-24 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center" style="font-size:14px">
+                        <span style="font-size:13px;color:var(--text-muted)">Files already this efficient are skipped before encoding (0.03 ≈ 1.5 Mbps for 1080p24 H.264; HEVC/VP9 need 1.5× this). In your history, 56–73% of files below 0.03 got <em>bigger</em>. 0 = off.</span>
+                    </div>
+                </div>
                 
                 <!-- Preset Buttons -->
                 <div class="mt-8 pt-6 border-t border-gray-700">

@@ -949,6 +949,49 @@ class TestAtomicQueueDedupe:
         assert len(fresh_db.get_queue_items()) == 1
 
 
+class TestLowBitrateSkip:
+    SPECS = {'codec': 'h264', 'width': 1920, 'height': 1080, 'framerate': 24.0}
+
+    def test_bpp_and_codec_scaling(self):
+        from app.scanner import source_bpp, low_bitrate_reason
+        low = dict(self.SPECS, bit_rate=1_200_000)       # ~0.024 bpp
+        high = dict(self.SPECS, bit_rate=8_000_000)      # ~0.16 bpp
+        assert round(source_bpp(low), 3) == 0.024
+        assert low_bitrate_reason(low, 0.03).startswith('Skipped')
+        assert low_bitrate_reason(high, 0.03) is None
+        assert low_bitrate_reason(low, 0) is None                       # disabled
+        mid = dict(self.SPECS, bit_rate=2_000_000)                       # ~0.040 bpp
+        assert low_bitrate_reason(mid, 0.03) is None                    # h264: fine
+        assert low_bitrate_reason(dict(mid, codec='h265'), 0.03)        # hevc needs 0.045
+        assert low_bitrate_reason({'codec': 'h264'}, 0.03) is None      # unknown -> encode
+
+    def _job(self, fresh_db, monkeypatch, specs, upscale=None):
+        import json
+        import app.encoder as enc
+        monkeypatch.setattr(enc, 'db', fresh_db)
+        qid = fresh_db.add_to_queue(file_path='/x/a.mkv', root_id=1, profile_id=1,
+                                    current_specs=specs, target_specs={},
+                                    upscale_plan=json.dumps(upscale) if upscale else None)
+        return enc.EncodingJob(qid, {'name': 'p', 'codec': 'av1', 'encoder': 'svt_av1_10bit',
+                                     'quality': 30, 'container': 'mkv'}), qid
+
+    def test_encode_start_skips_low_bitrate(self, fresh_db, monkeypatch):
+        import app.encoder as enc
+        monkeypatch.setattr(enc, 'preflight_source_check', lambda p: None)
+        job, qid = self._job(fresh_db, monkeypatch, dict(self.SPECS, bit_rate=900_000))
+        assert job.start() is False
+        item = fresh_db.get_queue_item(qid)
+        assert item['status'] == 'kept_original' and 'already efficient' in item['error_message']
+
+    def test_upscale_jobs_exempt_and_setting_respected(self, fresh_db, monkeypatch):
+        specs = dict(self.SPECS, bit_rate=900_000)
+        job, _ = self._job(fresh_db, monkeypatch, specs, upscale={'enabled': True})
+        assert job._low_bitrate_skip_reason() is None
+        fresh_db.set_setting('min_source_bpp', '0')
+        job, _ = self._job(fresh_db, monkeypatch, specs)
+        assert job._low_bitrate_skip_reason() is None
+
+
 class TestArrPaths:
     CONN = {'id': 1, 'name': 'Sonarr', 'app_type': 'sonarr', 'enabled': 1,
             'path_mappings': '[{"remote": "/tv", "local": "F:\\\\tv shows"},'

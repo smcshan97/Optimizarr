@@ -16,6 +16,7 @@ import platform
 from app.database import db
 from app.resources import resource_monitor, resource_throttler
 from app.timeutil import utc_now
+from app.scanner import DEFAULT_MIN_SOURCE_BPP, source_bpp, low_bitrate_reason
 from app.logger import optimizarr_logger
 from app.handbrake import (  # noqa: F401  (re-exported)
     HB_PROGRESS_RE, HBJsonStream, parse_hb_json_progress, parse_hb_progress,
@@ -477,6 +478,38 @@ class EncodingJob:
                         current_memory_mb=process_resources['memory_mb']
                     )
     
+    def _low_bitrate_skip_reason(self) -> Optional[str]:
+        """Reason to skip a plain encode of a low-bitrate source, else None."""
+        import json as _json
+        for key in ('upscale_plan', 'stereo_plan'):
+            raw = self.queue_item.get(key)
+            try:
+                plan = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+            except ValueError:
+                plan = {}
+            if plan.get('enabled'):
+                return None
+        try:
+            min_bpp = float(db.get_setting('min_source_bpp', str(DEFAULT_MIN_SOURCE_BPP)))
+        except (TypeError, ValueError):
+            min_bpp = DEFAULT_MIN_SOURCE_BPP
+        if min_bpp <= 0:
+            return None
+        specs = self.queue_item.get('current_specs') or {}
+        if isinstance(specs, str):
+            try:
+                specs = _json.loads(specs)
+            except ValueError:
+                specs = {}
+        if source_bpp(specs) is None:
+            # Webhook/sync items only carry Sonarr/Radarr's summary — probe
+            try:
+                from app.scanner import scanner as _scanner
+                specs = _scanner._probe_with_ffprobe(self.queue_item['file_path']) or {}
+            except Exception:
+                return None
+        return low_bitrate_reason(specs, min_bpp)
+
     def start(self, progress_callback: Optional[Callable[[float], None]] = None):
         """
         Start the encoding job.
@@ -527,6 +560,20 @@ class EncodingJob:
                 progress=0.0,
                 retry_after=None,
             )
+            return False
+
+        # ── Pre-flight: is the source worth re-encoding at all? ────────────
+        # Low bits-per-pixel sources mostly come out the same size or bigger
+        # (see scanner.DEFAULT_MIN_SOURCE_BPP); skip them before spending an
+        # encode. Jobs that upscale/convert to 3D are exempt.
+        reason = self._low_bitrate_skip_reason()
+        if reason:
+            optimizarr_logger.app_logger.info("%s: %s", Path(source_path).name, reason)
+            devlog('enc_skip_bpp', id=self.queue_item_id, f=Path(source_path).name)
+            db.update_queue_item(
+                self.queue_item_id, status='kept_original', progress=0.0,
+                phase=None, phase_progress=0.0, phase_eta_seconds=0,
+                error_message=reason, retry_after=None)
             return False
 
         # ── Pre-flight: destination name must be free ───────────────────────

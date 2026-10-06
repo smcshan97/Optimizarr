@@ -150,6 +150,7 @@ def get_encoding_settings(current_user: dict = Depends(get_current_user)):
     return {
         'max_retries': db.get_setting('max_retries', '3'),
         'min_savings_percent': db.get_setting('min_savings_percent', '5'),
+        'min_source_bpp': db.get_setting('min_source_bpp', '0.03'),
     }
 
 
@@ -171,6 +172,12 @@ def update_encoding_settings(
         except (ValueError, TypeError):
             pct = 5.0
         db.set_setting('min_savings_percent', f"{pct:g}")
+    if 'min_source_bpp' in settings:
+        try:
+            bpp = max(0.0, min(1.0, float(settings['min_source_bpp'])))
+        except (ValueError, TypeError):
+            bpp = 0.03
+        db.set_setting('min_source_bpp', f"{bpp:g}")
     return MessageResponse(message="Encoding settings updated")
 
 
