@@ -866,6 +866,7 @@ class TestWebhookAuth:
         cr = self._setup(fresh_db, monkeypatch)
         fresh_db.create_scan_root(path="/m", profile_id=1)
         for path in ('/etc/passwd.mkv', '/m2/a.mkv', '/m/../other/a.mkv'):
+            assert not fresh_db.is_queued(path)
             res = cr.process_webhook_payload('radarr', self._payload(path))
             assert not res['ok'], path
             assert 'scan root' in res['message']
@@ -878,6 +879,29 @@ class TestWebhookAuth:
             cr.receive_webhook('evil', {}, key=cr.get_webhook_secret(),
                                x_optimizarr_key=None)
         assert exc.value.status_code == 400
+
+
+class TestAtomicQueueDedupe:
+    def test_skip_if_queued(self, fresh_db):
+        first = fresh_db.add_to_queue(skip_if_queued=True, file_path='/a.mkv',
+                                      root_id=1, profile_id=1)
+        second = fresh_db.add_to_queue(skip_if_queued=True, file_path='/a.mkv',
+                                       root_id=1, profile_id=1)
+        assert first is not None and second is None
+        assert fresh_db.is_queued('/a.mkv') and not fresh_db.is_queued('/b.mkv')
+        assert len(fresh_db.get_queue_items()) == 1
+
+    def test_concurrent_inserts_queue_once(self, fresh_db):
+        import threading
+        results = []
+        def add():
+            results.append(fresh_db.add_to_queue(
+                skip_if_queued=True, file_path='/race.mkv', root_id=1, profile_id=1))
+        threads = [threading.Thread(target=add) for _ in range(8)]
+        for t in threads: t.start()
+        for t in threads: t.join()
+        assert sum(r is not None for r in results) == 1
+        assert len(fresh_db.get_queue_items()) == 1
 
 
 class TestWebhookKeyUrls:

@@ -553,7 +553,7 @@ def process_webhook_payload(app_type: str, payload: dict) -> dict:
         return {"ok": False, "message": "Profile not found"}
 
     # Skip if already queued
-    if file_path in db.get_queue_file_paths():
+    if db.is_queued(file_path):
         return {"ok": True, "message": "File already in queue"}
 
     from app.external_connections import parse_height
@@ -607,7 +607,8 @@ def process_webhook_payload(app_type: str, payload: dict) -> dict:
             "depth_model": stereo_source.get("stereo_depth_model", "Any_V2_S"),
         })
 
-    db.add_to_queue(
+    queued_id = db.add_to_queue(
+        skip_if_queued=True,
         file_path=file_path,
         root_id=root_id,
         profile_id=profile_id,
@@ -625,6 +626,8 @@ def process_webhook_payload(app_type: str, payload: dict) -> dict:
         upscale_plan=upscale_plan,
         stereo_plan=stereo_plan,
     )
+    if queued_id is None:  # lost a race with another event for this file
+        return {"ok": True, "message": "File already in queue"}
 
     # Wake the encoder if it's not already running and the schedule permits.
     # (Was importing a non-existent `encoding_scheduler` → ImportError swallowed

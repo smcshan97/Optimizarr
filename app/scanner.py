@@ -378,6 +378,7 @@ class MediaScanner:
             else:
                 status = 'permission_error'
             item_id = db.add_to_queue(
+                skip_if_queued=True,
                 file_path=file_path, root_id=root_id, profile_id=scan_root['profile_id'],
                 status=status,
                 current_specs=current_specs, target_specs=target_specs,
@@ -386,6 +387,8 @@ class MediaScanner:
                 upscale_plan=upscale_plan,
                 stereo_plan=stereo_plan,
             )
+            if item_id is None:  # queued meanwhile by the watcher/a webhook
+                continue
             if broken:
                 db.update_queue_item(item_id, error_message=(
                     'No decodable video stream found — file is corrupt, '

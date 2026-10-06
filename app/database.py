@@ -855,14 +855,24 @@ class Database:
             return cursor.rowcount > 0
     
     # Queue CRUD
-    def add_to_queue(self, **kwargs) -> int:
+    def add_to_queue(self, skip_if_queued: bool = False, **kwargs) -> Optional[int]:
         """Add a file to the encoding queue.
 
         Priority is a rank: 1 = first to encode. When not given, the item is
         appended at the end of the queue (MAX(priority) + 1).
+
+        ``skip_if_queued``: check-and-insert atomically (under the write
+        lock) and return None if the path is already queued. A separate
+        "is it queued?" read followed by an insert let two near-simultaneous
+        events (webhook retry + folder watcher) queue the same file twice.
         """
         with self.get_connection() as conn:
             cursor = conn.cursor()
+            if skip_if_queued:
+                cursor.execute("SELECT 1 FROM queue WHERE file_path = ? LIMIT 1",
+                               (kwargs.get('file_path'),))
+                if cursor.fetchone():
+                    return None
             priority = kwargs.get('priority')
             if priority is None:
                 cursor.execute("SELECT COALESCE(MAX(priority), 0) + 1 FROM queue")
@@ -1052,6 +1062,13 @@ class Database:
                 'total_pages': total_pages,
                 'counts': counts,
             }
+
+    def is_queued(self, file_path: str) -> bool:
+        """True if ``file_path`` has a queue row (any status). Indexed."""
+        with self.get_read_connection() as conn:
+            row = conn.execute("SELECT 1 FROM queue WHERE file_path = ? LIMIT 1",
+                               (file_path,)).fetchone()
+            return row is not None
 
     def get_queue_file_paths(self) -> set:
         """Every file_path currently in the queue (any status).

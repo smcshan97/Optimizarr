@@ -240,7 +240,8 @@ class FolderWatcher:
                     stereo_plan=stereo_plan,
                 )
 
-                db.add_to_queue(
+                queued_id = db.add_to_queue(
+                    skip_if_queued=True,
                     file_path=file_path,
                     root_id=watch.get('scan_root_id'),
                     profile_id=watch['profile_id'],
@@ -253,7 +254,8 @@ class FolderWatcher:
                     upscale_plan=upscale_plan,
                     stereo_plan=stereo_plan,
                 )
-                queued_count += 1
+                if queued_id is not None:
+                    queued_count += 1
 
             except Exception as e:
                 optimizarr_logger.app_logger.error("Failed to queue %s: %s", file_path, str(e))
