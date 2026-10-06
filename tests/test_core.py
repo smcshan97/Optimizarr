@@ -2211,14 +2211,14 @@ class TestEncoderSelection:
         assert parse_hb_encoder_list('no list here') == []
 
     def test_qsv_option_text_is_not_intel_hardware(self, monkeypatch):
-        import app.encoder as enc
+        import app.handbrake as hb
         class R:
             stdout = _HB_HELP_SAMPLE
             stderr = ''
-        monkeypatch.setattr(enc, '_hw_accel_cache', None)
-        monkeypatch.setattr(enc.subprocess, 'run', lambda *a, **k: R())
-        hw = enc.detect_hardware_acceleration()
-        monkeypatch.setattr(enc, '_hw_accel_cache', None)
+        monkeypatch.setattr(hb, '_hw_accel_cache', None)
+        monkeypatch.setattr(hb.subprocess, 'run', lambda *a, **k: R())
+        hw = hb.detect_hardware_acceleration()
+        monkeypatch.setattr(hb, '_hw_accel_cache', None)
         assert hw['nvidia'] and not hw['intel']
         assert hw['details']['nvidia'] == {'h264': True, 'h265': True, 'av1': False}
 
