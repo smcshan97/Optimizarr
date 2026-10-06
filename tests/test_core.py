@@ -2745,6 +2745,68 @@ class TestVideo2X:
         assert cmd[cmd.index('--height') + 1] == '720'
 
 
+class TestRtxVsr:
+    def test_not_installed_means_no_binary(self, monkeypatch, tmp_path):
+        from app import rtx_vsr
+        import app.upscaler as up
+        monkeypatch.setattr(rtx_vsr, 'runtime_dir', lambda: tmp_path / 'vsr')
+        assert rtx_vsr.installed_info() is None
+        assert up._find_binary('rtxvsr') is None
+
+    def test_installed_marker_needs_python(self, monkeypatch, tmp_path):
+        import json
+        from app import rtx_vsr
+        monkeypatch.setattr(rtx_vsr, 'runtime_dir', lambda: tmp_path)
+        (tmp_path / 'installed.json').write_text(json.dumps({'gpu': 'x'}))
+        assert rtx_vsr.installed_info() is None          # marker but no venv
+        py = rtx_vsr.runtime_python()
+        py.parent.mkdir(parents=True)
+        py.write_bytes(b'')
+        assert rtx_vsr.installed_info() == {'gpu': 'x'}
+
+    def test_registered_as_upscaler_with_quality_models(self):
+        from app.upscaler import UPSCALERS
+        from app.rtx_vsr import QUALITY_LEVELS
+        assert UPSCALERS['rtxvsr']['models'] == QUALITY_LEVELS
+        # A runtime, not a GitHub binary: the update checker must skip it
+        assert UPSCALERS['rtxvsr']['runtime'] == 'rtxvsr'
+        assert 'github_owner' not in UPSCALERS['rtxvsr']
+
+    def test_pipeline_routes_to_vsr(self, monkeypatch, tmp_path):
+        import app.upscaler as up
+        import app.rtx_vsr as vsr
+        src = tmp_path / 'in.mkv'
+        src.write_bytes(b'x')
+        monkeypatch.setattr(up, '_find_binary', lambda key: 'python.exe')
+        monkeypatch.setattr(up, '_get_video_info', lambda p: {
+            'width': 720, 'height': 480, 'fps': 23.976, 'duration': 10, 'vfr': False,
+            'hdr': False, 'color_space': 'smpte170m'})
+        monkeypatch.setattr(up, '_check_disk_space', lambda *a: True)
+        seen = {}
+
+        def fake(inp, out, **kw):
+            seen.update(kw)
+            open(out, 'wb').write(b'v')
+            return True
+        monkeypatch.setattr(vsr, 'run_vsr', fake)
+        out = up.run_upscale_pipeline(str(src), 'rtxvsr', 'HIGH', 2)
+        try:
+            assert out.endswith('_upscaled_vsr.mkv')
+            assert (seen['out_w'], seen['out_h'], seen['quality']) == (1440, 960, 'HIGH')
+            assert 'color_primaries=smpte170m' in seen['setparams']
+        finally:
+            up.cleanup_upscale_workdir(out)
+
+    def test_pipeline_rejects_factor_over_4(self, monkeypatch, tmp_path):
+        import app.upscaler as up
+        src = tmp_path / 'in.mkv'
+        src.write_bytes(b'x')
+        monkeypatch.setattr(up, '_find_binary', lambda key: 'python.exe')
+        monkeypatch.setattr(up, '_get_video_info', lambda p: {
+            'width': 320, 'height': 240, 'fps': 24.0, 'duration': 1, 'hdr': False})
+        assert up.run_upscale_pipeline(str(src), 'rtxvsr', 'HIGH', 8) is None
+
+
 class TestUpscaleModelScale:
     def test_x4_only_models_run_at_4(self):
         from app.upscaler import model_scale_for

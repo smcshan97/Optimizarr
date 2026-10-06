@@ -91,6 +91,24 @@ UPSCALERS = {
         "best_for": "Anime, Illustrations",
         "url": "https://github.com/nihui/waifu2x-ncnn-vulkan/releases",
     },
+    "rtxvsr": {
+        "name": "NVIDIA RTX Video Super Resolution",
+        "description": ("NVIDIA's RTX VSR model via the official VFX SDK — trained on "
+                        "compressed video, so it cleans up blocking while it upscales. "
+                        "Runs on Tensor Cores: dozens of times faster than Real-ESRGAN. "
+                        "Needs an RTX 20-series or newer GPU (~550 MB runtime)."),
+        "icon": "🟩",
+        "binary_linux": "python",
+        "binary_win": "python.exe",
+        # "Models" are VSR quality levels (HIGHBITRATE_* for clean sources)
+        "models": ["ULTRA", "HIGH", "MEDIUM", "LOW", "HIGHBITRATE_ULTRA", "HIGHBITRATE_HIGH"],
+        "default_model": "ULTRA",
+        "scale_options": [2, 3, 4],
+        "default_scale": 2,
+        "best_for": "TV, DVD and web rips — fast, artifact-aware",
+        "url": "https://docs.nvidia.com/maxine/vfx-python/latest/",
+        "runtime": "rtxvsr",   # installed as a Python runtime, not a GitHub binary
+    },
 }
 
 # Processing engines — installed/updated like upscalers but not selectable as
@@ -189,6 +207,9 @@ def _find_managed(key: str, binary: str) -> Optional[str]:
 
 def _find_binary(key: str) -> Optional[str]:
     """Return path to installed binary or None."""
+    if _spec(key).get("runtime") == "rtxvsr":
+        from app import rtx_vsr
+        return str(rtx_vsr.runtime_python()) if rtx_vsr.installed_info() else None
     binary = _binary_name(key)
     if _spec(key).get("prefer_managed"):
         managed = _find_managed(key, binary)
@@ -345,6 +366,17 @@ def download_upscaler(key: str) -> Dict:
 def _download_worker(key: str):
     upscaler = _spec(key)
     state = _download_state[key]
+    if upscaler.get("runtime") == "rtxvsr":
+        state["status"] = "downloading"
+        try:
+            from app import rtx_vsr
+            rtx_vsr.install(state)
+            state.update(status="installed", progress=100,
+                         message=f"✓ {upscaler['name']} ready ({state.get('version')})")
+        except Exception as e:
+            state.update(status="error", error=str(e), message=f"Install failed: {e}")
+            optimizarr_logger.app_logger.error("RTX VSR install failed: %s", e)
+        return
     is_win = platform.system() == "Windows"
     install_dir = _upscaler_install_dir()
 
@@ -496,7 +528,12 @@ def detect_upscalers() -> Dict:
     for key, upscaler in UPSCALERS.items():
         found_path = _find_binary(key)
         if found_path:
-            version = _get_binary_version(found_path)
+            if upscaler.get("runtime") == "rtxvsr":
+                from app import rtx_vsr
+                info = rtx_vsr.installed_info() or {}
+                version = f"nvidia-vfx {info.get('nvidia-vfx', '?')} on {info.get('gpu', '?')}"
+            else:
+                version = _get_binary_version(found_path)
             results["available"].append(key)
             results["details"][key] = {
                 "name": upscaler["name"],
@@ -537,6 +574,8 @@ def check_for_updates() -> Dict:
     """
     results = {}
     for key, upscaler in {**UPSCALERS, **ENGINES}.items():
+        if upscaler.get("runtime"):
+            continue
         found = _find_binary(key)
         if not found:
             continue
@@ -891,7 +930,14 @@ def run_upscale_pipeline(
             engine_pref = "auto"
         if engine_pref != "frames":
             v2x_binary = _find_binary("video2x")
-    if v2x_binary:
+    use_rtxvsr = upscaler_key == "rtxvsr"
+    if use_rtxvsr:
+        from app.rtx_vsr import MAX_FACTOR
+        if factor > MAX_FACTOR:
+            optimizarr_logger.app_logger.error("RTX VSR upscales at most x%d", MAX_FACTOR)
+            return None
+        model_scale = factor  # VSR outputs any size directly
+    if v2x_binary or use_rtxvsr:
         required_bytes = int(frame_count_approx * src_w * model_scale
                              * src_h * model_scale * 0.08) + (500 * 1024 * 1024)
 
@@ -923,6 +969,25 @@ def run_upscale_pipeline(
     frames_out.mkdir(parents=True, exist_ok=True)
     output_path = work_dir / f"{input_p.stem}_upscaled.mkv"
     pipeline_succeeded = False
+
+    if use_rtxvsr:
+        from app.rtx_vsr import run_vsr
+        vsr_out = work_dir / f"{input_p.stem}_upscaled_vsr.mkv"
+        ok = run_vsr(
+            input_path, str(vsr_out), in_w=src_w, in_h=src_h, out_w=out_w, out_h=out_h,
+            fps=fps, quality=model, matrix=matrix,
+            setparams=_color_setparams(info, matrix), total_frames=frame_count_approx,
+            progress=lambda pct, eta: _progress(2 + pct * 0.97, eta),
+            register=_register,
+        )
+        if ok:
+            _progress(100)
+            return str(vsr_out)
+        try:
+            vsr_out.unlink()
+        except OSError:
+            pass
+        return None
 
     if v2x_binary:
         from app.video2x import run_video2x
@@ -975,10 +1040,14 @@ def run_upscale_pipeline(
                 "-map", "0:v:0",
                 # Constant frame rate: the frames are reassembled at a single
                 # rate, so a VFR source extracted frame-for-frame (the old
-                # -vsync 0) drifted out of sync with its audio. For CFR
-                # sources this is a no-op.
-                "-fps_mode", "cfr", "-r", fps_str,
-                "-vf", f"scale=in_color_matrix={matrix}:in_range=auto,format=rgb24",
+                # -vsync 0) drifted out of sync with its audio. The fps FILTER
+                # with nearest rounding, not "-fps_mode cfr -r": MKV stores
+                # millisecond timestamps and the muxer-side cfr inserted a
+                # duplicate frame into plain 24 fps files, shifting every
+                # later frame by one (verified: 121 frames from 120).
+                "-fps_mode", "passthrough",
+                "-vf", f"fps=fps={fps_str}:round=near,"
+                       f"scale=in_color_matrix={matrix}:in_range=auto,format=rgb24",
                 str(frames_in / "%08d.png"),
                 "-y",
             ]
