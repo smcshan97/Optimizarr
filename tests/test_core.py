@@ -259,6 +259,24 @@ class TestDatabase:
         assert 'sessions' not in names and 'film_grain' in cols
         Database(db_path=path)  # idempotent
 
+    def test_migration_moves_profiles_to_10bit_except_h264(self, tmp_path):
+        import sqlite3
+        from app.database import Database
+        path = str(tmp_path / "p.db")
+        d = Database(db_path=path)
+        for name, codec, enc in (('a', 'av1', 'svt_av1'), ('h', 'h265', 'x265'),
+                                 ('n', 'h265', 'nvenc_h265'), ('m', 'h264', 'x264'),
+                                 ('g', 'h264', 'nvenc_h264'), ('t', 'av1', 'svt_av1_10bit')):
+            d.create_profile(name=name, codec=codec, encoder=enc, quality=28, audio_codec='aac')
+        con = sqlite3.connect(path)
+        con.execute("PRAGMA user_version = 3")
+        con.commit(); con.close()
+
+        d = Database(db_path=path)
+        got = {p['name']: p['encoder'] for p in d.get_profiles()}
+        assert got == {'a': 'svt_av1_10bit', 'h': 'x265_10bit', 'n': 'nvenc_h265_10bit',
+                       'm': 'x264', 'g': 'nvenc_h264', 't': 'svt_av1_10bit'}
+
     def test_fresh_db_has_must_change_password(self, fresh_db):
         """The must_change_password column should exist on users."""
         with fresh_db.get_connection() as conn:
