@@ -112,6 +112,25 @@ ENGINES = {
         "best_for": "Faster upscaling with little temp disk",
         "url": "https://github.com/k4yt3x/video2x/releases",
     },
+    "handbrake": {
+        "name": "HandBrakeCLI",
+        "description": ("The encoder itself. Installing here keeps an Optimizarr-managed "
+                        "copy (no admin rights needed) that takes precedence over the one "
+                        "on PATH; new versions go in their own folder, so an update never "
+                        "touches a binary that's mid-encode. Used from the next encode."),
+        "icon": "🎞️",
+        "binary_linux": "HandBrakeCLI",
+        "binary_win": "HandBrakeCLI.exe",
+        "github_owner": "HandBrake",
+        "github_repo": "HandBrake",
+        "asset_pattern_win": r"^HandBrakeCLI-[\d.]+-win-x86_64\.zip$",
+        "asset_pattern_linux": None,   # HandBrake ships no Linux CLI build (Flatpak only)
+        "best_for": "Newer encoders (SVT-AV1 4.x, AMD AV1 10-bit) without waiting on a package manager",
+        "url": "https://github.com/HandBrake/HandBrake/releases",
+        "prefer_managed": True,
+        "versioned_install": True,
+        "version_args": ["--version"],
+    },
 }
 
 
@@ -149,9 +168,32 @@ def _binary_name(key: str) -> str:
     return upscaler["binary_win"] if is_win else upscaler["binary_linux"]
 
 
+def _version_key(name: str):
+    return tuple(int(x) for x in re.findall(r"\d+", name)) or (0,)
+
+
+def _find_managed(key: str, binary: str) -> Optional[str]:
+    """Binary inside Optimizarr's install dir (newest version folder first)."""
+    sub = _upscaler_install_dir() / key
+    if not sub.exists():
+        return None
+    if _spec(key).get("versioned_install"):
+        for vdir in sorted((d for d in sub.iterdir() if d.is_dir()),
+                           key=lambda d: _version_key(d.name), reverse=True):
+            hit = next(vdir.rglob(binary), None)
+            if hit:
+                return str(hit)
+        return None
+    return next((str(p) for p in sub.rglob(binary)), None)
+
+
 def _find_binary(key: str) -> Optional[str]:
     """Return path to installed binary or None."""
     binary = _binary_name(key)
+    if _spec(key).get("prefer_managed"):
+        managed = _find_managed(key, binary)
+        if managed:
+            return managed
     # 1. System PATH
     found = shutil.which(binary)
     if found:
@@ -169,10 +211,10 @@ def _find_binary(key: str) -> Optional[str]:
     return None
 
 
-def _get_binary_version(binary_path: str) -> str:
+def _get_binary_version(binary_path: str, args: Optional[List[str]] = None) -> str:
     try:
         result = subprocess.run(
-            [binary_path, "--help"],
+            [binary_path, *(args or ["--help"])],
             capture_output=True, text=True, timeout=5,
             encoding='utf-8', errors='replace'
         )
@@ -320,6 +362,9 @@ def _download_worker(key: str):
         tag = release.get("tag_name", "unknown")
         assets = release.get("assets", [])
         pattern = upscaler["asset_pattern_win"] if is_win else upscaler["asset_pattern_linux"]
+        if pattern is None:
+            raise RuntimeError(f"{upscaler['name']} has no download for this OS — "
+                               "install it with your package manager")
         asset = _find_asset(assets, pattern)
 
         if not asset:
@@ -354,6 +399,19 @@ def _download_worker(key: str):
                         if total_size:
                             state["progress"] = min(90, int(downloaded / total_size * 90))
 
+        # GitHub publishes a sha256 digest per release asset — verify it so
+        # a truncated or tampered download is never extracted and run.
+        digest = (asset.get("digest") or "")
+        if digest.startswith("sha256:"):
+            import hashlib
+            h = hashlib.sha256()
+            with open(archive_path, "rb") as fh:
+                for block in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(block)
+            if h.hexdigest().lower() != digest.split(":", 1)[1].lower():
+                archive_path.unlink(missing_ok=True)
+                raise RuntimeError(f"Checksum mismatch for {asset_name} — download discarded")
+
         state["progress"] = 90
         state["message"] = "Extracting archive…"
 
@@ -363,6 +421,10 @@ def _download_worker(key: str):
         #    that immediately failed with "models not found".
         binary_name = _binary_name(key)
         extract_dir = install_dir / key
+        if upscaler.get("versioned_install"):
+            # One folder per version: an update never overwrites a binary
+            # that a running encode has open (Windows would refuse anyway).
+            extract_dir = extract_dir / tag
         if asset_name.endswith(".AppImage"):
             # Single self-contained executable — nothing to extract
             extract_dir.mkdir(parents=True, exist_ok=True)
@@ -460,7 +522,8 @@ def detect_upscalers() -> Dict:
             "name": engine["name"],
             "installed": bool(found_path),
             "path": found_path,
-            "version": _get_binary_version(found_path) if found_path else None,
+            "version": (_get_binary_version(found_path, engine.get("version_args"))
+                        if found_path else None),
             "download_url": engine["url"],
             "download_state": _download_state.get(key),
         }
@@ -481,7 +544,7 @@ def check_for_updates() -> Dict:
         if not release:
             continue
         latest_tag = release.get("tag_name", "")
-        current_ver = _get_binary_version(found)
+        current_ver = _get_binary_version(found, upscaler.get("version_args"))
         results[key] = {
             "name": upscaler["name"],
             "current_version": current_ver,

@@ -152,9 +152,46 @@ def parse_hb_progress(line: str):
     return pct, fps, eta
 
 
-# Cached once per process: build_command calls this for every encode, and the
-# installed HandBrakeCLI's encoder list can't change while we're running.
+_version_cache: Dict[str, tuple] = {}
+
+
+def handbrake_version() -> tuple:
+    """(major, minor, patch) of the HandBrakeCLI in use; (0,) if unknown."""
+    binary = handbrake_cli()
+    if binary not in _version_cache:
+        version = (0,)
+        try:
+            r = subprocess.run([binary, "--version"], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=15)
+            m = re.search(r"HandBrake (\d+)\.(\d+)\.(\d+)", (r.stdout or "") + (r.stderr or ""))
+            if m:
+                version = tuple(int(x) for x in m.groups())
+        except Exception:
+            pass
+        _version_cache[binary] = version
+    return _version_cache[binary]
+
+
+def handbrake_cli() -> str:
+    """Path of the HandBrakeCLI to run.
+
+    An Optimizarr-managed copy (Settings → AI Upscalers → HandBrakeCLI,
+    newest version folder) wins over the one on PATH, so HandBrake can be
+    updated without admin rights or a package manager. Falls back to the
+    bare name, resolved through PATH by the OS.
+    """
+    try:
+        from app.upscaler import _find_binary
+        return _find_binary("handbrake") or "HandBrakeCLI"
+    except Exception:
+        return "HandBrakeCLI"
+
+
+# Cached per HandBrakeCLI binary: build_command calls this for every encode,
+# and a given binary's encoder list can't change. Keyed by path so installing
+# a newer managed copy is picked up without a restart.
 _hw_accel_cache: Optional[Dict] = None
+_hw_accel_cache_path: Optional[str] = None
 
 
 def parse_hb_encoder_list(help_text: str) -> list:
@@ -181,8 +218,9 @@ def parse_hb_encoder_list(help_text: str) -> list:
 
 def detect_hardware_acceleration() -> Dict:
     """Detect available hardware encoders by querying HandBrakeCLI (cached)."""
-    global _hw_accel_cache
-    if _hw_accel_cache is not None:
+    global _hw_accel_cache, _hw_accel_cache_path
+    binary = handbrake_cli()
+    if _hw_accel_cache is not None and _hw_accel_cache_path in (None, binary):
         return _hw_accel_cache
     available = {
         "nvidia": False,
@@ -195,7 +233,7 @@ def detect_hardware_acceleration() -> Dict:
     
     try:
         result = subprocess.run(
-            ["HandBrakeCLI", "--help"],
+            [binary, "--help"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -239,4 +277,5 @@ def detect_hardware_acceleration() -> Dict:
     # network mount; retry next call.
     if "error" not in available:
         _hw_accel_cache = available
+        _hw_accel_cache_path = binary
     return available

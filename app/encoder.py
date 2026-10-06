@@ -20,6 +20,7 @@ from app.logger import optimizarr_logger
 from app.handbrake import (  # noqa: F401  (re-exported)
     HB_PROGRESS_RE, HBJsonStream, parse_hb_json_progress, parse_hb_progress,
     preflight_source_check, parse_hb_encoder_list, detect_hardware_acceleration,
+    handbrake_cli, handbrake_version,
 )
 
 
@@ -105,7 +106,7 @@ class EncodingJob:
         # Base command. --json emits structured Progress/scan blocks instead
         # of the human text lines — exact progress/fps/ETA, immune to output
         # format drift between HandBrake versions.
-        cmd = ['HandBrakeCLI', '--json', '-i', input_file, '-o', output_file]
+        cmd = [handbrake_cli(), '--json', '-i', input_file, '-o', output_file]
 
         # Container format
         cmd.extend(['--format', container_info['format']])
@@ -173,9 +174,11 @@ class EncodingJob:
                 cmd.extend(['--encopts',
                             f'film-grain={min(grain, 50)}:film-grain-denoise=0'])
             elif hb_encoder.startswith('x265'):
-                # x265's grain tune segfaults HandBrake (1.10.2 verified)
-                # with the ultrafast/superfast presets — skip it there.
-                if (self.profile.get('preset') or '') not in ('ultrafast', 'superfast'):
+                # x265's grain tune segfaults HandBrake 1.10.x with the
+                # ultrafast/superfast presets (verified; fixed in 1.11.2).
+                crashy = ((self.profile.get('preset') or '') in ('ultrafast', 'superfast')
+                          and handbrake_version() < (1, 11))
+                if not crashy:
                     cmd.extend(['--encoder-tune', 'grain'])
 
         # (two_pass is intentionally not emitted: HandBrake's --multi-pass

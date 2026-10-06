@@ -2263,9 +2263,14 @@ class TestEncoderSelection:
         prof = {'codec': 'h265', 'encoder': 'x265', 'film_grain': 5, 'preset': 'slow'}
         cmd = self._job(fresh_db, monkeypatch, prof, {'bit_depth': 8}, ['x265']).build_command()
         assert cmd[cmd.index('--encoder-tune') + 1] == 'grain'
+        import app.encoder as enc
         prof['preset'] = 'ultrafast'
+        monkeypatch.setattr(enc, 'handbrake_version', lambda: (1, 10, 2))
         cmd = self._job(fresh_db, monkeypatch, prof, {'bit_depth': 8}, ['x265']).build_command()
-        assert '--encoder-tune' not in cmd
+        assert '--encoder-tune' not in cmd          # crashes HandBrake 1.10
+        monkeypatch.setattr(enc, 'handbrake_version', lambda: (1, 11, 2))
+        cmd = self._job(fresh_db, monkeypatch, prof, {'bit_depth': 8}, ['x265']).build_command()
+        assert cmd[cmd.index('--encoder-tune') + 1] == 'grain'  # fixed in 1.11.2
 
     def test_film_grain_persists(self, fresh_db):
         pid = fresh_db.create_profile(
@@ -2647,6 +2652,40 @@ class TestVideo2X:
         assert cmd[:5] == ['v2x', '-i', 'in.mkv', '-o', 'out.mkv']
         assert cmd[cmd.index('-p') + 1] == 'realesrgan' and cmd[cmd.index('-s') + 1] == '2'
         assert cmd[cmd.index('-c') + 1] == 'libx264'
+
+    def _fake_v2x(self, tmp_path, exit_code, finished=True):
+        import sys
+        script = tmp_path / 'fake.py'
+        script.write_text(
+            "import sys\n"
+            "a = sys.argv[1:]\n"
+            "open(a[a.index('-o') + 1], 'wb').write(b'x')\n"
+            "sys.stdout.write('\\rframe=10/10 (100.00%); fps=1.0; elapsed=00:00:01; remaining=00:00:00')\n"
+            + ("print('Output written to: x')\n" if finished else "")
+            + f"sys.exit({exit_code})\n", encoding='utf-8')
+        return [sys.executable, str(script)]
+
+    def _run(self, monkeypatch, tmp_path, cmd_prefix, src_frames, out_frames):
+        import app.video2x as v2x
+        monkeypatch.setattr(v2x, 'build_command',
+                            lambda b, i, o, *a: cmd_prefix + ['-i', i, '-o', o])
+        counts = {'in.mkv': src_frames, 'out.mkv': out_frames}
+        monkeypatch.setattr(v2x, 'video_packet_count', lambda p: counts[p.split('\\')[-1].split('/')[-1]])
+        return v2x.run_video2x('ignored.exe', 'in.mkv', str(tmp_path / 'out.mkv'),
+                               'realesrgan', 'realesr-animevideov3', 2,
+                               progress=lambda *a: None, register=lambda p: None)
+
+    def test_crash_after_finish_accepted_when_frames_complete(self, monkeypatch, tmp_path):
+        cmd = self._fake_v2x(tmp_path, 1)
+        assert self._run(monkeypatch, tmp_path, cmd, 1000, 998) is True
+
+    def test_crash_after_finish_rejected_when_frames_missing(self, monkeypatch, tmp_path):
+        cmd = self._fake_v2x(tmp_path, 1)
+        assert self._run(monkeypatch, tmp_path, cmd, 1000, 900) is False
+
+    def test_crash_before_finish_rejected(self, monkeypatch, tmp_path):
+        cmd = self._fake_v2x(tmp_path, 1, finished=False)
+        assert self._run(monkeypatch, tmp_path, cmd, 1000, 1000) is False
 
     def test_pipeline_prefers_video2x_and_reports_target_size(self, monkeypatch, tmp_path):
         import app.upscaler as up

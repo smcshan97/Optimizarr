@@ -349,11 +349,12 @@ def health_check():
     }
 
     # HandBrakeCLI check
-    hb_path = shutil.which("HandBrakeCLI")
+    from app.handbrake import handbrake_cli
+    hb_path = shutil.which(handbrake_cli())
     health["handbrake"] = {
         "installed": hb_path is not None,
         "path": hb_path or "not found",
-        "version": _get_tool_version([hb_path, "--version"], "handbrake") if hb_path else None,
+        "version": _get_tool_version([hb_path, "--version"], f"handbrake:{hb_path}") if hb_path else None,
     }
     
     # Database check

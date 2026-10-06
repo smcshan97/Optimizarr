@@ -79,7 +79,6 @@ def build_command(binary: str, input_path: str, output_path: str,
         "-s", str(model_scale),
         model_opt, v2x_model,
         *INTERMEDIATE_ARGS,
-        "--log-level", "warn",
     ]
 
 
@@ -123,13 +122,47 @@ def run_video2x(binary: str, input_path: str, output_path: str,
     finally:
         register(None)
 
-    if rc != 0:
-        cleaned = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", tail).replace("\r", "\n")
+    cleaned = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", tail).replace("\r", "\n")
+    finished = "Output written to" in cleaned
+    out = Path(output_path)
+    if rc != 0 and not finished:
         optimizarr_logger.app_logger.error(
             "Video2X exited %s: %s", rc, cleaned.strip()[-800:])
         return False
-    out = Path(output_path)
     if not out.exists() or out.stat().st_size == 0:
         optimizarr_logger.app_logger.error("Video2X produced no output")
         return False
+
+    # Video2X 6.4.0 on Windows crashes during shutdown (0xC0000005) AFTER
+    # writing a complete file, and drops the final couple of frames even
+    # when it exits cleanly. Accept the output only if its frame count is
+    # within a small tail of the source's; otherwise the caller falls back.
+    src_frames = video_packet_count(input_path)
+    out_frames = video_packet_count(output_path)
+    allowed_loss = max(MAX_TAIL_FRAMES_LOST, int(src_frames * 0.001)) if src_frames else 0
+    if src_frames and (out_frames is None or out_frames < src_frames - allowed_loss):
+        optimizarr_logger.app_logger.error(
+            "Video2X output has %s of %s frames — rejecting", out_frames, src_frames)
+        return False
+    if rc != 0:
+        optimizarr_logger.app_logger.warning(
+            "Video2X crashed on exit (code %s) after finishing; output verified "
+            "(%s of %s frames)", rc, out_frames, src_frames)
     return True
+
+
+# Video2X loses the last ~2 frames of a stream (verified on 6.4.0). Under
+# 0.1 s at film rates; anything beyond this is treated as a failed run.
+MAX_TAIL_FRAMES_LOST = 5
+
+
+def video_packet_count(path: str) -> Optional[int]:
+    """Frame count of the first video stream by counting packets (no decode)."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets",
+             "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=600)
+        return int(r.stdout.strip().splitlines()[0])
+    except Exception:
+        return None

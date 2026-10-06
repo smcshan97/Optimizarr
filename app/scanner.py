@@ -14,6 +14,7 @@ import os
 
 from app.database import db
 from app.logger import optimizarr_logger
+from app.handbrake import handbrake_cli
 
 
 _PIX_DEPTH_RE = re.compile(r'p(\d{2})(?:le|be)?$')
@@ -55,7 +56,7 @@ class MediaScanner:
     VIDEO_EXTENSIONS = {'.mp4', '.mkv', '.avi', '.mov', '.m4v', '.ts', '.mpg', '.mpeg', '.wmv', '.flv', '.webm'}
     
     def __init__(self):
-        self.handbrake_available = self._check_tool(['HandBrakeCLI', '--version'], "HandBrakeCLI")
+        self.handbrake_available = self._check_tool([handbrake_cli(), '--version'], "HandBrakeCLI")
         self.ffprobe_available = self._check_tool(['ffprobe', '-version'], "ffprobe")
 
     def _check_tool(self, cmd: List[str], name: str) -> bool:
@@ -208,7 +209,7 @@ class MediaScanner:
     def _probe_with_handbrake(self, file_path: str) -> Optional[Dict]:
         try:
             result = subprocess.run(
-                ['HandBrakeCLI', '--scan', '--json', '-i', file_path],
+                [handbrake_cli(), '--scan', '--json', '-i', file_path],
                 capture_output=True, text=True, timeout=60,
                 encoding='utf-8', errors='replace'
             )
