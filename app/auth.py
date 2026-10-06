@@ -12,6 +12,7 @@ import jwt
 
 from app.config import settings
 from app.database import db
+from app.logger import optimizarr_logger
 
 
 # Bootstrap passwords that must be changed on first login.
@@ -175,7 +176,7 @@ class AuthManager:
         existing_user = db.get_user_by_username(settings.admin_username)
 
         if existing_user:
-            print(f"✓ Admin user '{settings.admin_username}' already exists")
+            optimizarr_logger.app_logger.info(f"✓ Admin user '{settings.admin_username}' already exists")
             return
 
         password_hash = AuthManager.hash_password(settings.admin_password)
@@ -188,9 +189,9 @@ class AuthManager:
             must_change_password=weak,
         )
 
-        print(f"✓ Created admin user '{settings.admin_username}' (ID: {user_id})")
+        optimizarr_logger.app_logger.info(f"✓ Created admin user '{settings.admin_username}' (ID: {user_id})")
         if weak:
-            print("  ⚠ Admin password is a default/weak value — you'll be asked to change it on first login")
+            optimizarr_logger.app_logger.warning("  ⚠ Admin password is a default/weak value — you'll be asked to change it on first login")
 
 
 # Global auth manager instance

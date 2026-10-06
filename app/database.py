@@ -10,6 +10,7 @@ from typing import Optional, List, Dict, Any
 from contextlib import contextmanager
 
 from app.config import settings
+from app.logger import optimizarr_logger
 
 
 def _safe_json(raw, default=None):
@@ -260,44 +261,44 @@ class Database:
             profile_columns = [col[1] for col in cursor.fetchall()]
             if 'container' not in profile_columns:
                 cursor.execute("ALTER TABLE profiles ADD COLUMN container TEXT DEFAULT 'mkv'")
-                print("  ↳ Migrated: added 'container' column to profiles")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'container' column to profiles")
             
             # Phase 2 migrations
             if 'audio_handling' not in profile_columns:
                 cursor.execute("ALTER TABLE profiles ADD COLUMN audio_handling TEXT DEFAULT 'preserve_all'")
-                print("  ↳ Migrated: added 'audio_handling' column to profiles")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'audio_handling' column to profiles")
             if 'subtitle_handling' not in profile_columns:
                 cursor.execute("ALTER TABLE profiles ADD COLUMN subtitle_handling TEXT DEFAULT 'none'")
-                print("  ↳ Migrated: added 'subtitle_handling' column to profiles")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'subtitle_handling' column to profiles")
             if 'enable_filters' not in profile_columns:
                 cursor.execute("ALTER TABLE profiles ADD COLUMN enable_filters BOOLEAN DEFAULT 0")
-                print("  ↳ Migrated: added 'enable_filters' column to profiles")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'enable_filters' column to profiles")
             if 'chapter_markers' not in profile_columns:
                 cursor.execute("ALTER TABLE profiles ADD COLUMN chapter_markers BOOLEAN DEFAULT 1")
-                print("  ↳ Migrated: added 'chapter_markers' column to profiles")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'chapter_markers' column to profiles")
             if 'hw_accel_enabled' not in profile_columns:
                 cursor.execute("ALTER TABLE profiles ADD COLUMN hw_accel_enabled BOOLEAN DEFAULT 0")
-                print("  ↳ Migrated: added 'hw_accel_enabled' column to profiles")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'hw_accel_enabled' column to profiles")
             
             # Add columns to scan_roots if missing
             cursor.execute("PRAGMA table_info(scan_roots)")
             root_columns = [col[1] for col in cursor.fetchall()]
             if 'library_type' not in root_columns:
                 cursor.execute("ALTER TABLE scan_roots ADD COLUMN library_type TEXT DEFAULT 'custom'")
-                print("  ↳ Migrated: added 'library_type' column to scan_roots")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'library_type' column to scan_roots")
             if 'show_in_stats' not in root_columns:
                 cursor.execute("ALTER TABLE scan_roots ADD COLUMN show_in_stats BOOLEAN DEFAULT 1")
-                print("  ↳ Migrated: added 'show_in_stats' column to scan_roots")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'show_in_stats' column to scan_roots")
             
             # History table migrations
             cursor.execute("PRAGMA table_info(history)")
             history_columns = [col[1] for col in cursor.fetchall()]
             if 'codec' not in history_columns:
                 cursor.execute("ALTER TABLE history ADD COLUMN codec TEXT")
-                print("  ↳ Migrated: added 'codec' column to history")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'codec' column to history")
             if 'container' not in history_columns:
                 cursor.execute("ALTER TABLE history ADD COLUMN container TEXT")
-                print("  ↳ Migrated: added 'container' column to history")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'container' column to history")
             
             # External connections table (Sonarr / Radarr / Stash)
             cursor.execute("""
@@ -322,7 +323,7 @@ class Database:
                 cursor.execute(
                     "ALTER TABLE scan_roots ADD COLUMN external_connection_id INTEGER"
                 )
-                print("  ↳ Migrated: added 'external_connection_id' to scan_roots")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'external_connection_id' to scan_roots")
 
             # scan_roots: AI upscale settings per library
             cursor.execute("PRAGMA table_info(scan_roots)")
@@ -340,14 +341,14 @@ class Database:
                     cursor.execute(
                         f"ALTER TABLE scan_roots ADD COLUMN {col_name} {col_def}"
                     )
-                    print(f"  ↳ Migrated: added '{col_name}' to scan_roots")
+                    optimizarr_logger.app_logger.info(f"  ↳ Migrated: added '{col_name}' to scan_roots")
 
             # queue: upscale_plan stores the per-item upscale JSON
             cursor.execute("PRAGMA table_info(queue)")
             queue_cols = [col[1] for col in cursor.fetchall()]
             if 'upscale_plan' not in queue_cols:
                 cursor.execute("ALTER TABLE queue ADD COLUMN upscale_plan TEXT")
-                print("  ↳ Migrated: added 'upscale_plan' to queue")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'upscale_plan' to queue")
 
             # profiles: AI upscale settings per profile
             cursor.execute("PRAGMA table_info(profiles)")
@@ -363,7 +364,7 @@ class Database:
             for col_name, col_def in profile_upscale_migrations:
                 if col_name not in profile_cols:
                     cursor.execute(f"ALTER TABLE profiles ADD COLUMN {col_name} {col_def}")
-                    print(f"  ↳ Migrated: added '{col_name}' to profiles")
+                    optimizarr_logger.app_logger.info(f"  ↳ Migrated: added '{col_name}' to profiles")
 
             # profiles: 3D / stereo conversion settings per profile
             cursor.execute("PRAGMA table_info(profiles)")
@@ -379,7 +380,7 @@ class Database:
             for col_name, col_def in profile_stereo_migrations:
                 if col_name not in profile_cols_stereo:
                     cursor.execute(f"ALTER TABLE profiles ADD COLUMN {col_name} {col_def}")
-                    print(f"  ↳ Migrated: added '{col_name}' to profiles")
+                    optimizarr_logger.app_logger.info(f"  ↳ Migrated: added '{col_name}' to profiles")
 
             # scan_roots: 3D / stereo conversion settings per library
             cursor.execute("PRAGMA table_info(scan_roots)")
@@ -395,27 +396,27 @@ class Database:
             for col_name, col_def in scanroot_stereo_migrations:
                 if col_name not in root_cols_stereo:
                     cursor.execute(f"ALTER TABLE scan_roots ADD COLUMN {col_name} {col_def}")
-                    print(f"  ↳ Migrated: added '{col_name}' to scan_roots")
+                    optimizarr_logger.app_logger.info(f"  ↳ Migrated: added '{col_name}' to scan_roots")
 
             # queue: stereo_plan stores the per-item stereo conversion JSON
             cursor.execute("PRAGMA table_info(queue)")
             queue_cols_stereo = [col[1] for col in cursor.fetchall()]
             if 'stereo_plan' not in queue_cols_stereo:
                 cursor.execute("ALTER TABLE queue ADD COLUMN stereo_plan TEXT")
-                print("  ↳ Migrated: added 'stereo_plan' to queue")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'stereo_plan' to queue")
 
             # duration_seconds — real video duration for accurate ETA + savings
             cursor.execute("PRAGMA table_info(queue)")
             queue_cols_dur = [col[1] for col in cursor.fetchall()]
             if 'duration_seconds' not in queue_cols_dur:
                 cursor.execute("ALTER TABLE queue ADD COLUMN duration_seconds REAL DEFAULT 0")
-                print("  ↳ Migrated: added 'duration_seconds' to queue")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'duration_seconds' to queue")
 
             cursor.execute("PRAGMA table_info(history)")
             history_cols = [col[1] for col in cursor.fetchall()]
             if 'duration_seconds' not in history_cols:
                 cursor.execute("ALTER TABLE history ADD COLUMN duration_seconds REAL DEFAULT 0")
-                print("  ↳ Migrated: added 'duration_seconds' to history")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'duration_seconds' to history")
 
             # Duplicate detection: perceptual fingerprints + match results
             cursor.execute("""
@@ -461,7 +462,7 @@ class Database:
                     WHERE encoding_time_seconds > 0 AND duration_seconds > 0
                       AND (CAST(encoding_time_seconds AS REAL) / duration_seconds) > 100
                 """)
-                print(f"  ↳ Migrated: added 'preprocessed' to history "
+                optimizarr_logger.app_logger.info(f"  ↳ Migrated: added 'preprocessed' to history "
                       f"({cursor.rowcount} legacy row(s) reclassified)")
 
             # retry_count — automatic retry attempts for failed encodes
@@ -469,17 +470,17 @@ class Database:
             queue_cols_retry = [col[1] for col in cursor.fetchall()]
             if 'retry_count' not in queue_cols_retry:
                 cursor.execute("ALTER TABLE queue ADD COLUMN retry_count INTEGER DEFAULT 0")
-                print("  ↳ Migrated: added 'retry_count' to queue")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'retry_count' to queue")
 
             # Live encode telemetry parsed from HandBrakeCLI output (Patch 33)
             cursor.execute("PRAGMA table_info(queue)")
             queue_cols_live = [col[1] for col in cursor.fetchall()]
             if 'current_fps' not in queue_cols_live:
                 cursor.execute("ALTER TABLE queue ADD COLUMN current_fps REAL DEFAULT 0")
-                print("  ↳ Migrated: added 'current_fps' to queue")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'current_fps' to queue")
             if 'eta_seconds' not in queue_cols_live:
                 cursor.execute("ALTER TABLE queue ADD COLUMN eta_seconds INTEGER DEFAULT 0")
-                print("  ↳ Migrated: added 'eta_seconds' to queue")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'eta_seconds' to queue")
 
             # retry_after — backoff gate; a re-queued failure isn't eligible to
             # run again until this UTC timestamp (NULL = eligible now) (Patch 39)
@@ -487,7 +488,7 @@ class Database:
             queue_cols_ra = [col[1] for col in cursor.fetchall()]
             if 'retry_after' not in queue_cols_ra:
                 cursor.execute("ALTER TABLE queue ADD COLUMN retry_after TIMESTAMP")
-                print("  ↳ Migrated: added 'retry_after' to queue")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'retry_after' to queue")
 
             # Pipeline phase telemetry. A job is stereo → upscale → encode →
             # finalize; each phase has its own progress and ETA. Without this
@@ -497,15 +498,15 @@ class Database:
             queue_cols_phase = [col[1] for col in cursor.fetchall()]
             if 'phase' not in queue_cols_phase:
                 cursor.execute("ALTER TABLE queue ADD COLUMN phase TEXT")
-                print("  ↳ Migrated: added 'phase' to queue")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'phase' to queue")
             if 'phase_progress' not in queue_cols_phase:
                 cursor.execute(
                     "ALTER TABLE queue ADD COLUMN phase_progress REAL DEFAULT 0")
-                print("  ↳ Migrated: added 'phase_progress' to queue")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'phase_progress' to queue")
             if 'phase_eta_seconds' not in queue_cols_phase:
                 cursor.execute(
                     "ALTER TABLE queue ADD COLUMN phase_eta_seconds INTEGER DEFAULT 0")
-                print("  ↳ Migrated: added 'phase_eta_seconds' to queue")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'phase_eta_seconds' to queue")
 
             # pre_work_mpf — megapixel-frames of AI work an upscale job did
             # (output frames × output megapixels). Upscale cost tracks pixels
@@ -517,7 +518,7 @@ class Database:
             if 'pre_work_mpf' not in history_cols_mpf:
                 cursor.execute(
                     "ALTER TABLE history ADD COLUMN pre_work_mpf REAL DEFAULT 0")
-                print("  ↳ Migrated: added 'pre_work_mpf' to history")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'pre_work_mpf' to history")
 
             # Auto-sync interval for external connections (Patch 37); 0 = off
             cursor.execute("PRAGMA table_info(external_connections)")
@@ -527,7 +528,7 @@ class Database:
                     "ALTER TABLE external_connections "
                     "ADD COLUMN sync_interval_hours INTEGER DEFAULT 0"
                 )
-                print("  ↳ Migrated: added 'sync_interval_hours' to external_connections")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'sync_interval_hours' to external_connections")
 
             # folder_watches.scan_root_id — links a watch to its library (scan root).
             # Folder watching is now toggled per-library via the eye toggle.
@@ -535,7 +536,7 @@ class Database:
             fw_cols = [col[1] for col in cursor.fetchall()]
             if 'scan_root_id' not in fw_cols:
                 cursor.execute("ALTER TABLE folder_watches ADD COLUMN scan_root_id INTEGER")
-                print("  ↳ Migrated: added 'scan_root_id' to folder_watches")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'scan_root_id' to folder_watches")
                 # Best-effort: link existing watches to a scan root with the same path
                 cursor.execute("""
                     UPDATE folder_watches
@@ -566,7 +567,7 @@ class Database:
                     ON CONFLICT(key) DO UPDATE SET
                         value = 'rank', updated_at = CURRENT_TIMESTAMP
                 """)
-                print("  ↳ Migrated: queue priorities renumbered to rank scheme (1 = first)")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: queue priorities renumbered to rank scheme (1 = first)")
 
             # Security: must_change_password flag for default admin
             try:
@@ -575,7 +576,7 @@ class Database:
                 cursor.execute("ALTER TABLE users ADD COLUMN must_change_password BOOLEAN DEFAULT 0")
                 # Flag the default admin to force a password change
                 cursor.execute("UPDATE users SET must_change_password = 1 WHERE username = 'admin'")
-                print("  ↳ Migrated: added 'must_change_password' to users")
+                optimizarr_logger.app_logger.info("  ↳ Migrated: added 'must_change_password' to users")
 
             # Everything above is the legacy "add it if it's missing" upgrade
             # path, kept because existing databases are in every state it
@@ -588,7 +589,7 @@ class Database:
             if len(default_rows) > 1:
                 keep_id = default_rows[0][0]
                 cursor.execute("UPDATE profiles SET is_default = 0 WHERE is_default = 1 AND id != ?", (keep_id,))
-                print(f"  ↳ Migrated: enforced single default profile (kept id={keep_id})")
+                optimizarr_logger.app_logger.info(f"  ↳ Migrated: enforced single default profile (kept id={keep_id})")
 
             # Indexes — the queue is scanned constantly (next-pending poll every
             # second while encoding, status counts on every dashboard poll,
@@ -603,7 +604,7 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS idx_history_completed_at "
                 "ON history(completed_at)")
 
-            print("✓ Database schema initialized")
+            optimizarr_logger.app_logger.info("✓ Database schema initialized")
     
     # Profile CRUD
     def create_profile(self, **kwargs) -> int:
@@ -1804,7 +1805,7 @@ def _run_migrations(cursor):
     cursor.execute("PRAGMA user_version")
     current = cursor.fetchone()[0]
     if current > SCHEMA_VERSION:
-        print(f"  ⚠ Database schema v{current} is newer than this build "
+        optimizarr_logger.app_logger.warning(f"  ⚠ Database schema v{current} is newer than this build "
               f"(v{SCHEMA_VERSION}) — was Optimizarr downgraded?")
         return
     for version, description, fn in MIGRATIONS:
@@ -1813,7 +1814,7 @@ def _run_migrations(cursor):
         fn(cursor)
         # PRAGMA can't take parameters; version is an int from the list above
         cursor.execute(f"PRAGMA user_version = {int(version)}")
-        print(f"  ↳ Migration {version}: {description}")
+        optimizarr_logger.app_logger.info(f"  ↳ Migration {version}: {description}")
 
 
 # Global database instance

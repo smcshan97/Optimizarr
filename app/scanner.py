@@ -13,6 +13,7 @@ from typing import List, Dict, Optional, Tuple
 import os
 
 from app.database import db
+from app.logger import optimizarr_logger
 
 
 _PIX_DEPTH_RE = re.compile(r'p(\d{2})(?:le|be)?$')
@@ -60,25 +61,25 @@ class MediaScanner:
     def _check_tool(self, cmd: List[str], name: str) -> bool:
         binary = cmd[0]
         if not shutil.which(binary):
-            print(f"⚠ {name} not found in PATH")
+            optimizarr_logger.app_logger.warning(f"⚠ {name} not found in PATH")
             return False
         try:
             subprocess.run(cmd, capture_output=True, text=True, timeout=5,
                            encoding='utf-8', errors='replace')
-            print(f"✓ {name} is available")
+            optimizarr_logger.app_logger.info(f"✓ {name} is available")
             return True
         except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
-            print(f"⚠ {name} not available")
+            optimizarr_logger.app_logger.warning(f"⚠ {name} not available")
             return False
     
     def discover_video_files(self, root_path: str, recursive: bool = True) -> List[str]:
         video_files = []
         root = Path(root_path)
         if not root.exists():
-            print(f"✗ Path does not exist: {root_path}")
+            optimizarr_logger.app_logger.error(f"✗ Path does not exist: {root_path}")
             return []
         if not root.is_dir():
-            print(f"✗ Path is not a directory: {root_path}")
+            optimizarr_logger.app_logger.error(f"✗ Path is not a directory: {root_path}")
             return []
         try:
             pattern = root.rglob('*') if recursive else root.glob('*')
@@ -86,7 +87,7 @@ class MediaScanner:
                 if file_path.is_file() and file_path.suffix.lower() in self.VIDEO_EXTENSIONS:
                     video_files.append(str(file_path.absolute()))
         except PermissionError as e:
-            print(f"✗ Permission denied scanning {root_path}: {e}")
+            optimizarr_logger.app_logger.error(f"✗ Permission denied scanning {root_path}: {e}")
         return sorted(video_files)
     
     def analyze_file(self, file_path: str) -> Optional[Dict]:
@@ -117,9 +118,9 @@ class MediaScanner:
                 return None
             return self._parse_ffprobe_json(json.loads(result.stdout))
         except subprocess.TimeoutExpired:
-            print(f"⚠ ffprobe timeout: {Path(file_path).name}")
+            optimizarr_logger.app_logger.warning(f"⚠ ffprobe timeout: {Path(file_path).name}")
         except Exception as e:
-            print(f"⚠ ffprobe failed for {Path(file_path).name}: {e}")
+            optimizarr_logger.app_logger.warning(f"⚠ ffprobe failed for {Path(file_path).name}: {e}")
         return None
 
     def _parse_ffprobe_json(self, data: Dict) -> Dict:
@@ -242,9 +243,9 @@ class MediaScanner:
                 title_set = data.get('JSON Title Set', data)
                 return self._parse_handbrake_json(title_set)
         except subprocess.TimeoutExpired:
-            print(f"⚠ HandBrake scan timeout: {Path(file_path).name}")
+            optimizarr_logger.app_logger.warning(f"⚠ HandBrake scan timeout: {Path(file_path).name}")
         except Exception as e:
-            print(f"⚠ HandBrake scan error: {e}")
+            optimizarr_logger.app_logger.error(f"⚠ HandBrake scan error: {e}")
         return None
 
     def _parse_handbrake_json(self, data: Dict) -> Dict:
@@ -277,7 +278,7 @@ class MediaScanner:
                     'language': audio.get('Language', 'und'),
                 })
         except Exception as e:
-            print(f"⚠ Error parsing HandBrake JSON: {e}")
+            optimizarr_logger.app_logger.error(f"⚠ Error parsing HandBrake JSON: {e}")
         return specs
 
     def _normalise_codec(self, raw: str) -> str:
@@ -321,18 +322,18 @@ class MediaScanner:
         scan_roots = db.get_scan_roots()
         scan_root = next((r for r in scan_roots if r['id'] == root_id), None)
         if not scan_root:
-            print(f"✗ Scan root {root_id} not found")
+            optimizarr_logger.app_logger.error(f"✗ Scan root {root_id} not found")
             return 0
         if not scan_root['enabled']:
-            print(f"⚠ Scan root {root_id} is disabled")
+            optimizarr_logger.app_logger.warning(f"⚠ Scan root {root_id} is disabled")
             return 0
-        print(f"Scanning: {scan_root['path']}")
+        optimizarr_logger.app_logger.info(f"Scanning: {scan_root['path']}")
         profile = db.get_profile(scan_root['profile_id'])
         if not profile:
-            print(f"✗ Profile {scan_root['profile_id']} not found")
+            optimizarr_logger.app_logger.error(f"✗ Profile {scan_root['profile_id']} not found")
             return 0
         video_files = self.discover_video_files(scan_root['path'], recursive=scan_root['recursive'])
-        print(f"Found {len(video_files)} video files")
+        optimizarr_logger.app_logger.info(f"Found {len(video_files)} video files")
         added_count = 0
 
         # Build a set of already-queued paths ONCE — avoids O(n²) DB round-trips
@@ -372,7 +373,7 @@ class MediaScanner:
                 'audio_codec': profile['audio_codec']
             }
             if not self._needs_encoding(current_specs, target_specs):
-                print(f"  ⊙ Skipping (already optimized): {Path(file_path).name}")
+                optimizarr_logger.app_logger.info(f"  ⊙ Skipping (already optimized): {Path(file_path).name}")
                 continue
             file_size = Path(file_path).stat().st_size
 
@@ -463,8 +464,8 @@ class MediaScanner:
             stereo_tag = " 🎥3D" if stereo_plan else ""
             added_count += 1
             marker = "☣" if broken else "+"
-            print(f"  {marker} Added: {Path(file_path).name} [{current_specs.get('codec','?')} {current_specs.get('resolution','?')}]{upscale_tag}{stereo_tag}{' (quarantined)' if broken else ''}")
-        print(f"✓ Added {added_count} files to queue")
+            optimizarr_logger.app_logger.info(f"  {marker} Added: {Path(file_path).name} [{current_specs.get('codec','?')} {current_specs.get('resolution','?')}]{upscale_tag}{stereo_tag}{' (quarantined)' if broken else ''}")
+        optimizarr_logger.app_logger.info(f"✓ Added {added_count} files to queue")
         from app.devlog import devlog
         devlog('scan', root=root_id, queued=added_count)
         return added_count
@@ -639,7 +640,7 @@ class MediaScanner:
     def scan_all_roots(self) -> int:
         scan_roots = db.get_scan_roots(enabled_only=True)
         if not scan_roots:
-            print("⚠ No enabled scan roots found")
+            optimizarr_logger.app_logger.warning("⚠ No enabled scan roots found")
             return 0
         return sum(self.scan_root(root['id']) for root in scan_roots)
 

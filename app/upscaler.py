@@ -243,7 +243,7 @@ def _fetch_latest_release(owner: str, repo: str) -> Optional[Dict]:
             if release.get("assets"):
                 release["_fetched_at"] = time.time()
                 _update_cache[cache_key] = release
-                print(f"  ℹ Using release {release.get('tag_name')} (latest tag had no assets)")
+                optimizarr_logger.app_logger.info(f"  ℹ Using release {release.get('tag_name')} (latest tag had no assets)")
                 return release
 
     # 3. Nothing found
@@ -253,7 +253,7 @@ def _fetch_latest_release(owner: str, repo: str) -> Optional[Dict]:
         msg = f"No releases with binary assets found for {owner}/{repo}."
     else:
         msg = f"GitHub API returned HTTP {resp.status_code}"
-    print(f"⚠ {msg}")
+    optimizarr_logger.app_logger.warning(f"⚠ {msg}")
     return {"_error": "not_found", "_message": msg}
 
 

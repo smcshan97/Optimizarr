@@ -26,6 +26,7 @@ from app.auth import auth
 from app import __version__
 from app.api import routes, auth_routes
 from app.scheduler import initialize_scheduler, shutdown_scheduler
+from app.logger import optimizarr_logger
 
 
 # ============================================================
@@ -38,12 +39,12 @@ async def lifespan(app: FastAPI):
     # ---- STARTUP ----
     from app.logger import optimizarr_logger
 
-    print("=" * 60)
-    print("Optimizarr - Automated Media Optimization System")
-    print("=" * 60)
+    optimizarr_logger.app_logger.info("=" * 60)
+    optimizarr_logger.app_logger.info("Optimizarr - Automated Media Optimization System")
+    optimizarr_logger.app_logger.info("=" * 60)
 
     ensure_data_directories()
-    print(f"Database: {settings.db_path}")
+    optimizarr_logger.app_logger.info(f"Database: {settings.db_path}")
 
     auth.create_default_admin()
 
@@ -51,7 +52,7 @@ async def lifespan(app: FastAPI):
     # 'paused' has no live encode behind it — re-queue it as 'pending'.
     recovered = db.reset_stale_processing()
     if recovered:
-        print(f"  Recovered {recovered} interrupted item(s) → pending")
+        optimizarr_logger.app_logger.info(f"  Recovered {recovered} interrupted item(s) → pending")
 
     from app.devlog import devlog
     devlog('start', v=__version__, rec=recovered or None)
@@ -77,15 +78,15 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 db.set_webhook_error(ev['id'], str(e)[:300])
         if pending_hooks:
-            print(f"  Replayed {replay_ok}/{len(pending_hooks)} unprocessed webhook event(s)")
+            optimizarr_logger.app_logger.info(f"  Replayed {replay_ok}/{len(pending_hooks)} unprocessed webhook event(s)")
             devlog('webhook_replay', n=len(pending_hooks), ok=replay_ok)
         db.prune_webhook_events(days=7)
     except Exception as e:
-        print(f"  ⚠ Webhook replay failed: {e}")
+        optimizarr_logger.app_logger.warning(f"  ⚠ Webhook replay failed: {e}")
 
     # Seed default profiles on first run
     if not db.get_profiles():
-        print("Seeding default encoding profiles…")
+        optimizarr_logger.app_logger.info("Seeding default encoding profiles…")
         _seed_default_profiles()
 
     # Start upscaler update checker background thread
@@ -110,10 +111,10 @@ async def lifespan(app: FastAPI):
             from app.api.connection_routes import upgrade_registered_webhooks
             n_hooks = upgrade_registered_webhooks()
             if n_hooks:
-                print(f"  Added webhook key to {n_hooks} Sonarr/Radarr webhook(s)")
+                optimizarr_logger.app_logger.info(f"  Added webhook key to {n_hooks} Sonarr/Radarr webhook(s)")
                 devlog('webhook_key_upgrade', n=n_hooks)
         except Exception as e:
-            print(f"  ⚠ Webhook key upgrade failed: {e}")
+            optimizarr_logger.app_logger.warning(f"  ⚠ Webhook key upgrade failed: {e}")
 
         # 1. Sweep leftover *_optimized.* temps (skips recent files, so an
         #    encode that a webhook kicked off meanwhile is never touched).
@@ -121,10 +122,10 @@ async def lifespan(app: FastAPI):
             from app.scanner import cleanup_orphaned_outputs
             n_temp = cleanup_orphaned_outputs()
             if n_temp:
-                print(f"  Cleaned {n_temp} orphaned _optimized temp file(s)")
+                optimizarr_logger.app_logger.info(f"  Cleaned {n_temp} orphaned _optimized temp file(s)")
                 devlog('temp_cleanup', n=n_temp)
         except Exception as e:
-            print(f"  ⚠ Temp cleanup failed: {e}")
+            optimizarr_logger.app_logger.warning(f"  ⚠ Temp cleanup failed: {e}")
 
         # 2. Start where you left off: resume encoding only if the user's last
         #    intent was "running" (default true), there's pending work, and the
@@ -137,11 +138,11 @@ async def lifespan(app: FastAPI):
             wants = db.get_setting('encoder_autostart', 'true') == 'true'
             if (wants and not encoder_pool.is_running and pending > 0
                     and schedule_manager.should_encode_now()):
-                print(f"▶ Resumed encoding on boot ({pending} pending)")
+                optimizarr_logger.app_logger.info(f"▶ Resumed encoding on boot ({pending} pending)")
                 devlog('autostart', pending=pending)
                 encoder_pool.process_queue()
         except Exception as e:
-            print(f"  ⚠ Boot resume failed: {e}")
+            optimizarr_logger.app_logger.warning(f"  ⚠ Boot resume failed: {e}")
 
     import threading as _chores_t
     _chores_t.Thread(target=_startup_chores, daemon=True, name="StartupChores").start()
@@ -150,15 +151,15 @@ async def lifespan(app: FastAPI):
     watches = db.get_folder_watches(enabled_only=True)
     if watches:
         folder_watcher.start()
-        print(f"✓ Folder watcher started ({len(watches)} active watches)")
+        optimizarr_logger.app_logger.info(f"✓ Folder watcher started ({len(watches)} active watches)")
     else:
-        print("  Folder watcher: no active watches configured")
+        optimizarr_logger.app_logger.info("  Folder watcher: no active watches configured")
 
     optimizarr_logger.log_startup(__version__, settings.host, settings.port)
 
-    print("=" * 60)
-    print(f"Server starting on http://{settings.host}:{settings.port}")
-    print("=" * 60)
+    optimizarr_logger.app_logger.info("=" * 60)
+    optimizarr_logger.app_logger.info(f"Server starting on http://{settings.host}:{settings.port}")
+    optimizarr_logger.app_logger.info("=" * 60)
 
     yield  # Application runs here
 
@@ -169,7 +170,7 @@ async def lifespan(app: FastAPI):
     from app.devlog import devlog as _devlog
     _devlog('stop')
     _log.log_shutdown()
-    print("\nShutting down Optimizarr...")
+    optimizarr_logger.app_logger.info("\nShutting down Optimizarr...")
     # Kill any active HandBrakeCLI process tree so it doesn't orphan.
     # mark_cancelled=False leaves the item recoverable on next startup.
     _ep.stop(mark_cancelled=False)
@@ -344,9 +345,9 @@ def _seed_default_profiles():
     for p in DEFAULT_PROFILES:
         try:
             db.create_profile(**p)
-            print(f"  ✓ Created profile: {p['name']}")
+            optimizarr_logger.app_logger.info(f"  ✓ Created profile: {p['name']}")
         except Exception as e:
-            print(f"  ⚠ Could not create profile '{p['name']}': {e}")
+            optimizarr_logger.app_logger.warning(f"  ⚠ Could not create profile '{p['name']}': {e}")
 
 
 # ============================================================

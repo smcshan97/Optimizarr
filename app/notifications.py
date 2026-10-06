@@ -15,6 +15,7 @@ except ImportError:
 
 from app.database import db
 from app.timeutil import utc_now
+from app.logger import optimizarr_logger
 
 
 def _format_size(bytes_val: int) -> str:
@@ -52,7 +53,7 @@ def _get_enabled_webhooks(event: str) -> List[Dict]:
 def _send_webhook(webhook: Dict, payload: Dict):
     """Send a payload to a webhook URL. Runs in a background thread."""
     if not requests:
-        print("⚠ 'requests' library not installed — cannot send notifications")
+        optimizarr_logger.app_logger.warning("⚠ 'requests' library not installed — cannot send notifications")
         return
 
     url = webhook.get('webhook_url', '')
@@ -68,9 +69,9 @@ def _send_webhook(webhook: Dict, payload: Dict):
 
         resp = requests.post(url, json=body, timeout=10)
         if resp.status_code >= 400:
-            print(f"⚠ Webhook '{webhook.get('name', '?')}' returned {resp.status_code}")
+            optimizarr_logger.app_logger.warning(f"⚠ Webhook '{webhook.get('name', '?')}' returned {resp.status_code}")
     except Exception as e:
-        print(f"⚠ Webhook '{webhook.get('name', '?')}' failed: {e}")
+        optimizarr_logger.app_logger.warning(f"⚠ Webhook '{webhook.get('name', '?')}' failed: {e}")
 
 
 def _format_discord(payload: Dict) -> Dict:

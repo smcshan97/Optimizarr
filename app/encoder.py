@@ -18,6 +18,7 @@ import platform
 from app.database import db
 from app.resources import resource_monitor, resource_throttler
 from app.timeutil import utc_now
+from app.logger import optimizarr_logger
 
 
 # HandBrakeCLI progress line, e.g.:
@@ -567,7 +568,7 @@ class EncodingJob:
     
     def _monitor_resources(self):
         """Background thread to monitor resources and pause/resume if needed."""
-        print("  Starting resource monitoring thread...")
+        optimizarr_logger.app_logger.info("  Starting resource monitoring thread...")
         
         while not self.stop_monitoring and self.process and self.process.poll() is None:
             time.sleep(5)  # Check every 5 seconds
@@ -591,10 +592,10 @@ class EncodingJob:
             should_pause, reason = resource_throttler.should_pause_encoding(**throttle_kwargs)
             
             if should_pause and not self.is_paused:
-                print(f"\n⏸ Pausing encoding: {reason}")
+                optimizarr_logger.app_logger.info(f"\n⏸ Pausing encoding: {reason}")
                 self.pause(reason)
             elif not should_pause and self.is_paused:
-                print(f"\n▶ Resuming encoding (resources available)")
+                optimizarr_logger.app_logger.info(f"\n▶ Resuming encoding (resources available)")
                 self.resume()
             
             # Update resource usage in database
@@ -956,7 +957,6 @@ class EncodingJob:
 
                     if progress_callback:
                         progress_callback(self.progress)
-                    print(f"  Progress: {self.progress:.1f}%", end='\r')
 
             return_code = self.process.wait()
 
@@ -1366,9 +1366,9 @@ class EncodingJob:
                 )
                 from app.devlog import devlog
                 devlog('throttle', a='pause', why=(reason or '')[:80])
-                print(f"⏸ Paused: {reason}")
+                optimizarr_logger.app_logger.info(f"⏸ Paused: {reason}")
             except Exception as e:
-                print(f"✗ Error pausing: {e}")
+                optimizarr_logger.app_logger.error(f"✗ Error pausing: {e}")
 
     def resume(self):
         """Resume a paused encoding job."""
@@ -1399,9 +1399,9 @@ class EncodingJob:
                 )
                 from app.devlog import devlog
                 devlog('throttle', a='resume')
-                print(f"▶ Resumed encoding")
+                optimizarr_logger.app_logger.info(f"▶ Resumed encoding")
             except Exception as e:
-                print(f"✗ Error resuming: {e}")
+                optimizarr_logger.app_logger.error(f"✗ Error resuming: {e}")
     
     def _cleanup_partial_output(self):
         """Remove the partial _optimized.* output file if it exists.
@@ -1423,15 +1423,15 @@ class EncodingJob:
             for attempt in range(5):
                 try:
                     temp_out.unlink()
-                    print(f"🗑 Removed partial output: {temp_out.name}")
+                    optimizarr_logger.app_logger.info(f"🗑 Removed partial output: {temp_out.name}")
                     return
                 except PermissionError:
                     time.sleep(0.5)
                 except FileNotFoundError:
                     return
-            print(f"⚠ Could not remove partial output (still locked): {temp_out.name}")
+            optimizarr_logger.app_logger.warning(f"⚠ Could not remove partial output (still locked): {temp_out.name}")
         except Exception as e:
-            print(f"⚠ Could not remove partial output: {e}")
+            optimizarr_logger.app_logger.warning(f"⚠ Could not remove partial output: {e}")
 
     def _handle_failure(self, error_message: str) -> str:
         """Apply retry logic on encode failure.
@@ -1560,7 +1560,7 @@ class EncodingJob:
                     self.process.wait(timeout=5)
                 except Exception:
                     pass
-                print(f"⚠ psutil kill failed, used terminate(): {e}")
+                optimizarr_logger.app_logger.warning(f"⚠ psutil kill failed, used terminate(): {e}")
 
         self._cleanup_partial_output()
 
@@ -1577,9 +1577,9 @@ class EncodingJob:
             )
             from app.devlog import devlog
             devlog('enc_cancel', id=self.queue_item_id)
-            print("⏹ Encoding cancelled")
+            optimizarr_logger.app_logger.info("⏹ Encoding cancelled")
         else:
-            print("⏹ Encoding interrupted (will resume on next start)")
+            optimizarr_logger.app_logger.info("⏹ Encoding interrupted (will resume on next start)")
 
 
 class EncoderPool:
@@ -1609,23 +1609,23 @@ class EncoderPool:
         # multi-loop bug regardless of how many things try to start us).
         with self._lifecycle_lock:
             if self.is_running:
-                print("Encoder already running — ignoring duplicate start")
+                optimizarr_logger.app_logger.info("Encoder already running — ignoring duplicate start")
                 return
             self.is_running = True
 
-        print("Starting encoder pool...")
+        optimizarr_logger.app_logger.info("Starting encoder pool...")
         try:
             max_concurrent = self._load_max_concurrent()
             if max_concurrent <= 1:
                 self._run_serial()
             else:
-                print(f"Encoder pool: up to {max_concurrent} concurrent jobs (temperature-gated)")
+                optimizarr_logger.app_logger.info(f"Encoder pool: up to {max_concurrent} concurrent jobs (temperature-gated)")
                 self._run_parallel(max_concurrent)
         finally:
             # Always release the slot, even on an unexpected error, so the
             # encoder can be started again (and isn't wedged "running").
             self.is_running = False
-            print("Encoder pool stopped")
+            optimizarr_logger.app_logger.info("Encoder pool stopped")
             # Encoder is idle now — sweep any leftover _optimized temp files
             # and stale upscale work directories from crashed/killed jobs.
             try:
@@ -1660,7 +1660,7 @@ class EncoderPool:
                         db.update_queue_item(item['id'], status='failed',
                                              error_message='Profile not found')
                 elif db.count_pending() == 0:
-                    print("✓ Queue is empty")
+                    optimizarr_logger.app_logger.info("✓ Queue is empty")
                     try:
                         from app.notifications import notify_queue_empty
                         notify_queue_empty()
@@ -1706,7 +1706,7 @@ class EncoderPool:
 
             # Termination: nothing running and nothing left to run
             if not self.active_jobs and db.count_pending() == 0:
-                print("✓ Queue is empty")
+                optimizarr_logger.app_logger.info("✓ Queue is empty")
                 try:
                     from app.notifications import notify_queue_empty
                     notify_queue_empty()
@@ -1727,7 +1727,7 @@ class EncoderPool:
         try:
             job.start()
         except Exception as e:
-            print(f"⚠ Encoding job error: {e}")
+            optimizarr_logger.app_logger.error(f"⚠ Encoding job error: {e}")
         finally:
             if job in self.active_jobs:
                 try:
@@ -1806,7 +1806,7 @@ class EncoderPool:
                 'cpu_usage_threshold': float(settings.get('resource_cpu_usage_threshold', '95.0')),
             }
         except Exception as e:
-            print(f"⚠️ Error loading resource settings: {e}")
+            optimizarr_logger.app_logger.error(f"⚠️ Error loading resource settings: {e}")
             # Return defaults
             return {
                 'enable_throttling': True,

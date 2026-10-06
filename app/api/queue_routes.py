@@ -201,7 +201,7 @@ def trigger_scan(
             added = scanner.scan_root(root_id)
         else:
             added = scanner.scan_all_roots()
-        print(f"Scan completed: {added} files added to queue")
+        optimizarr_logger.app_logger.info(f"Scan completed: {added} files added to queue")
     
     background_tasks.add_task(run_scan)
     
