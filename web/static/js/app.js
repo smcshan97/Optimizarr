@@ -3300,8 +3300,9 @@ async function loadUpscalers() {
 function renderUpscalerCards(info) {
     const container = document.getElementById('upscalerStatus');
     if (!container) return;
-    const defs = info.definitions || {};
-    const det = (info.detection && info.detection.details) ? info.detection.details : {};
+    const engines = info.engines || {};
+    const defs = { ...engines, ...(info.definitions || {}) };
+    const det = { ...((info.detection && info.detection.details) || {}), ...engines };
 
     container.innerHTML = Object.entries(defs).map(([key, up]) => {
         const d = det[key] || {};
@@ -3309,13 +3310,14 @@ function renderUpscalerCards(info) {
         const dl = d.download_state || {};
         const dlStatus = dl.status || 'idle';
         const dlProgress = dl.progress || 0;
+        const isEngine = key in engines;
 
         let actionBtn = '';
         if (dlStatus === 'downloading') {
             actionBtn = `
                 <div class="mt-2">
                     <div class="flex justify-between text-xs text-gray-400 mb-1">
-                        <span>${dl.message || 'Downloading…'}</span>
+                        <span>${_esc(dl.message || 'Downloading…')}</span>
                         <span>${dlProgress}%</span>
                     </div>
                     <div class="bg-gray-600 rounded-full h-1.5">
@@ -3325,15 +3327,15 @@ function renderUpscalerCards(info) {
         } else if (dlStatus === 'installed' || installed) {
             actionBtn = `
                 <div class="mt-2 flex items-center gap-2">
-                    <span class="text-xs text-green-400">✓ ${d.version || 'Installed'}</span>
-                    ${d.path ? `<span class="text-xs text-gray-500 truncate max-w-32" title="${d.path}">${d.path}</span>` : ''}
+                    <span class="text-xs text-green-400">✓ ${_esc(d.version || 'Installed')}</span>
+                    ${d.path ? `<span class="text-xs text-gray-500 truncate max-w-32" title="${_esc(d.path)}">${_esc(d.path)}</span>` : ''}
                     <button onclick="startUpscalerDownload('${key}')" 
                         class="text-xs text-blue-400 hover:text-blue-300 ml-auto">Update</button>
                 </div>`;
         } else if (dlStatus === 'error') {
             actionBtn = `
                 <div class="mt-2">
-                    <p class="text-xs text-red-400">${dl.error || 'Download failed'}</p>
+                    <p class="text-xs text-red-400">${_esc(dl.error || 'Download failed')}</p>
                     <button onclick="startUpscalerDownload('${key}')"
                         class="mt-1 btn btn-primary btn-xs">Retry</button>
                 </div>`;
@@ -3365,8 +3367,23 @@ function renderUpscalerCards(info) {
                 <p class="text-xs text-gray-400 mt-1">${up.description}</p>
                 <p class="text-xs text-gray-500">Best for: ${up.best_for}</p>
                 ${actionBtn}
+                ${isEngine && installed ? `
+                <label class="mt-2 flex items-center gap-2 text-xs text-gray-300">
+                    <input type="checkbox" ${info.engine_pref !== 'frames' ? 'checked' : ''}
+                        onchange="setUpscaleEngine(this.checked ? 'auto' : 'frames')">
+                    Use for Real-ESRGAN / Real-CUGAN jobs
+                </label>` : ''}
             </div>`;
     }).join('');
+}
+
+async function setUpscaleEngine(engine) {
+    const res = await apiRequest('/upscalers/engine', {
+        method: 'POST', body: JSON.stringify({ engine }),
+    });
+    if (res) showMessage(engine === 'auto'
+        ? 'Video2X will be used when available'
+        : 'Upscales will use the frame-extraction pipeline', 'success');
 }
 
 async function startUpscalerDownload(key) {

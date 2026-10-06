@@ -50,11 +50,23 @@ def start_upscaler_download(
     current_user: dict = Depends(get_current_admin_user)
 ):
     """Start downloading an AI upscaler binary (admin only)."""
-    from app.upscaler import UPSCALERS, download_upscaler
-    if key not in UPSCALERS:
+    from app.upscaler import download_upscaler, is_installable, _spec
+    if not is_installable(key):
         raise HTTPException(status_code=404, detail=f"Unknown upscaler: {key}")
     state = download_upscaler(key)
-    return {"message": f"Download started for {UPSCALERS[key]['name']}", "state": state}
+    return {"message": f"Download started for {_spec(key)['name']}", "state": state}
+
+
+@router.post("/upscalers/engine", response_model=MessageResponse)
+def set_upscale_engine(data: dict, current_user: dict = Depends(get_current_admin_user)):
+    """Choose the upscale engine: 'auto' (Video2X when installed) or 'frames'
+    (always the PNG frame pipeline)."""
+    from app.database import db
+    engine = (data or {}).get("engine")
+    if engine not in ("auto", "frames"):
+        raise HTTPException(status_code=400, detail="engine must be 'auto' or 'frames'")
+    db.set_setting("upscale_engine", engine)
+    return MessageResponse(message=f"Upscale engine set to {engine}")
 
 
 @router.get("/upscalers/{key}/download/status")
@@ -63,8 +75,8 @@ def get_upscaler_download_status(
     current_user: dict = Depends(get_current_user)
 ):
     """Get download progress for an upscaler."""
-    from app.upscaler import UPSCALERS, get_download_status
-    if key not in UPSCALERS:
+    from app.upscaler import get_download_status, is_installable
+    if not is_installable(key):
         raise HTTPException(status_code=404, detail=f"Unknown upscaler: {key}")
     return get_download_status(key)
 

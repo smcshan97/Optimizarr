@@ -2625,6 +2625,69 @@ class TestDestinationCollision:
 # Upscale cost model — AI time scales with output pixels, not runtime
 # ---------------------------------------------------------------------------
 
+class TestVideo2X:
+    def test_parse_progress_takes_last_record(self):
+        from app.video2x import parse_progress
+        text = ("\rframe=10/100 (10.00%); fps=5.0; elapsed=00:00:02; remaining=00:00:18\x1b[K"
+                "\rframe=25/100 (25.00%); fps=6.2; elapsed=00:00:04; remaining=00:01:05\x1b[K")
+        rec = parse_progress(text)
+        assert rec == {'frame': 25, 'total': 100, 'percent': 25.0, 'fps': 6.2, 'remaining': 65}
+        assert parse_progress('no progress here') is None
+
+    def test_model_mapping(self):
+        from app.video2x import video2x_model
+        assert video2x_model('realesrgan', 'realesrgan-x4plus') == (
+            'realesrgan', '--realesrgan-model', 'realesrgan-plus')
+        assert video2x_model('realcugan', 'models-se')[2] == 'models-se'
+        assert video2x_model('waifu2x', 'models-cunet') is None
+
+    def test_command_shape(self):
+        from app.video2x import build_command
+        cmd = build_command('v2x', 'in.mkv', 'out.mkv', 'realesrgan', 'realesr-animevideov3', 2)
+        assert cmd[:5] == ['v2x', '-i', 'in.mkv', '-o', 'out.mkv']
+        assert cmd[cmd.index('-p') + 1] == 'realesrgan' and cmd[cmd.index('-s') + 1] == '2'
+        assert cmd[cmd.index('-c') + 1] == 'libx264'
+
+    def test_pipeline_prefers_video2x_and_reports_target_size(self, monkeypatch, tmp_path):
+        import app.upscaler as up
+        import app.video2x as v2x
+        src = tmp_path / 'in.mkv'
+        src.write_bytes(b'x')
+        monkeypatch.setattr(up, '_find_binary', lambda key: 'video2x.exe' if key == 'video2x' else 'ncnn.exe')
+        monkeypatch.setattr(up, '_get_video_info', lambda p: {
+            'width': 640, 'height': 360, 'fps': 24.0, 'duration': 10, 'vfr': False, 'hdr': False})
+        monkeypatch.setattr(up, '_check_disk_space', lambda *a: True)
+        calls = {}
+
+        def fake_run(binary, inp, out, key, model, scale, progress, register):
+            calls['scale'] = scale
+            progress(50.0, 10)
+            open(out, 'wb').write(b'video')
+            return True
+        monkeypatch.setattr(v2x, 'run_video2x', fake_run)
+        info = {}
+        out = up.run_upscale_pipeline(str(src), 'realesrgan', 'realesrgan-x4plus', 2,
+                                      result_info=info)
+        try:
+            assert out and out.endswith('_upscaled_v2x.mkv')
+            assert calls['scale'] == 4                   # x4plus is 4x-only
+            assert info['target_size'] == (1280, 720)    # HandBrake scales to x2
+        finally:
+            up.cleanup_upscale_workdir(out)
+
+    def test_build_command_size_override(self, fresh_db, monkeypatch):
+        import app.encoder as enc
+        monkeypatch.setattr(enc, 'db', fresh_db)
+        monkeypatch.setattr(enc, 'detect_hardware_acceleration', lambda: {'encoder_names': []})
+        qid = fresh_db.add_to_queue(file_path='/x/in.mkv', root_id=1, profile_id=1,
+                                    current_specs={'bit_depth': 8}, target_specs={})
+        job = enc.EncodingJob(qid, {'name': 'p', 'codec': 'av1', 'encoder': 'svt_av1',
+                                    'quality': 30, 'container': 'mkv'})
+        cmd = job.build_command(input_override='/tmp/up.mkv', size_override=(1280, 720))
+        assert cmd[cmd.index('--width') + 1] == '1280'
+        assert cmd[cmd.index('--height') + 1] == '720'
+
+
 class TestUpscaleModelScale:
     def test_x4_only_models_run_at_4(self):
         from app.upscaler import model_scale_for

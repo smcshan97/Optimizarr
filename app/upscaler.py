@@ -93,6 +93,36 @@ UPSCALERS = {
     },
 }
 
+# Processing engines — installed/updated like upscalers but not selectable as
+# a profile's upscaler. Video2X runs the Real-ESRGAN/Real-CUGAN models above
+# as a streaming pipeline (see app.video2x).
+ENGINES = {
+    "video2x": {
+        "name": "Video2X (streaming engine)",
+        "description": ("Runs Real-ESRGAN / Real-CUGAN on the GPU straight from the "
+                        "video — no frame extraction, no hundreds of GB of temp PNGs. "
+                        "Used automatically when installed."),
+        "icon": "🚀",
+        "binary_linux": "Video2X-x86_64.AppImage",
+        "binary_win": "video2x.exe",
+        "github_owner": "k4yt3x",
+        "github_repo": "video2x",
+        "asset_pattern_win": r"^video2x-windows-amd64\.zip$",
+        "asset_pattern_linux": r"^Video2X-x86_64\.AppImage$",
+        "best_for": "Faster upscaling with little temp disk",
+        "url": "https://github.com/k4yt3x/video2x/releases",
+    },
+}
+
+
+def _spec(key: str) -> Dict:
+    return UPSCALERS.get(key) or ENGINES[key]
+
+
+def is_installable(key: str) -> bool:
+    return key in UPSCALERS or key in ENGINES
+
+
 # ---------------------------------------------------------------------------
 # In-memory download state (key → status dict)
 # ---------------------------------------------------------------------------
@@ -114,7 +144,7 @@ def _upscaler_install_dir() -> Path:
 
 
 def _binary_name(key: str) -> str:
-    upscaler = UPSCALERS[key]
+    upscaler = _spec(key)
     is_win = platform.system() == "Windows"
     return upscaler["binary_win"] if is_win else upscaler["binary_linux"]
 
@@ -249,7 +279,7 @@ def download_upscaler(key: str) -> Dict:
     Start downloading the upscaler binary in a background thread.
     Returns immediately with the initial state dict.
     """
-    if key not in UPSCALERS:
+    if not is_installable(key):
         return {"error": f"Unknown upscaler: {key}"}
 
     # If already downloading, return current state
@@ -271,7 +301,7 @@ def download_upscaler(key: str) -> Dict:
 
 
 def _download_worker(key: str):
-    upscaler = UPSCALERS[key]
+    upscaler = _spec(key)
     state = _download_state[key]
     is_win = platform.system() == "Windows"
     install_dir = _upscaler_install_dir()
@@ -333,7 +363,12 @@ def _download_worker(key: str):
         #    that immediately failed with "models not found".
         binary_name = _binary_name(key)
         extract_dir = install_dir / key
-        if asset_name.endswith(".zip"):
+        if asset_name.endswith(".AppImage"):
+            # Single self-contained executable — nothing to extract
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            import shutil as _sh
+            _sh.move(str(archive_path), str(extract_dir / binary_name))
+        elif asset_name.endswith(".zip"):
             with zipfile.ZipFile(archive_path, "r") as zf:
                 zf.extractall(extract_dir)
         elif asset_name.endswith((".tar.gz", ".tgz")):
@@ -363,7 +398,8 @@ def _download_worker(key: str):
 
         # 5. Clean up archive
         try:
-            archive_path.unlink()
+            if archive_path.exists():
+                archive_path.unlink()
         except Exception:
             pass
 
@@ -417,6 +453,17 @@ def detect_upscalers() -> Dict:
                 "download_url": upscaler["url"],
                 "download_state": _download_state.get(key),
             }
+    results["engines"] = {}
+    for key, engine in ENGINES.items():
+        found_path = _find_binary(key)
+        results["engines"][key] = {
+            "name": engine["name"],
+            "installed": bool(found_path),
+            "path": found_path,
+            "version": _get_binary_version(found_path) if found_path else None,
+            "download_url": engine["url"],
+            "download_state": _download_state.get(key),
+        }
     return results
 
 
@@ -426,7 +473,7 @@ def check_for_updates() -> Dict:
     Returns a dict of key → {current, latest, update_available}.
     """
     results = {}
-    for key, upscaler in UPSCALERS.items():
+    for key, upscaler in {**UPSCALERS, **ENGINES}.items():
         found = _find_binary(key)
         if not found:
             continue
@@ -452,7 +499,22 @@ def get_download_status(key: str) -> Dict:
 
 def get_upscaler_info() -> Dict:
     """Get full upscaler information for the UI."""
+    detection = detect_upscalers()
+    try:
+        from app.database import db as _db
+        engine_pref = _db.get_setting("upscale_engine", "auto")
+    except Exception:
+        engine_pref = "auto"
     return {
+        "engine_pref": engine_pref,
+        "engines": {k: {
+            "name": v["name"],
+            "description": v["description"],
+            "icon": v["icon"],
+            "best_for": v["best_for"],
+            "download_url": v["url"],
+            **detection["engines"].get(k, {}),
+        } for k, v in ENGINES.items()},
         "definitions": {k: {
             "name": v["name"],
             "description": v["description"],
@@ -464,10 +526,11 @@ def get_upscaler_info() -> Dict:
             "default_scale": v["default_scale"],
             "download_url": v["url"],
         } for k, v in UPSCALERS.items()},
-        "detection": detect_upscalers(),
+        "detection": detection,
         "workflow_note": (
-            "AI upscaling extracts frames, upscales each with AI, then reassembles "
-            "before HandBrake encoding. This is VERY slow (~2-5 min/frame) and GPU-intensive."
+            "AI upscaling runs before HandBrake encoding and is slow and GPU-intensive. "
+            "With Video2X installed, Real-ESRGAN/Real-CUGAN stream straight from the "
+            "video; otherwise every frame is extracted to temp PNGs first."
         ),
     }
 
@@ -622,6 +685,7 @@ def run_upscale_pipeline(
     factor: int,
     progress_callback=None,
     register_process=None,
+    result_info: Optional[Dict] = None,
 ) -> Optional[str]:
     """
     Run the full AI upscale pipeline on *input_path*.
@@ -745,6 +809,22 @@ def run_upscale_pipeline(
         frame_count_approx, _format_size(required_bytes),
     )
 
+    # Streaming engine? Needs only its compressed output on disk (~0.08
+    # bytes/pixel at CRF 12), not two full sets of PNG frames.
+    v2x_binary = None
+    from app.video2x import video2x_model
+    if video2x_model(upscaler_key, model):
+        try:
+            from app.database import db as _db
+            engine_pref = _db.get_setting("upscale_engine", "auto")
+        except Exception:
+            engine_pref = "auto"
+        if engine_pref != "frames":
+            v2x_binary = _find_binary("video2x")
+    if v2x_binary:
+        required_bytes = int(frame_count_approx * src_w * model_scale
+                             * src_h * model_scale * 0.08) + (500 * 1024 * 1024)
+
     # ── Stage 2: disk space guard ───────────────────────────────────────────
     tmp_base = Path(tempfile.gettempdir())
     if not _check_disk_space(str(tmp_base), required_bytes):
@@ -773,6 +853,31 @@ def run_upscale_pipeline(
     frames_out.mkdir(parents=True, exist_ok=True)
     output_path = work_dir / f"{input_p.stem}_upscaled.mkv"
     pipeline_succeeded = False
+
+    if v2x_binary:
+        from app.video2x import run_video2x
+        optimizarr_logger.app_logger.info(
+            "Upscaling %s with Video2X (%s x%d, streaming)…",
+            input_p.name, model, model_scale)
+        v2x_out = work_dir / f"{input_p.stem}_upscaled_v2x.mkv"
+        ok = run_video2x(
+            v2x_binary, input_path, str(v2x_out), upscaler_key, model, model_scale,
+            progress=lambda pct, eta: _progress(2 + pct * 0.97, eta),
+            register=_register,
+        )
+        if ok:
+            # Video2X can't resize after the model; when the model's native
+            # scale overshoots the requested factor, HandBrake scales down.
+            if result_info is not None and model_scale != factor:
+                result_info["target_size"] = (out_w, out_h)
+            _progress(100)
+            return str(v2x_out)
+        try:
+            v2x_out.unlink()
+        except OSError:
+            pass
+        optimizarr_logger.app_logger.warning(
+            "Video2X failed — falling back to the frame-extraction pipeline")
 
     try:
         # ── Stage 3: extract frames (skipped when a completed extraction

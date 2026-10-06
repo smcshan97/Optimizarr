@@ -215,12 +215,15 @@ class EncodingJob:
         if not self.queue_item:
             raise ValueError(f"Queue item {queue_item_id} not found")
     
-    def build_command(self, input_override: str = None) -> list:
+    def build_command(self, input_override: str = None, size_override=None) -> list:
         """Build HandBrakeCLI command from profile settings.
         
         Args:
             input_override: If provided, use this path as the input instead of
                             the queue item's file_path (used for upscaled temp files).
+            size_override: (width, height) to scale to when the profile sets no
+                           resolution — an upscale whose model overshot the
+                           requested factor is brought down here.
         """
         input_file = input_override if input_override else self.queue_item['file_path']
         original_file = self.queue_item['file_path']
@@ -273,6 +276,9 @@ class EncodingJob:
         if self.profile.get('resolution'):
             width, height = self.profile['resolution'].split('x')
             cmd.extend(['--width', width, '--height', height])
+        elif size_override:
+            cmd.extend(['--width', str(size_override[0]),
+                        '--height', str(size_override[1])])
         
         # Framerate
         if self.profile.get('framerate'):
@@ -700,6 +706,7 @@ class EncodingJob:
         encode_input   = original_input       # may be overridden below
         stereo_temp    = None                 # path to clean up after encode
         upscale_temp   = None                 # path to clean up after encode
+        upscale_info: Dict = {}               # filled by the upscale pipeline
 
         # ── Parse plans ──────────────────────────────────────────────────────
         stereo_plan_raw = self.queue_item.get('stereo_plan')
@@ -844,6 +851,7 @@ class EncodingJob:
                 factor=factor,
                 progress_callback=_upscale_progress,
                 register_process=_register_pipeline_proc,
+                result_info=upscale_info,
             )
 
             if self._manually_stopped:
@@ -872,7 +880,8 @@ class EncodingJob:
                 )
 
         # ── Build HandBrake command (encode_input may be stereo/upscaled) ────
-        cmd = self.build_command(input_override=encode_input)
+        cmd = self.build_command(input_override=encode_input,
+                                 size_override=upscale_info.get('target_size'))
         optimizarr_logger.log_handbrake_start(original_input, cmd)
 
         try:
