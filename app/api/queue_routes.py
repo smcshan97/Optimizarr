@@ -24,7 +24,10 @@ async def encode_progress_events(token: Optional[str] = None):
     EventSource cannot set an Authorization header, so the JWT is passed as
     a ``token`` query parameter and validated the same way the header is.
     Each event is JSON: {"processing": [{id, progress, fps, eta_seconds,
-    file}, ...]}. The stream ends only when the client disconnects.
+    phase, phase_progress, phase_eta_seconds, file}, ...]}. ``phase`` is one
+    of stereo/upscale/encode/finalize so the UI can colour the bar and label
+    the ETA for the phase that is actually running. The stream ends only when
+    the client disconnects.
     """
     from app.auth import auth as _auth
     payload = _auth.decode_token(token) if token else None
@@ -42,6 +45,9 @@ async def encode_progress_events(token: Optional[str] = None):
                 'progress': round(r.get('progress') or 0, 1),
                 'fps': r.get('current_fps') or 0,
                 'eta_seconds': r.get('eta_seconds') or 0,
+                'phase': r.get('phase') or 'encode',
+                'phase_progress': round(r.get('phase_progress') or 0, 1),
+                'phase_eta_seconds': r.get('phase_eta_seconds') or 0,
                 'file': _Path(r['file_path']).name,
             } for r in rows]
             yield f"data: {_json.dumps({'processing': data})}\n\n"
@@ -108,23 +114,19 @@ def _attach_eta(envelope: dict):
     ``pending_eta_seconds`` totals ALL pending items (not just this page),
     with ``pending_eta_unknown`` counting items lacking duration data.
     """
-    from app.scanner import estimate_encode_seconds
+    from app.scanner import estimate_item_seconds
 
     speed_stats = db.get_encode_speed_stats()
 
     for item in envelope.get('items', []):
         if item.get('status') not in ('pending', 'paused', 'processing'):
             continue
-        # Processing rows carry a REAL ETA parsed live from HandBrake output
-        # (Patch 33) — never overwrite it with a history-based estimate.
+        # Processing rows carry a REAL ETA measured live from the running
+        # phase (HandBrake output, or the upscaler's frame counter) — never
+        # overwrite that with a history-based estimate.
         if item.get('status') == 'processing' and (item.get('eta_seconds') or 0) > 0:
             continue
-        target = item.get('target_specs') or {}
-        est = estimate_encode_seconds(
-            item.get('duration_seconds') or 0,
-            target.get('codec') if isinstance(target, dict) else None,
-            speed_stats,
-        )
+        est = estimate_item_seconds(item, speed_stats)
         if est is None:
             continue
         if item.get('status') == 'processing':
@@ -136,6 +138,24 @@ def _attach_eta(envelope: dict):
     envelope['pending_eta_unknown'] = unknown
 
 
+def _plan_enabled(raw) -> bool:
+    """True when an upscale/stereo plan (JSON string or dict) has enabled=true."""
+    if not raw:
+        return False
+    if isinstance(raw, str):
+        try:
+            raw = _json.loads(raw)
+        except (ValueError, TypeError):
+            return False
+    return bool(isinstance(raw, dict) and raw.get('enabled'))
+
+
+def _item_preprocessed(item: dict) -> bool:
+    """True when a queue item has an AI upscale or stereo phase queued —
+    its encode time is learned/estimated from the preprocessed ratio group."""
+    return _plan_enabled(item.get('upscale_plan')) or _plan_enabled(item.get('stereo_plan'))
+
+
 def compute_pending_eta(speed_stats: Optional[dict] = None) -> tuple:
     """Total estimated encode seconds across ALL pending items.
 
@@ -143,17 +163,25 @@ def compute_pending_eta(speed_stats: Optional[dict] = None) -> tuple:
     of pending items lacking duration data (excluded from the total).
     Shared by the queue envelope and the /health endpoint.
     """
-    from app.scanner import estimate_encode_seconds
+    from app.scanner import estimate_encode_seconds, estimate_item_seconds
 
     if speed_stats is None:
         speed_stats = db.get_encode_speed_stats()
     total_eta = 0.0
     unknown = 0
+    # Plain encodes aggregate cleanly by codec — one SQL group per codec.
     for group in db.get_pending_duration_by_codec():
         unknown += group['unknown_count'] or 0
+        if group.get('preprocessed'):
+            continue
         est = estimate_encode_seconds(
-            group['total_duration'], group['codec'] or None, speed_stats
-        )
+            group['total_duration'], group['codec'] or None, speed_stats)
+        if est:
+            total_eta += est
+    # Upscale/stereo items cost by output pixels, not duration, so they can't
+    # be summed as a group. There are rarely many of them.
+    for item in db.get_pending_preprocessed_items():
+        est = estimate_item_seconds(item, speed_stats)
         if est:
             total_eta += est
     return round(total_eta), unknown
@@ -374,30 +402,26 @@ async def prioritize_queue(
     elif sort_by == "filename":
         items.sort(key=lambda i: _Path(i.get("file_path", "")).name.lower(), reverse=reverse)
     elif sort_by in ("fastest_first", "slowest_first"):
-        from app.scanner import estimate_encode_seconds
+        from app.scanner import estimate_item_seconds
         speed_stats = db.get_encode_speed_stats()
         slowest = (sort_by == "slowest_first")
 
-        def _codec(item):
-            t = item.get("target_specs") or {}
-            return t.get("codec") if isinstance(t, dict) else None
-
         # Calibrate seconds-per-byte from items that HAVE a duration, then use
         # it to estimate a cost for items that don't — so unknowns order by
-        # size instead of all piling at the end.
+        # size instead of all piling at the end. Only plain encodes calibrate
+        # it: an upscale's cost has nothing to do with its source file size,
+        # and letting one in would skew every unknown item's estimate.
         spb_samples = []
         for it in items:
-            dur = it.get("duration_seconds") or 0
             size = it.get("file_size_bytes") or 0
-            if dur > 0 and size > 0:
-                est = estimate_encode_seconds(dur, _codec(it), speed_stats)
+            if size > 0 and not _item_preprocessed(it):
+                est = estimate_item_seconds(it, speed_stats)
                 if est:
                     spb_samples.append(est / size)
         avg_spb = (sum(spb_samples) / len(spb_samples)) if spb_samples else None
 
         def _cost(item):
-            est = estimate_encode_seconds(
-                item.get("duration_seconds") or 0, _codec(item), speed_stats)
+            est = estimate_item_seconds(item, speed_stats)
             if est is not None:
                 return est
             size = item.get("file_size_bytes") or 0
@@ -552,6 +576,82 @@ async def recheck_item_permissions(
     )
 
 
+def _recheck_quarantined_item(item: dict) -> str:
+    """Re-probe one quarantined queue item.
+
+    Returns 'pending' (file is a valid video now — re-queued), 'removed'
+    (file no longer exists — row deleted), or 'quarantined' (still broken).
+    """
+    from app.encoder import preflight_source_check
+    problem = preflight_source_check(item['file_path'])
+    if problem is None:
+        # Re-probe specs too — the quarantined row was queued before the
+        # file was complete, so codec/resolution/duration are likely stale.
+        specs = scanner.analyze_file(item['file_path']) or {}
+        db.update_queue_item(
+            item['id'],
+            status='pending',
+            error_message=None,
+            retry_count=0,
+            retry_after=None,
+            current_specs=_json.dumps(specs),
+            duration_seconds=specs.get('duration', 0),
+        )
+        return 'pending'
+    if problem == 'missing':
+        db.delete_queue_item(item['id'])
+        return 'removed'
+    db.update_queue_item(item['id'], error_message=problem)
+    return 'quarantined'
+
+
+@router.post("/queue/recheck-quarantined", response_model=MessageResponse)
+async def recheck_all_quarantined(current_user: dict = Depends(get_current_user)):
+    """Re-probe every quarantined item.
+
+    Valid videos (e.g. a download that has since completed) go back to
+    pending; vanished files are removed; still-broken files stay quarantined.
+    """
+    items = db.get_queue_items(status='quarantined')
+    if not items:
+        return MessageResponse(message="No quarantined items to check")
+    results = {'pending': 0, 'removed': 0, 'quarantined': 0}
+    for item in items:
+        outcome = await asyncio.to_thread(_recheck_quarantined_item, item)
+        results[outcome] += 1
+    return MessageResponse(
+        message=f"Re-checked {len(items)} item(s): {results['pending']} now pending, "
+                f"{results['removed']} removed (file gone), "
+                f"{results['quarantined']} still quarantined"
+    )
+
+
+@router.post("/queue/{item_id}/recheck-quarantined", response_model=MessageResponse)
+async def recheck_item_quarantined(
+    item_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """Re-probe a single quarantined item."""
+    item = db.get_queue_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    if item['status'] != 'quarantined':
+        return MessageResponse(
+            message=f"Item is '{item['status']}' — nothing to re-check",
+            success=False
+        )
+    outcome = await asyncio.to_thread(_recheck_quarantined_item, item)
+    if outcome == 'pending':
+        return MessageResponse(message="File is a valid video now — re-queued as pending")
+    if outcome == 'removed':
+        return MessageResponse(message="File no longer exists — removed from queue")
+    refreshed = db.get_queue_item(item_id) or {}
+    return MessageResponse(
+        message=f"Still quarantined: {refreshed.get('error_message') or 'not a readable video'}",
+        success=False
+    )
+
+
 @router.post("/queue/cleanup-temp", response_model=MessageResponse)
 async def cleanup_temp_outputs(current_user: dict = Depends(get_current_admin_user)):
     """Delete leftover *_optimized.* temp files (admin only).
@@ -576,9 +676,38 @@ async def retry_all_failed(current_user: dict = Depends(get_current_user)):
     for it in failed:
         db.update_queue_item(
             it['id'], status='pending', retry_count=0,
-            progress=0.0, error_message=None, retry_after=None
+            progress=0.0, phase=None, phase_progress=0.0, phase_eta_seconds=0,
+            current_fps=0, eta_seconds=0,
+            error_message=None, retry_after=None
         )
     return MessageResponse(message=f"Re-queued {len(failed)} failed item(s)")
+
+
+@router.post("/queue/{item_id}/reveal")
+async def reveal_queue_item(item_id: int,
+                            current_user: dict = Depends(get_current_user)):
+    """Open the host's file manager on this item's folder, file selected.
+
+    The path is looked up from the queue row — never taken from the request —
+    so there is no path for a caller to point somewhere else.
+
+    Returns {success, path, folder, message}. ``success`` false with a path
+    still present means the host could not open a window (headless box, or
+    you are browsing from another device); the UI copies the path instead.
+    """
+    item = db.get_queue_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Queue item not found")
+
+    from app.api.filesystem import reveal_path
+    path = item['file_path']
+    result = await asyncio.to_thread(reveal_path, path)
+    return {
+        "success": result['ok'],
+        "path": path,
+        "folder": result['folder'],
+        "message": result['detail'],
+    }
 
 
 @router.post("/queue/{item_id}/retry", response_model=MessageResponse)
@@ -594,7 +723,9 @@ async def retry_queue_item(item_id: int, current_user: dict = Depends(get_curren
         )
     db.update_queue_item(
         item_id, status='pending', retry_count=0,
-        progress=0.0, error_message=None, retry_after=None
+        progress=0.0, phase=None, phase_progress=0.0, phase_eta_seconds=0,
+        current_fps=0, eta_seconds=0,
+        error_message=None, retry_after=None
     )
     return MessageResponse(message="Item re-queued")
 

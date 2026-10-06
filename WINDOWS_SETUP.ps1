@@ -55,7 +55,7 @@ Write-Host ""
 Write-Host "Next steps:" -ForegroundColor Yellow
 Write-Host "  1. Install dependencies: pip install apscheduler" -ForegroundColor White
 Write-Host "  2. Start server: python -m app.main" -ForegroundColor White
-Write-Host "  3. Open browser: http://localhost:5000" -ForegroundColor White
+Write-Host "  3. Open browser: http://localhost:5757" -ForegroundColor White
 Write-Host "  4. Login with: admin / admin" -ForegroundColor White
 Write-Host ""
 Write-Host "Press any key to continue..." -ForegroundColor Gray

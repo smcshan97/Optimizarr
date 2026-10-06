@@ -100,6 +100,7 @@ function switchTab(tabName) {
     if (tabName === 'schedule') loadSchedule();
     if (tabName === 'logs') loadLogs();
     if (tabName === 'statistics') loadStatistics();
+    if (tabName === 'duplicates') loadDuplicates();
 }
 
 // Mobile sidebar toggle
@@ -486,6 +487,47 @@ async function bulkClearCompleted() {
 }
 
 // Main display function
+// ── Pipeline phases ────────────────────────────────────────────────────────
+// A job runs stereo → upscale → encode → finalize. Each gets its own colour
+// so a multi-hour AI phase is never mistaken for a stalled HandBrake encode,
+// which is exactly what one blue bar for everything used to look like.
+const PHASE_CONFIG = {
+    'stereo':   { label: '3D conversion', emoji: '🎥', color: 'text-purple-300', barColor: 'bg-purple-500' },
+    'upscale':  { label: 'AI upscale',    emoji: '🔼', color: 'text-cyan-300',   barColor: 'bg-cyan-500'   },
+    'encode':   { label: 'Encoding',      emoji: '⚙️', color: 'text-blue-400',   barColor: 'bg-blue-500'   },
+    // Finalizing verifies and moves a multi-GB file: real work, no progress
+    // to report, so the bar pulses rather than sitting frozen at 100%.
+    'finalize': { label: 'Finalizing',    emoji: '💾', color: 'text-emerald-300', barColor: 'bg-emerald-500', indeterminate: true },
+};
+
+function phaseConfig(phase) {
+    return PHASE_CONFIG[phase] || PHASE_CONFIG['encode'];
+}
+
+// Sub-label under the bars: what phase is running, how fast, how much longer.
+function phaseLine(phase, d) {
+    const ph = phaseConfig(phase);
+    const bits = [`${ph.emoji} ${ph.label}`];
+    const fps = d.fps != null ? d.fps : d.current_fps;
+    if (fps > 0) bits.push(fps.toFixed(1) + ' fps');
+    const phaseEta = d.phase_eta_seconds || 0;
+    if (ph.indeterminate) {
+        bits.push('verifying output…');
+    } else if (phaseEta > 0) {
+        // During an AI phase the ETA covers that phase only — the HandBrake
+        // encode still follows it — so say so rather than implying the whole
+        // job finishes then. In the encode phase it IS the whole remainder.
+        const isPre = phase === 'upscale' || phase === 'stereo';
+        bits.push('~' + formatDuration(phaseEta)
+                  + (isPre ? ' left in this step' : ' left'));
+    } else if ((d.eta_seconds || 0) > 0) {
+        bits.push('~' + formatDuration(d.eta_seconds) + ' left');
+    } else {
+        bits.push('estimating…');
+    }
+    return bits.join(' · ');
+}
+
 function displayQueueItems(items) {
     // Don't redraw out from under an in-progress priority edit
     if (document.activeElement && document.activeElement.classList.contains('js-priority-input')) {
@@ -514,6 +556,7 @@ function displayQueueItems(items) {
             ${counts.paused ? `<span style="color:#e67e22">⏸️ Paused: ${counts.paused}</span>` : ''}
             ${counts.cancelled ? `<span style="color:var(--text-muted)">⏹️ Cancelled: ${counts.cancelled}</span>` : ''}
             ${counts.permission_error ? `<span style="color:var(--warning)" title="Files Optimizarr can't read/write — fix access then Re-check">🔒 Permission: ${counts.permission_error}</span>` : ''}
+            ${counts.quarantined ? `<span style="color:#b07cd8" title="Files with no decodable video (corrupt, incomplete, or still downloading). The files are untouched — click to re-check them.">☣️ Quarantined: ${counts.quarantined} <button onclick="recheckAllQuarantined()" class="btn btn-secondary btn-xs" style="margin-left:4px">Re-check</button></span>` : ''}
             ${queuePendingEta > 0 ? `<span style="color:var(--accent)" title="Estimated time to encode all pending items, from your encode-speed history${queuePendingEtaUnknown > 0 ? ` (+${queuePendingEtaUnknown} item(s) with unknown duration not included — re-scan to fix)` : ''}">⏱ Queue ETA: ~${formatDuration(queuePendingEta)}${queuePendingEtaUnknown > 0 ? ' ⁺' : ''}</span>` : ''}
             <span style="margin-left:auto">Showing: <strong style="color:var(--text-primary)">${items.length}</strong> of ${queueTotal}</span>
         </div>
@@ -557,7 +600,8 @@ function displayQueueItems(items) {
             'failed':     { emoji: '❌', color: 'text-red-400',    barColor: 'bg-red-500' },
             'paused':     { emoji: '⏸️', color: 'text-orange-400', barColor: 'bg-orange-500' },
             'cancelled':  { emoji: '⏹️', color: 'text-gray-400',   barColor: 'bg-gray-500' },
-            'permission_error': { emoji: '🔒', color: 'text-orange-300', barColor: 'bg-orange-500' }
+            'permission_error': { emoji: '🔒', color: 'text-orange-300', barColor: 'bg-orange-500' },
+            'quarantined': { emoji: '☣️', color: 'text-purple-300', barColor: 'bg-purple-500' }
         };
         const sc = statusConfig[item.status] || { emoji: '❓', color: 'text-gray-400', barColor: 'bg-gray-500' };
         const progress = item.progress || 0;
@@ -610,20 +654,32 @@ function displayQueueItems(items) {
                     <span class="text-gray-400 font-mono text-xs w-14 text-right" title="Manually stopped">${progress > 0 ? progress.toFixed(1) + '%' : '—'}</span>
                 </div>`;
         } else if (item.status === 'processing' || (item.status === 'paused' && progress > 0)) {
-            // Live telemetry parsed from HandBrake's own output (Patch 33);
-            // the SSE stream updates these elements in place between polls.
-            let liveBits = [];
-            if (item.current_fps > 0) liveBits.push(item.current_fps.toFixed(1) + ' fps');
-            if (item.eta_seconds > 0) liveBits.push('~' + formatDuration(item.eta_seconds) + ' left');
+            // Two bars: overall job on top, current phase underneath. A job
+            // can spend hours in the AI upscale before HandBrake even starts,
+            // and one undifferentiated bar made that look like a hung encode.
+            // The SSE stream updates these elements in place between polls.
+            // Paused keeps the orange status colour so it stays obvious at a
+            // glance, but still names the phase it was paused in.
+            const phBase = phaseConfig(item.phase);
+            const ph = item.status === 'paused'
+                ? { ...phBase, color: sc.color, barColor: sc.barColor }
+                : phBase;
+            const phaseProgress = item.phase_progress || 0;
             progressBar = `
                 <div>
                     <div class="flex items-center gap-2">
                         <div class="flex-1 bg-gray-600 rounded-full h-2.5 overflow-hidden">
-                            <div class="js-prog-bar ${sc.barColor} h-2.5 rounded-full transition-all duration-700" style="width: ${progress}%"></div>
+                            <div class="js-prog-bar ${ph.barColor} h-2.5 rounded-full transition-all duration-700" style="width: ${progress}%"></div>
                         </div>
-                        <span class="js-prog-label ${sc.color} font-mono text-xs font-bold w-14 text-right">${progress.toFixed(1)}%</span>
+                        <span class="js-prog-label ${ph.color} font-mono text-xs font-bold w-14 text-right">${progress.toFixed(1)}%</span>
                     </div>
-                    <div class="js-prog-eta text-xs text-gray-500 mt-0.5">${liveBits.join(' · ')}</div>
+                    <div class="flex items-center gap-2 mt-1">
+                        <div class="flex-1 bg-gray-700 rounded-full h-1 overflow-hidden">
+                            <div class="js-phase-bar ${ph.barColor} ${ph.indeterminate ? 'animate-pulse' : ''} h-1 rounded-full transition-all duration-700" style="width: ${ph.indeterminate ? 100 : phaseProgress}%"></div>
+                        </div>
+                        <span class="js-phase-label ${ph.color} font-mono text-[10px] w-14 text-right">${ph.indeterminate ? '' : phaseProgress.toFixed(0) + '%'}</span>
+                    </div>
+                    <div class="js-prog-eta text-xs text-gray-500 mt-0.5">${phaseLine(item.phase, item)}</div>
                 </div>`;
         } else {
             // Pending — empty bar
@@ -674,11 +730,16 @@ function displayQueueItems(items) {
                     ${buildProfileSelect(item)}
                 </td>
                 <td class="py-2 px-2">
+                    <button onclick="revealQueueItem(${item.id})" class="btn btn-secondary btn-xs"
+                        title="Show this file in the Optimizarr host's file manager&#10;${_esc(item.file_path)}">📂</button>
                     ${(item.status === 'failed' || item.status === 'cancelled')
                         ? `<button onclick="retryQueueItem(${item.id})" class="btn btn-secondary btn-xs" title="Re-queue this item">↻ Retry</button> `
                         : ''}
                     ${item.status === 'permission_error'
                         ? `<button onclick="recheckPermissions(${item.id})" class="btn btn-secondary btn-xs" title="Re-check file access — flips to pending if readable now">🔒 Re-check</button> `
+                        : ''}
+                    ${item.status === 'quarantined'
+                        ? `<button onclick="recheckQuarantined(${item.id})" class="btn btn-secondary btn-xs" title="Re-probe the file — goes back to pending if it's a valid video now">☣️ Re-check</button> `
                         : ''}
                     <button onclick="deleteQueueItem(${item.id})"
                         class="btn btn-danger btn-xs">Delete</button>
@@ -741,21 +802,36 @@ function displayQueueItems(items) {
     initQueueDragDrop();
 
     // ── Live progress stream (SSE) for the active encode ─────────
-    ensureProgressStream((queueCounts.processing || 0) > 0);
+    ensureProgressStream();
 }
 
-// EventSource pushing live encode progress every ~2s — replaces the 5s poll
-// for the active row only. Falls back to polling: on error we just close;
-// the next displayQueueItems (5s poll) reopens it.
+// EventSource pushing live encode progress every ~2s. The stream is
+// permanent: it opens at page load, reconnects itself after any error
+// (server restart, network blip), and does NOT depend on the 5s poll,
+// the auto-refresh checkbox, or which tab is active — those dependencies
+// were why progress only moved after a manual refresh or tab switch.
 let _progressES = null;
+let _esRetryTimer = null;
+let _esActiveIds = null;      // ids seen in the last SSE payload
+let _esLastAutoRefresh = 0;   // throttle for transition-triggered refreshes
 
-function ensureProgressStream(hasProcessing) {
-    if (!window.EventSource) return; // ancient browser → polling only
-    if (!hasProcessing) {
-        if (_progressES) { _progressES.close(); _progressES = null; }
-        return;
+function _refreshQueueIfVisible() {
+    // Re-render the queue table when an encode starts/finishes, so status
+    // flips (pending → processing → completed) appear without manual action.
+    const now = Date.now();
+    if (now - _esLastAutoRefresh < 4000) return;
+    _esLastAutoRefresh = now;
+    if (document.hidden) return;
+    const queuePanel = document.getElementById('content-queue');
+    if (queuePanel && queuePanel.classList.contains('active')) {
+        loadQueue();
     }
-    if (_progressES) return; // already streaming
+}
+
+function ensureProgressStream() {
+    if (!window.EventSource) return; // ancient browser → polling only
+    if (_progressES) return;         // already streaming
+    if (_esRetryTimer) { clearTimeout(_esRetryTimer); _esRetryTimer = null; }
 
     const url = `${API_BASE}/events/encode-progress?token=${encodeURIComponent(getToken() || '')}`;
     _progressES = new EventSource(url);
@@ -763,25 +839,63 @@ function ensureProgressStream(hasProcessing) {
     _progressES.onmessage = (e) => {
         let payload;
         try { payload = JSON.parse(e.data); } catch (_) { return; }
-        (payload.processing || []).forEach(p => {
+        const processing = payload.processing || [];
+
+        // Detect start/finish transitions: the set of active ids changed
+        const ids = processing.map(p => p.id).sort().join(',');
+        if (_esActiveIds !== null && ids !== _esActiveIds) {
+            _refreshQueueIfVisible();
+        }
+        _esActiveIds = ids;
+
+        processing.forEach(p => {
             const row = document.querySelector(`tr[data-queue-id="${p.id}"]`);
             if (!row) return; // active item not on the current page
             const bar = row.querySelector('.js-prog-bar');
             const label = row.querySelector('.js-prog-label');
             const eta = row.querySelector('.js-prog-eta');
+            const phaseBar = row.querySelector('.js-phase-bar');
+            const phaseLabel = row.querySelector('.js-phase-label');
+            const ph = phaseConfig(p.phase);
+
+            // Swap the colour classes when the job moves to another phase —
+            // the row was rendered with whatever phase was current then.
+            const recolor = (el, extra) => {
+                if (!el) return;
+                Object.values(PHASE_CONFIG).forEach(c => {
+                    el.classList.remove(c.barColor, c.color);
+                });
+                el.classList.add(extra);
+            };
+            recolor(bar, ph.barColor);
+            recolor(label, ph.color);
+            recolor(phaseBar, ph.barColor);
+            recolor(phaseLabel, ph.color);
+
             if (bar) bar.style.width = `${p.progress}%`;
             if (label) label.textContent = `${p.progress.toFixed(1)}%`;
-            if (eta) {
-                const bits = [];
-                if (p.fps > 0) bits.push(p.fps.toFixed(1) + ' fps');
-                if (p.eta_seconds > 0) bits.push('~' + formatDuration(p.eta_seconds) + ' left');
-                eta.textContent = bits.join(' · ');
+            if (phaseBar) {
+                phaseBar.style.width = `${ph.indeterminate ? 100 : (p.phase_progress || 0)}%`;
+                phaseBar.classList.toggle('animate-pulse', !!ph.indeterminate);
             }
+            if (phaseLabel) {
+                phaseLabel.textContent = ph.indeterminate
+                    ? '' : `${(p.phase_progress || 0).toFixed(0)}%`;
+            }
+            if (eta) eta.textContent = phaseLine(p.phase, p);
         });
     };
 
     _progressES.onerror = () => {
+        // Close and retry on our own timer — never wait for a poll that may
+        // not be running (wrong tab, unchecked auto-refresh, hidden page).
         if (_progressES) { _progressES.close(); _progressES = null; }
+        if (!_esRetryTimer) {
+            _esRetryTimer = setTimeout(() => {
+                _esRetryTimer = null;
+                ensureProgressStream();
+            }, 8000);
+        }
     };
 }
 
@@ -880,7 +994,10 @@ document.addEventListener('DOMContentLoaded', () => {
     loadStats();
     loadResources();
     loadQueue();
-    
+
+    // Live progress stream — permanent, self-reconnecting
+    ensureProgressStream();
+
     // Auto-refresh every 5 seconds (pauses when tab is hidden)
     setInterval(() => {
         if (document.hidden) return;
@@ -894,6 +1011,20 @@ document.addEventListener('DOMContentLoaded', () => {
             loadQueue();
         }
     }, 5000);
+
+    // Returning to the tab: refresh everything immediately instead of
+    // waiting up to 5s (or requiring a manual tab switch / page reload),
+    // and make sure the SSE stream is (re)connected.
+    document.addEventListener('visibilitychange', () => {
+        if (document.hidden) return;
+        loadStats();
+        loadResources();
+        ensureProgressStream();
+        const queuePanel = document.getElementById('content-queue');
+        if (queuePanel && queuePanel.classList.contains('active')) {
+            loadQueue();
+        }
+    });
 });
 
 async function reinitGpu() {
@@ -2131,6 +2262,47 @@ function editPriority(el, id, current) {
     input.select();
 }
 
+// Clipboard with a fallback: navigator.clipboard needs a secure context, and
+// Optimizarr is routinely reached over plain http on a LAN address.
+async function copyToClipboard(text) {
+    if (!text) return false;
+    try {
+        if (navigator.clipboard && window.isSecureContext) {
+            await navigator.clipboard.writeText(text);
+            return true;
+        }
+    } catch (_) { /* fall through to the legacy path */ }
+    try {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        ta.remove();
+        return ok;
+    } catch (_) {
+        return false;
+    }
+}
+
+// Open a queue item's folder in the file manager ON THE OPTIMIZARR HOST —
+// that is where the media is. Viewing from a phone or another desktop, no
+// window can appear for you, so the path is copied to your clipboard instead.
+async function revealQueueItem(id) {
+    const result = await apiRequest(`/queue/${id}/reveal`, { method: 'POST' });
+    if (!result) return;
+    if (result.success) {
+        showMessage(result.message, 'success');
+        return;
+    }
+    const copied = await copyToClipboard(result.folder || result.path || '');
+    showMessage(copied ? `${result.message} — path copied to clipboard instead`
+                       : result.message,
+                copied ? 'info' : 'warning');
+}
+
 async function retryQueueItem(id) {
     const result = await apiRequest(`/queue/${id}/retry`, { method: 'POST' });
     if (result) {
@@ -2143,6 +2315,27 @@ async function recheckPermissions(id) {
     const result = await apiRequest(`/queue/${id}/recheck-permissions`, { method: 'POST' });
     if (result) {
         showMessage(result.message, result.success === false ? 'warning' : 'success');
+        loadQueue();
+    }
+}
+
+async function recheckQuarantined(id) {
+    const result = await apiRequest(`/queue/${id}/recheck-quarantined`, { method: 'POST' });
+    if (result) {
+        showMessage(result.message, result.success === false ? 'warning' : 'success');
+        loadQueue();
+    }
+}
+
+async function recheckAllQuarantined() {
+    const count = queueCounts.quarantined || 0;
+    if (count === 0) {
+        showMessage('No quarantined items to check', 'info');
+        return;
+    }
+    const result = await apiRequest('/queue/recheck-quarantined', { method: 'POST' });
+    if (result) {
+        showMessage(result.message, 'success');
         loadQueue();
     }
 }
@@ -2182,6 +2375,148 @@ function toggleAutoRefresh() {
     }
 }
 
+
+// ============================================================
+// DUPLICATE FINDER
+// ============================================================
+
+let _dupeStatusTimer = null;
+
+async function startDupeScan(mode) {
+    if (mode === 'full' && !confirm(
+        'A full scan decodes every video in your library to fingerprint it.\n\n' +
+        'This can take many hours (or days) for a large library. Progress is saved ' +
+        'as it goes — you can stop any time and resume later.\n\nStart full scan?')) {
+        return;
+    }
+    const result = await apiRequest('/duplicates/scan', {
+        method: 'POST',
+        body: JSON.stringify({ mode: mode || 'full' }),
+    });
+    if (result) {
+        showMessage(result.message, result.success === false ? 'warning' : 'info');
+        if (result.success !== false) _pollDupeStatus();
+    }
+}
+
+async function cancelDupeScan() {
+    const result = await apiRequest('/duplicates/scan/cancel', { method: 'POST' });
+    if (result) showMessage(result.message, result.success === false ? 'warning' : 'info');
+}
+
+function _pollDupeStatus() {
+    if (_dupeStatusTimer) clearInterval(_dupeStatusTimer);
+    _dupeStatusTimer = setInterval(async () => {
+        const s = await apiRequest('/duplicates/status');
+        if (!s) return;
+        const el = document.getElementById('dupeScanStatus');
+        const btn = document.getElementById('dupeScanBtn');
+        const cancelBtn = document.getElementById('dupeCancelBtn');
+        if (s.status === 'running') {
+            if (el) {
+                el.style.display = 'block';
+                const pct = s.total > 0 ? ` (${s.done}/${s.total})` : '';
+                let eta = '';
+                if (s.phase === 'fingerprinting' && s.done > 0 && s.started_at) {
+                    const elapsed = (Date.now() / 1000) - s.started_at;
+                    const rate = s.done / elapsed;
+                    if (rate > 0 && s.total > s.done) {
+                        eta = ` · ~${formatDuration((s.total - s.done) / rate)} left`;
+                    }
+                }
+                el.textContent = `⏳ ${s.phase}${pct}${eta} — ${s.message || ''}`;
+            }
+            if (btn) btn.disabled = true;
+            const qb = document.getElementById('dupeQuickBtn');
+            if (qb) qb.disabled = true;
+            if (cancelBtn) cancelBtn.style.display = '';
+        } else {
+            clearInterval(_dupeStatusTimer);
+            _dupeStatusTimer = null;
+            if (btn) btn.disabled = false;
+            const qb2 = document.getElementById('dupeQuickBtn');
+            if (qb2) qb2.disabled = false;
+            if (cancelBtn) cancelBtn.style.display = 'none';
+            if (el) {
+                el.style.display = 'block';
+                const icon = { complete: '✅', error: '❌', cancelled: '⏹️' }[s.status] || '';
+                el.textContent = icon ? `${icon} ${s.message}` : '';
+            }
+            if (s.status === 'complete') loadDuplicates();
+        }
+    }, 2000);
+}
+
+const DUPE_KIND_LABELS = {
+    'exact':     { label: 'Exact copy',   color: 'var(--danger)',  hint: 'Byte-identical file' },
+    'duplicate': { label: 'Duplicate',    color: 'var(--danger)',  hint: 'Same video, different encode' },
+    'near':      { label: 'Near dupe',    color: 'var(--warning)', hint: 'Same video, slightly trimmed or altered' },
+    'clip':      { label: 'Clip of',      color: 'var(--info)',    hint: 'Segment of the longer video' },
+    'partial':   { label: 'Partial',      color: 'var(--text-muted)', hint: 'Sections overlap' },
+};
+
+async function loadDuplicates() {
+    const data = await apiRequest('/duplicates');
+    const container = document.getElementById('dupeResults');
+    if (!container) return;
+    // Resume live status display if a scan is running
+    const s = await apiRequest('/duplicates/status');
+    if (s && s.status === 'running') _pollDupeStatus();
+
+    if (!data || !data.groups || data.groups.length === 0) {
+        container.innerHTML = '<p style="color:var(--text-muted)">No duplicates found. Run a scan to (re)check the library.</p>';
+        return;
+    }
+
+    let html = `<p style="font-size:12px;color:var(--text-secondary);margin-bottom:10px">
+        ${data.total_groups} group(s) — <strong style="color:var(--success)">${formatSize(data.reclaimable_bytes)}</strong>
+        reclaimable from exact/duplicate copies</p>`;
+
+    data.groups.forEach(g => {
+        const nameA = _esc(g.file_a.split(/[/\\]/).pop());
+        html += `
+        <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px">
+            <div style="font-size:13px;margin-bottom:6px" title="${_esc(g.file_a)}">
+                📁 <strong>${nameA}</strong>
+                <span style="color:var(--text-muted);font-size:11px">
+                    ${formatSize(g.size_a)}${g.duration_a ? ' · ' + formatDuration(g.duration_a) : ''} · keep
+                </span>
+            </div>`;
+        g.matches.forEach(m => {
+            const k = DUPE_KIND_LABELS[m.kind] || DUPE_KIND_LABELS['partial'];
+            const nameB = _esc(m.file_b.split(/[/\\]/).pop());
+            const clipInfo = m.kind === 'clip'
+                ? ` · matches at ${formatDuration(m.offset_seconds)} for ${formatDuration(m.overlap_seconds)}`
+                : '';
+            html += `
+            <div style="display:flex;align-items:center;gap:8px;padding:4px 0 4px 20px;font-size:12px">
+                <span style="color:${k.color};font-weight:600;min-width:80px" title="${k.hint}">${k.label}</span>
+                <span style="color:var(--text-muted)">${m.score.toFixed(0)}%</span>
+                <span class="truncate" style="flex:1" title="${_esc(m.file_b)}">${nameB}</span>
+                <span style="color:var(--text-muted);white-space:nowrap">${formatSize(m.size_b)}${clipInfo}</span>
+                <button class="btn btn-danger btn-xs" data-path="${_esc(m.file_b)}" onclick="deleteDupeFile(this, this.dataset.path)">Delete</button>
+            </div>`;
+        });
+        html += '</div>';
+    });
+    container.innerHTML = html;
+}
+
+async function deleteDupeFile(btn, filePath) {
+    if (!confirm(`Permanently delete this file from disk?\n\n${filePath}\n\nThis cannot be undone.`)) return;
+    btn.disabled = true;
+    const result = await apiRequest('/duplicates/delete-file', {
+        method: 'POST',
+        body: JSON.stringify({ file_path: filePath }),
+    });
+    if (result) {
+        showMessage(result.message, result.success === false ? 'error' : 'success');
+        if (result.success !== false) loadDuplicates();
+        else btn.disabled = false;
+    } else {
+        btn.disabled = false;
+    }
+}
 
 // ============================================================
 // LIBRARY TYPE HELPERS

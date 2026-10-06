@@ -11,23 +11,41 @@ from typing import Optional
 _DEFAULT_SECRET = "insecure-default-key-change-in-production"
 _SECRET_FILE = Path("data") / ".secret_key"
 
+# Every placeholder that has ever shipped in .env / .env.example. Matching only
+# _DEFAULT_SECRET was not enough: the .env template carried a *different*
+# placeholder, so the auto-generation below never fired and JWTs were signed
+# with a value published in the repo. Treat all of them as "unset".
+_PLACEHOLDER_SECRETS = {
+    _DEFAULT_SECRET,
+    "dev-secret-key-change-in-production",
+    "your-secret-key-here-generate-with-openssl-rand-hex-32",
+    "change-me",
+    "changeme",
+    "secret",
+}
+
+
+def _is_placeholder(value: str) -> bool:
+    """True if `value` is empty or a known placeholder, i.e. unusable as a key."""
+    return not value or value.strip().lower() in _PLACEHOLDER_SECRETS
+
 
 def _resolve_secret_key() -> str:
     """Return a stable secret key, auto-generating one on first run.
 
     Priority:
-      1. OPTIMIZARR_SECRET_KEY env var (if set and not the default)
+      1. OPTIMIZARR_SECRET_KEY env var (if set and not a placeholder)
       2. data/.secret_key file (persists across restarts)
       3. Generate a new random key → write to data/.secret_key
     """
     env_val = os.environ.get("OPTIMIZARR_SECRET_KEY", "").strip()
-    if env_val and env_val != _DEFAULT_SECRET:
+    if not _is_placeholder(env_val):
         return env_val
 
     # Try reading from persisted file
     if _SECRET_FILE.exists():
         stored = _SECRET_FILE.read_text(encoding='utf-8').strip()
-        if stored and stored != _DEFAULT_SECRET:
+        if not _is_placeholder(stored):
             return stored
 
     # Generate and persist
@@ -51,7 +69,7 @@ class Settings(BaseSettings):
     
     # Application
     host: str = "0.0.0.0"
-    port: int = 5000
+    port: int = 5757
     log_level: str = "INFO"
     cors_origins: str = ""  # Comma-separated origins, e.g. "http://localhost:3000,https://myapp.com"
     
@@ -76,8 +94,10 @@ class Settings(BaseSettings):
 # Global settings instance
 settings = Settings()
 
-# Override secret key if still the insecure default
-if settings.secret_key == _DEFAULT_SECRET:
+# Override the secret key if it is still any known placeholder. Note this must
+# check the *resolved* value, which includes anything pydantic loaded from .env
+# -- that is the path the old _DEFAULT_SECRET-only comparison missed.
+if _is_placeholder(settings.secret_key):
     settings.secret_key = _resolve_secret_key()
 
 

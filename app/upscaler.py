@@ -529,6 +529,7 @@ def run_upscale_pipeline(
     model: str,
     factor: int,
     progress_callback=None,
+    register_process=None,
 ) -> Optional[str]:
     """
     Run the full AI upscale pipeline on *input_path*.
@@ -541,11 +542,18 @@ def run_upscale_pipeline(
       5. Reassemble: upscaled frames + original audio → temp MKV
       6. Return path to the temp MKV (caller must delete it)
 
+    ``register_process`` (optional) is called with each subprocess Popen as it
+    starts and with None when it ends, so the caller can kill the currently
+    active process on stop/shutdown — without it, an in-flight upscaler
+    outlives the server as a GPU-burning orphan.
+
     Returns the path to the upscaled video file on success, or None on failure.
 
-    Progress callback receives values 0–100 across the whole pipeline:
+    Progress callback receives ``(pct, eta_seconds)`` where pct is 0–100
+    across the whole pipeline and eta_seconds is the estimated remaining
+    upscale time (None while it can't yet be measured):
       0-10%  : extraction
-      10-90% : upscaling (per-frame progress from upscaler stderr)
+      10-90% : upscaling (frames finished / total, with a measured ETA)
       90-100%: reassembly
     """
     import tempfile
@@ -564,12 +572,37 @@ def run_upscale_pipeline(
         )
         return None
 
-    def _progress(pct: float):
+    def _progress(pct: float, eta_seconds: Optional[float] = None):
         if progress_callback:
             try:
-                progress_callback(min(100.0, max(0.0, pct)))
+                progress_callback(min(100.0, max(0.0, pct)), eta_seconds)
             except Exception:
                 pass
+
+    def _register(proc):
+        if register_process:
+            try:
+                register_process(proc)
+            except Exception:
+                pass
+
+    def _run_ffmpeg(cmd, timeout):
+        """Run an ffmpeg step as a registered (killable) subprocess.
+
+        Returns (returncode, stderr_text)."""
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, encoding='utf-8', errors='replace',
+        )
+        _register(proc)
+        try:
+            _, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            _, err = proc.communicate()
+        finally:
+            _register(None)
+        return proc.returncode, err or ''
 
     input_p = Path(input_path)
     if not input_p.exists():
@@ -613,44 +646,92 @@ def run_upscale_pipeline(
         )
         return None
 
-    # Work directory — unique per job
-    work_dir = tmp_base / f"optimizarr_upscale_{input_p.stem}_{int(time.time())}"
+    # Work directory — DETERMINISTIC per (input, upscaler, model, factor) so
+    # an interrupted job RESUMES instead of redoing hours/days of GPU work.
+    # (The old time.time() suffix meant every restart started from zero —
+    # one server restart threw away 25 hours of upscaling.)
+    import hashlib
+    job_key = hashlib.md5(
+        f"{input_path}|{upscaler_key}|{model}|{factor}".encode('utf-8', 'replace')
+    ).hexdigest()[:12]
+    safe_stem = re.sub(r'[^\w.-]+', '_', input_p.stem)[:40]
+    work_dir = tmp_base / f"optimizarr_upscale_{safe_stem}_{job_key}"
     frames_in  = work_dir / "frames_in"
     frames_out = work_dir / "frames_out"
-    frames_in.mkdir(parents=True)
-    frames_out.mkdir(parents=True)
+    extract_marker = work_dir / "extract_done"
+    frames_in.mkdir(parents=True, exist_ok=True)
+    frames_out.mkdir(parents=True, exist_ok=True)
     output_path = work_dir / f"{input_p.stem}_upscaled.mkv"
+    pipeline_succeeded = False
 
     try:
-        # ── Stage 3: extract frames ─────────────────────────────────────────
-        _progress(3)
-        optimizarr_logger.app_logger.info("Extracting frames from %s…", input_p.name)
-        extract_cmd = [
-            "ffmpeg", "-i", input_path,
-            "-vsync", "0",                 # every frame, native timing
-            str(frames_in / "%08d.png"),
-            "-y",
-        ]
-        result = subprocess.run(
-            extract_cmd, capture_output=True, text=True, timeout=3600,
-            encoding='utf-8', errors='replace'
-        )
-        if result.returncode != 0:
-            optimizarr_logger.app_logger.error(
-                "ffmpeg frame extraction failed: %s", result.stderr[-500:]
-            )
-            return None
+        # ── Stage 3: extract frames (skipped when a completed extraction
+        #    from an interrupted run is already on disk) ────────────────────
+        total_frames = 0
+        if extract_marker.exists():
+            try:
+                total_frames = int(extract_marker.read_text().strip() or 0)
+            except (ValueError, OSError):
+                total_frames = 0
 
-        actual_frames = sorted(frames_in.glob("*.png"))
-        if not actual_frames:
-            optimizarr_logger.app_logger.error("No frames extracted from %s", input_path)
-            return None
+        if total_frames > 0:
+            optimizarr_logger.app_logger.info(
+                "Resuming upscale of %s — %d frames already extracted",
+                input_p.name, total_frames)
+        else:
+            # No completion marker: any frames present are from a partial
+            # extraction and can't be trusted — start clean.
+            _shutil.rmtree(frames_in, ignore_errors=True)
+            frames_in.mkdir(parents=True, exist_ok=True)
+            _progress(3)
+            optimizarr_logger.app_logger.info("Extracting frames from %s…", input_p.name)
+            extract_cmd = [
+                "ffmpeg", "-i", input_path,
+                "-vsync", "0",                 # every frame, native timing
+                str(frames_in / "%08d.png"),
+                "-y",
+            ]
+            rc, err = _run_ffmpeg(extract_cmd, timeout=3600)
+            if rc != 0:
+                optimizarr_logger.app_logger.error(
+                    "ffmpeg frame extraction failed: %s", err[-500:]
+                )
+                return None
 
-        total_frames = len(actual_frames)
-        optimizarr_logger.app_logger.info("Extracted %d frames", total_frames)
+            actual_frames = sorted(frames_in.glob("*.png"))
+            if not actual_frames:
+                optimizarr_logger.app_logger.error("No frames extracted from %s", input_path)
+                return None
+
+            total_frames = len(actual_frames)
+            extract_marker.write_text(str(total_frames))
+            optimizarr_logger.app_logger.info("Extracted %d frames", total_frames)
         _progress(10)
 
         # ── Stage 4: upscale frames ─────────────────────────────────────────
+        # Resume support: frames already upscaled by an interrupted run are
+        # removed from the input set so the binary only processes what's left.
+        existing_out = list(frames_out.glob("*.png"))
+        if existing_out:
+            # The newest output may be a partial write from the kill — redo it
+            newest = max(existing_out, key=lambda p: p.stat().st_mtime)
+            try:
+                newest.unlink()
+                existing_out.remove(newest)
+            except OSError:
+                pass
+            for out_frame in existing_out:
+                stale_in = frames_in / out_frame.name
+                if stale_in.exists():
+                    try:
+                        stale_in.unlink()
+                    except OSError:
+                        pass
+            if existing_out:
+                optimizarr_logger.app_logger.info(
+                    "Resuming upscale: %d/%d frames already done",
+                    len(existing_out), total_frames)
+
         upscale_cmd = [
             binary_path,
             "-i", str(frames_in),
@@ -658,44 +739,106 @@ def run_upscale_pipeline(
             "-n", model,
             "-s", str(factor),
             "-f", "png",
+            # load:proc:save threads. Default 1:2:2 starves the GPU on small
+            # video frames — single-threaded PNG decode can't feed it. 4:4:4
+            # is the upstream recommendation for many small images.
+            "-j", "4:4:4",
         ]
         optimizarr_logger.app_logger.info(
             "Upscaling %d frames with %s (model=%s ×%d)…",
-            total_frames, upscaler_key, model, factor,
+            total_frames - len(existing_out), upscaler_key, model, factor,
         )
 
-        upscale_proc = subprocess.Popen(
-            upscale_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            encoding='utf-8',
-            errors='replace',
-        )
-
-        # Parse per-frame progress from upscaler output
-        # Real-ESRGAN / CUGAN print lines like:  "1/43200"
-        frame_re = re.compile(r'(\d+)/(\d+)')
-        for line in upscale_proc.stdout:
-            m = frame_re.search(line)
-            if m:
-                done  = int(m.group(1))
-                total = int(m.group(2))
-                if total > 0:
-                    # Map frame progress to 10-90% range
-                    _progress(10 + (done / total) * 80)
-
-        upscale_proc.wait()
-        if upscale_proc.returncode != 0:
-            optimizarr_logger.app_logger.error(
-                "Upscaler exited with code %d", upscale_proc.returncode
+        frames_remaining = sum(1 for _ in frames_in.glob("*.png"))
+        if frames_remaining > 0:
+            upscale_proc = subprocess.Popen(
+                upscale_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                encoding='utf-8',
+                errors='replace',
             )
-            return None
+            _register(upscale_proc)
 
-        upscaled_frames = sorted(frames_out.glob("*.png"))
-        if not upscaled_frames:
-            optimizarr_logger.app_logger.error("No upscaled frames produced")
+            # Progress comes from counting finished frames in frames_out, not
+            # from parsing the binary's output: the ncnn-vulkan tools print
+            # per-image tile percentages ("25.00%"), which say nothing about
+            # batch progress — the old "N/total" regex never matched, so the
+            # UI froze for the whole (possibly day-long) upscale.
+            stop_poll = threading.Event()
+
+            # Baseline for the ETA: frames already on disk from a resumed run
+            # cost this run nothing, so rate must be measured from the frames
+            # produced SINCE the poller started, not from zero.
+            poll_t0 = time.monotonic()
+            poll_done0 = len(existing_out)
+
+            def _poll_frames():
+                while not stop_poll.wait(5):
+                    try:
+                        done = sum(1 for _ in frames_out.glob("*.png"))
+                    except OSError:
+                        continue
+                    if total_frames <= 0:
+                        continue
+                    elapsed = time.monotonic() - poll_t0
+                    produced = done - poll_done0
+                    eta = None
+                    if produced > 0 and elapsed > 0:
+                        rate = produced / elapsed          # frames per second
+                        remaining = max(0, total_frames - done)
+                        eta = remaining / rate
+                    _progress(10 + (done / total_frames) * 80, eta)
+
+            poller = threading.Thread(target=_poll_frames, daemon=True,
+                                      name="upscale-progress")
+            poller.start()
+
+            # Drain stdout and keep a tail for diagnostics — a crash with no
+            # captured output ("exited with code 3221226505") is undebuggable.
+            last_lines: List[str] = []
+            try:
+                for line in upscale_proc.stdout:
+                    line = line.strip()
+                    if line:
+                        last_lines.append(line)
+                        if len(last_lines) > 20:
+                            last_lines.pop(0)
+            finally:
+                stop_poll.set()
+
+            upscale_proc.wait()
+            _register(None)
+            if upscale_proc.returncode != 0:
+                tail = ' | '.join(last_lines[-8:]) if last_lines else '(no output captured)'
+                hint = ''
+                # 0xC0000409 = Windows fail-fast abort: broken install (missing
+                # models/ beside the exe) or a GPU/Vulkan driver problem.
+                if upscale_proc.returncode in (3221226505, -1073740791):
+                    hint = (" — the upscaler crashed at startup (0xC0000409); this "
+                            "usually means a broken install (missing models/) or a "
+                            "GPU/Vulkan driver issue. Try re-downloading it in "
+                            "Settings → AI Upscalers.")
+                optimizarr_logger.app_logger.error(
+                    "Upscaler exited with code %d%s Output tail: %s",
+                    upscale_proc.returncode, hint, tail
+                )
+                return None
+        else:
+            optimizarr_logger.app_logger.info(
+                "All %d frames already upscaled — skipping to reassembly",
+                total_frames)
+
+        # Strict completeness check: ffmpeg's %08d input stops at the first
+        # gap in the sequence, so a missing frame would silently truncate the
+        # reassembled video rather than fail.
+        upscaled_count = sum(1 for _ in frames_out.glob("*.png"))
+        if upscaled_count < total_frames:
+            optimizarr_logger.app_logger.error(
+                "Upscaler produced %d of %d frames — refusing to reassemble a "
+                "truncated video", upscaled_count, total_frames)
             return None
 
         _progress(90)
@@ -717,13 +860,10 @@ def run_upscale_pipeline(
             str(output_path),
             "-y",
         ]
-        result = subprocess.run(
-            reassemble_cmd, capture_output=True, text=True, timeout=3600,
-            encoding='utf-8', errors='replace'
-        )
-        if result.returncode != 0:
+        rc, err = _run_ffmpeg(reassemble_cmd, timeout=3600)
+        if rc != 0:
             optimizarr_logger.app_logger.error(
-                "ffmpeg reassembly failed: %s", result.stderr[-500:]
+                "ffmpeg reassembly failed: %s", err[-500:]
             )
             return None
 
@@ -736,6 +876,7 @@ def run_upscale_pipeline(
             "Upscale pipeline complete → %s (%s)",
             output_path.name, _format_size(output_path.stat().st_size)
         )
+        pipeline_succeeded = True
         return str(output_path)
 
     except Exception as e:
@@ -743,12 +884,16 @@ def run_upscale_pipeline(
         return None
 
     finally:
-        # Always clean up source frames immediately (output frames cleaned by caller)
-        try:
-            _shutil.rmtree(frames_in, ignore_errors=True)
-            _shutil.rmtree(frames_out, ignore_errors=True)
-        except Exception:
-            pass
+        # On SUCCESS, free the (potentially tens of GB of) frame PNGs right
+        # away — only the reassembled MKV is needed for the encode. On
+        # failure or kill the frames MUST survive: they're the resume
+        # checkpoint the next attempt picks up from.
+        if pipeline_succeeded:
+            try:
+                _shutil.rmtree(frames_in, ignore_errors=True)
+                _shutil.rmtree(frames_out, ignore_errors=True)
+            except Exception:
+                pass
 
 
 def cleanup_upscale_workdir(upscaled_path: str):
@@ -760,3 +905,43 @@ def cleanup_upscale_workdir(upscaled_path: str):
             _shutil.rmtree(work_dir, ignore_errors=True)
     except Exception:
         pass
+
+
+def cleanup_stale_upscale_workdirs(min_age_seconds: float = 48 * 3600.0) -> int:
+    """Remove leftover optimizarr_upscale_* work directories from temp.
+
+    A crashed or killed encode never reaches cleanup_upscale_workdir, so its
+    workdir (potentially tens of GB of PNG frames) lingers in the temp dir
+    forever. Called when the encoder pool goes idle.
+
+    A dir is skipped when the dir itself or anything directly inside it was
+    modified within ``min_age_seconds``. The 48h default is deliberate:
+    workdirs double as RESUME CHECKPOINTS for interrupted upscales, so they
+    must survive a restart-and-retry cycle — only dirs untouched for two
+    days are treated as dead.
+
+    Returns the number of directories removed.
+    """
+    import tempfile
+    import shutil as _shutil
+
+    base = Path(tempfile.gettempdir())
+    now = time.time()
+    removed = 0
+    for d in base.glob("optimizarr_upscale_*"):
+        try:
+            if not d.is_dir():
+                continue
+            newest = d.stat().st_mtime
+            for child in d.iterdir():
+                newest = max(newest, child.stat().st_mtime)
+            if now - newest < min_age_seconds:
+                continue
+            _shutil.rmtree(d, ignore_errors=True)
+            removed += 1
+        except OSError:
+            continue
+    if removed:
+        optimizarr_logger.app_logger.info(
+            "Cleaned %d stale upscale work directorie(s)", removed)
+    return removed

@@ -61,6 +61,10 @@
                     <span class="nav-icon">📊</span>
                     <span class="nav-label">Statistics</span>
                 </a>
+                <a class="nav-item" onclick="switchTab('duplicates')" data-tab="duplicates">
+                    <span class="nav-icon">🪞</span>
+                    <span class="nav-label">Duplicates</span>
+                </a>
                 <a class="nav-item" onclick="switchTab('logs')" data-tab="logs">
                     <span class="nav-icon">📄</span>
                     <span class="nav-label">Logs</span>
@@ -197,6 +201,7 @@
                             <option value="paused">⏸️ Paused</option>
                             <option value="cancelled">⏹️ Cancelled</option>
                             <option value="permission_error">🔒 Permission Error</option>
+                            <option value="quarantined">☣️ Quarantined</option>
                         </select>
                     </div>
                     <!-- Sort & Prioritize -->
@@ -1558,6 +1563,31 @@
                     </div>
                     
                     <div id="scheduleMessage" class="hidden mt-4"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Duplicates Tab -->
+        <div id="content-duplicates" class="tab-panel">
+            <div class="card">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="page-title">Duplicate Finder</h2>
+                    <div class="flex gap-2">
+                        <button id="dupeQuickBtn" class="btn btn-primary" onclick="startDupeScan('quick')">⚡ Quick Scan</button>
+                        <button id="dupeScanBtn" class="btn btn-secondary" onclick="startDupeScan('full')">🔍 Full Scan</button>
+                        <button id="dupeCancelBtn" class="btn btn-secondary" onclick="cancelDupeScan()" style="display:none">Stop</button>
+                    </div>
+                </div>
+                <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+                    <strong>Quick scan</strong> compares file hashes to find byte-identical copies — a few minutes for a large library.<br>
+                    <strong>Full scan</strong> also fingerprints video content, finding re-encodes (different resolution, codec, or watermark)
+                    and clips that are segments of longer videos you already have. It decodes every file at roughly 25× realtime,
+                    so a large library takes days — but progress is saved continuously, you can stop and resume any time,
+                    and later scans only process new or changed files.
+                </p>
+                <div id="dupeScanStatus" style="display:none;font-size:12px;color:var(--text-secondary);margin-bottom:12px"></div>
+                <div id="dupeResults">
+                    <p style="color:var(--text-muted)">No scan results yet — run a scan to find duplicates.</p>
                 </div>
             </div>
         </div>

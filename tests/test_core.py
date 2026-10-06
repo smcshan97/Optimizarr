@@ -317,6 +317,52 @@ class TestSecretKeyGeneration:
         finally:
             cfg._SECRET_FILE = original_file
 
+    @pytest.mark.parametrize("placeholder", [
+        "insecure-default-key-change-in-production",
+        "dev-secret-key-change-in-production",   # shipped in .env
+        "your-secret-key-here-generate-with-openssl-rand-hex-32",  # .env.example
+        "CHANGEME",
+        "  secret  ",
+        "",
+    ])
+    def test_placeholder_keys_are_rejected(self, tmp_path, placeholder):
+        """A placeholder in the env must not be used to sign JWTs."""
+        from app.config import _resolve_secret_key
+
+        import app.config as cfg
+        original_file = cfg._SECRET_FILE
+        cfg._SECRET_FILE = tmp_path / ".secret_key"
+        env_backup = os.environ.get("OPTIMIZARR_SECRET_KEY")
+        try:
+            os.environ["OPTIMIZARR_SECRET_KEY"] = placeholder
+            key = _resolve_secret_key()
+            assert key.strip().lower() != placeholder.strip().lower()
+            assert len(key) == 64
+        finally:
+            if env_backup is None:
+                os.environ.pop("OPTIMIZARR_SECRET_KEY", None)
+            else:
+                os.environ["OPTIMIZARR_SECRET_KEY"] = env_backup
+            cfg._SECRET_FILE = original_file
+
+    def test_real_key_is_honoured(self, tmp_path):
+        """A genuine user-supplied key must be passed through untouched."""
+        from app.config import _resolve_secret_key
+
+        import app.config as cfg
+        original_file = cfg._SECRET_FILE
+        cfg._SECRET_FILE = tmp_path / ".secret_key"
+        env_backup = os.environ.get("OPTIMIZARR_SECRET_KEY")
+        try:
+            os.environ["OPTIMIZARR_SECRET_KEY"] = "a" * 64
+            assert _resolve_secret_key() == "a" * 64
+        finally:
+            if env_backup is None:
+                os.environ.pop("OPTIMIZARR_SECRET_KEY", None)
+            else:
+                os.environ["OPTIMIZARR_SECRET_KEY"] = env_backup
+            cfg._SECRET_FILE = original_file
+
 
 # ---------------------------------------------------------------------------
 # Stereo plan JSON structure
@@ -459,7 +505,7 @@ class TestEncodeSpeedEstimation:
         assert stats['samples'] == 0
 
     def test_speed_stats_per_codec_and_overall(self, fresh_db):
-        """Ratios group by target codec; overall is sample-weighted."""
+        """Ratios group by target codec; overall is the median of all rows."""
         # h265 (NVENC): 1h video in 30min → ratio 0.5, two samples
         fresh_db.add_history(file_path="/x/a.mkv", encoding_time_seconds=1800,
                              duration_seconds=3600, codec='h265')
@@ -476,8 +522,50 @@ class TestEncodeSpeedEstimation:
         assert stats['samples'] == 3
         assert abs(stats['by_codec']['h265'] - 0.5) < 1e-9
         assert abs(stats['by_codec']['av1'] - 4.0) < 1e-9
-        # weighted: (0.5*2 + 4.0*1) / 3
-        assert abs(stats['overall'] - (5.0 / 3)) < 1e-9
+        # median of (0.5, 0.5, 4.0)
+        assert abs(stats['overall'] - 0.5) < 1e-9
+
+    def test_speed_stats_median_resists_outliers(self, fresh_db):
+        """One polluted row (machine slept / legacy wall-clock) must not
+        drag the ratio — the old mean went from 2.0 to >1000 here."""
+        for i in range(4):
+            fresh_db.add_history(file_path=f"/x/{i}.mkv",
+                                 encoding_time_seconds=7200,
+                                 duration_seconds=3600, codec='av1')
+        # 34s clip recorded as taking 2 days (ratio ≈ 5082)
+        fresh_db.add_history(file_path="/x/slept.mkv",
+                             encoding_time_seconds=172800,
+                             duration_seconds=34, codec='av1')
+        stats = fresh_db.get_encode_speed_stats()
+        assert abs(stats['by_codec']['av1'] - 2.0) < 1e-9
+
+    def test_speed_stats_preprocessed_separate_group(self, fresh_db):
+        """Upscale/stereo jobs learn their own ratio and never pollute the
+        plain-encode group."""
+        fresh_db.add_history(file_path="/x/plain.mkv", encoding_time_seconds=7200,
+                             duration_seconds=3600, codec='av1')
+        # 10-min video whose upscale+encode took ~42h → ratio 250
+        fresh_db.add_history(file_path="/x/up.mkv", encoding_time_seconds=150000,
+                             duration_seconds=600, codec='av1', preprocessed=True)
+        stats = fresh_db.get_encode_speed_stats()
+        assert abs(stats['by_codec']['av1'] - 2.0) < 1e-9
+        assert stats['samples'] == 1
+        assert abs(stats['preprocessed'] - 250.0) < 1e-9
+        assert stats['preprocessed_samples'] == 1
+
+        from app.scanner import estimate_encode_seconds
+        # Preprocessed item uses the preprocessed ratio…
+        assert estimate_encode_seconds(600, 'av1', stats, preprocessed=True) == 150000
+        # …plain item uses the codec ratio
+        assert estimate_encode_seconds(600, 'av1', stats) == 1200
+
+    def test_speed_stats_ratio_clamp(self, fresh_db):
+        """A plain-group median beyond sanity bounds is clamped (only the
+        preprocessed group may legitimately exceed 100×)."""
+        fresh_db.add_history(file_path="/x/bad.mkv", encoding_time_seconds=1000000,
+                             duration_seconds=100, codec='av1')  # ratio 10000
+        stats = fresh_db.get_encode_speed_stats()
+        assert stats['by_codec']['av1'] == 100.0
 
     def test_estimate_encode_seconds(self):
         """Codec match > overall fallback > 1.0× realtime; None for unknown."""
@@ -1741,3 +1829,673 @@ class TestStereoCropFilters:
         # Full formats: each eye is already full resolution — crop only
         assert "scale" not in STEREO_FORMATS["sbs"]["crop_filter"]
         assert "scale" not in STEREO_FORMATS["tb"]["crop_filter"]
+
+
+class TestPreflightSourceCheck:
+    """preflight_source_check gates every encode: missing files are dropped
+    from the queue, unreadable/incomplete files are quarantined."""
+
+    def test_missing_file(self, tmp_path):
+        from app.encoder import preflight_source_check
+        assert preflight_source_check(str(tmp_path / "gone.mkv")) == 'missing'
+
+    def test_empty_file(self, tmp_path):
+        from app.encoder import preflight_source_check
+        f = tmp_path / "empty.mkv"
+        f.touch()
+        result = preflight_source_check(str(f))
+        assert result is not None and result != 'missing'
+
+    def test_unprobeable_file_quarantined(self, tmp_path, monkeypatch):
+        """A file with content but no decodable video stream → quarantine reason."""
+        from app import encoder as enc
+        from app.scanner import scanner as real_scanner
+        f = tmp_path / "preallocated.mkv"
+        f.write_bytes(b"\x00" * 4096)  # torrent-preallocated zeros
+        monkeypatch.setattr(real_scanner, 'ffprobe_available', True)
+        monkeypatch.setattr(
+            real_scanner, 'analyze_file',
+            lambda p: {'codec': 'unknown', 'resolution': 'unknown'})
+        result = enc.preflight_source_check(str(f))
+        assert result is not None and result != 'missing'
+
+    def test_valid_video_passes(self, tmp_path, monkeypatch):
+        from app import encoder as enc
+        from app.scanner import scanner as real_scanner
+        f = tmp_path / "ok.mkv"
+        f.write_bytes(b"\x1aE\xdf\xa3" + b"x" * 100)
+        monkeypatch.setattr(real_scanner, 'ffprobe_available', True)
+        monkeypatch.setattr(
+            real_scanner, 'analyze_file',
+            lambda p: {'codec': 'h264', 'resolution': '1920x1080'})
+        assert enc.preflight_source_check(str(f)) is None
+
+    def test_no_probe_tools_passes_through(self, tmp_path, monkeypatch):
+        """Without ffprobe/HandBrake we can't validate — let HandBrake try."""
+        from app import encoder as enc
+        from app.scanner import scanner as real_scanner
+        f = tmp_path / "unknown.mkv"
+        f.write_bytes(b"\x00" * 4096)
+        monkeypatch.setattr(real_scanner, 'ffprobe_available', False)
+        monkeypatch.setattr(real_scanner, 'handbrake_available', False)
+        assert enc.preflight_source_check(str(f)) is None
+
+
+class TestHandBrakeJsonProgress:
+    """--json structured progress: primary parsing path (Patch: hb-json)."""
+
+    def _feed_lines(self, lines):
+        from app.encoder import HBJsonStream
+        stream = HBJsonStream()
+        blocks = []
+        for line in lines:
+            block = stream.feed(line)
+            if block:
+                blocks.append(block)
+        return blocks
+
+    def test_multiline_progress_block(self):
+        from app.encoder import parse_hb_json_progress
+        blocks = self._feed_lines([
+            'Progress: {',
+            '    "State": "WORKING",',
+            '    "Working": {',
+            '        "Progress": 0.2345,',
+            '        "Rate": 113.06,',
+            '        "RateAvg": 102.33,',
+            '        "ETASeconds": 754',
+            '    }',
+            '}',
+        ])
+        assert len(blocks) == 1
+        label, data = blocks[0]
+        assert label == 'Progress'
+        pct, fps, eta = parse_hb_json_progress(label, data)
+        assert abs(pct - 23.45) < 1e-9
+        assert fps == 113.06
+        assert eta == 754
+
+    def test_muxing_maps_to_100(self):
+        from app.encoder import parse_hb_json_progress
+        assert parse_hb_json_progress('Progress', {'State': 'MUXING'}) == (100.0, None, None)
+
+    def test_non_progress_blocks_and_noise_ignored(self):
+        from app.encoder import parse_hb_json_progress
+        blocks = self._feed_lines([
+            'some human readable log line',
+            'Version: {',
+            '    "Name": "HandBrake" ',
+            '}',
+            '[09:00:00] scan: unrecognized file type',
+        ])
+        assert len(blocks) == 1
+        assert blocks[0][0] == 'Version'
+        assert parse_hb_json_progress(blocks[0][0], blocks[0][1]) is None
+
+    def test_braces_inside_strings(self):
+        blocks = self._feed_lines([
+            'Progress: { "State": "WORKING", "Note": "weird { brace }",',
+            '  "Working": { "Progress": 0.5 } }',
+        ])
+        assert len(blocks) == 1
+        assert blocks[0][1]['Note'] == 'weird { brace }'
+
+
+class TestBuildCommandFlags:
+    """--json always present; NVDEC gated on the profile hw-accel flag."""
+
+    def _job(self, fresh_db, hw_accel):
+        from app import encoder as enc
+        item_id = fresh_db.add_to_queue(
+            file_path="/x/in.mkv", root_id=1, profile_id=1,
+            current_specs={}, target_specs={})
+        profile = {
+            'name': 'p', 'codec': 'av1', 'encoder': 'svt_av1', 'quality': 30,
+            'container': 'mkv', 'hw_accel_enabled': hw_accel,
+        }
+        import app.encoder as encoder_mod
+        orig_db = encoder_mod.db
+        encoder_mod.db = fresh_db
+        try:
+            job = enc.EncodingJob(item_id, profile)
+        finally:
+            encoder_mod.db = orig_db
+        return job
+
+    def test_json_flag_always_present(self, fresh_db):
+        job = self._job(fresh_db, hw_accel=False)
+        cmd = job.build_command()
+        assert '--json' in cmd
+        assert '--enable-hw-decoding' not in cmd
+
+    def test_nvdec_when_nvidia_and_hw_accel(self, fresh_db, monkeypatch):
+        import app.encoder as encoder_mod
+        monkeypatch.setattr(encoder_mod, 'detect_hardware_acceleration',
+                            lambda: {'nvidia': True, 'intel': False,
+                                     'amd': False, 'apple': False})
+        job = self._job(fresh_db, hw_accel=True)
+        cmd = job.build_command()
+        i = cmd.index('--enable-hw-decoding')
+        assert cmd[i + 1] == 'nvdec'
+
+
+class TestDedupeMatching:
+    """Duplicate-detection math: dHash, exact groups, near-dupes, containment."""
+
+    def _rand_hashes(self, rng, n):
+        return [rng.getrandbits(64) for _ in range(n)]
+
+    def _flip_bits(self, h, rng, nbits):
+        for _ in range(nbits):
+            h ^= (1 << rng.randrange(64))
+        return h
+
+    def test_dhash_frame_gradient(self):
+        from app.dedupe import dhash_frame
+        # Row of ascending brightness → every comparison true → all ones
+        frame = bytes(range(0, 72))
+        assert dhash_frame(frame) == (1 << 64) - 1
+        # Flat frame → all zeros
+        assert dhash_frame(bytes([128] * 72)) == 0
+
+    def test_hamming(self):
+        from app.dedupe import hamming
+        assert hamming(0b1010, 0b1010) == 0
+        assert hamming(0b1010, 0b0101) == 4
+
+    def test_exact_group_via_quick_hash(self):
+        from app.dedupe import match_library
+        import random
+        rng = random.Random(42)
+        h = self._rand_hashes(rng, 60)
+        videos = [
+            {'path': 'a.mkv', 'size': 1000, 'quick_hash': 'QH1', 'hashes': h},
+            {'path': 'b.mkv', 'size': 1000, 'quick_hash': 'QH1', 'hashes': h},
+            {'path': 'c.mkv', 'size': 999,  'quick_hash': 'QH2', 'hashes': self._rand_hashes(rng, 60)},
+        ]
+        matches = match_library(videos)
+        exact = [m for m in matches if m['kind'] == 'exact']
+        assert len(exact) == 1
+        assert {exact[0]['file_a'], exact[0]['file_b']} == {'a.mkv', 'b.mkv'}
+
+    def test_reencode_duplicate_detected(self):
+        """Same video, different encode: identical length, hashes differ by a
+        few bits per frame → 'duplicate'."""
+        from app.dedupe import match_library
+        import random
+        rng = random.Random(7)
+        original = self._rand_hashes(rng, 120)
+        reencode = [self._flip_bits(h, rng, 3) if i % 3 else h
+                    for i, h in enumerate(original)]
+        videos = [
+            {'path': 'orig.mkv', 'size': 5000, 'quick_hash': 'A', 'hashes': original},
+            {'path': 'reenc.mp4', 'size': 3000, 'quick_hash': 'B', 'hashes': reencode},
+        ]
+        matches = match_library(videos)
+        assert len(matches) == 1
+        assert matches[0]['kind'] == 'duplicate'
+        assert matches[0]['score'] > 90
+
+    def test_clip_containment_with_offset(self):
+        """A 60s clip cut from 10:00 into a 20-min video → 'clip' at ~600s."""
+        from app.dedupe import match_library
+        import random
+        rng = random.Random(99)
+        full = self._rand_hashes(rng, 1200)
+        clip = list(full[600:660])
+        videos = [
+            {'path': 'full.mkv', 'size': 9000, 'quick_hash': 'F', 'hashes': full},
+            {'path': 'clip.mp4', 'size': 500,  'quick_hash': 'C', 'hashes': clip},
+        ]
+        matches = match_library(videos)
+        assert len(matches) == 1
+        m = matches[0]
+        assert m['kind'] == 'clip'
+        assert m['file_a'] == 'full.mkv' and m['file_b'] == 'clip.mp4'
+        assert abs(m['offset_seconds'] - 600) <= 2
+        assert m['overlap_seconds'] >= 55
+
+    def test_unrelated_videos_no_match(self):
+        from app.dedupe import match_library
+        import random
+        rng = random.Random(5)
+        videos = [
+            {'path': 'x.mkv', 'size': 100, 'quick_hash': 'X', 'hashes': self._rand_hashes(rng, 300)},
+            {'path': 'y.mkv', 'size': 200, 'quick_hash': 'Y', 'hashes': self._rand_hashes(rng, 300)},
+        ]
+        assert match_library(videos) == []
+
+    def test_common_hashes_not_evidence(self):
+        """A hash appearing across most of the library (black frames) must
+        not create matches between otherwise unrelated videos."""
+        from app.dedupe import match_library, COMMON_HASH_MAX_VIDEOS
+        import random
+        rng = random.Random(3)
+        black = 0  # flat black frame dhash
+        videos = []
+        for i in range(COMMON_HASH_MAX_VIDEOS + 2):
+            hs = self._rand_hashes(rng, 100)
+            # sprinkle black frames through every video
+            for j in range(0, 100, 10):
+                hs[j] = black
+            videos.append({'path': f'v{i}.mkv', 'size': i + 1,
+                           'quick_hash': f'q{i}', 'hashes': hs})
+        assert match_library(videos) == []
+
+    def test_pack_unpack_roundtrip(self):
+        from app.dedupe import pack_hashes, unpack_hashes
+        import random
+        rng = random.Random(1)
+        hs = [rng.getrandbits(64) for _ in range(50)]
+        assert unpack_hashes(pack_hashes(hs)) == hs
+
+    def test_low_entropy_videos_not_matched(self):
+        """Near-static footage (a handful of distinct frames) matches at any
+        offset, so no perceptual match may be claimed — real regression:
+        a static test pattern reported a bogus 'clip at 0s'."""
+        from app.dedupe import match_library
+        # Two different static videos cycling the same 3 visual states
+        cycle = [0xAAAA, 0xBBBB, 0xCCCC]
+        a = [cycle[i % 3] for i in range(180)]
+        b = [cycle[i % 3] for i in range(45)]
+        videos = [
+            {'path': 'static_a.mkv', 'size': 10, 'quick_hash': 'A', 'hashes': a},
+            {'path': 'static_b.mkv', 'size': 20, 'quick_hash': 'B', 'hashes': b},
+        ]
+        assert match_library(videos) == []
+
+    def test_exact_still_found_for_low_entropy(self):
+        """The entropy guard must not suppress byte-identical duplicates —
+        those are proven by the hash, not by frame content."""
+        from app.dedupe import match_library
+        flat = [0x1111] * 100
+        videos = [
+            {'path': 'a.mkv', 'size': 500, 'quick_hash': 'SAME', 'hashes': flat},
+            {'path': 'b.mkv', 'size': 500, 'quick_hash': 'SAME', 'hashes': flat},
+        ]
+        matches = match_library(videos)
+        assert len(matches) == 1 and matches[0]['kind'] == 'exact'
+
+    def test_offset_prefers_voted_alignment_on_ties(self):
+        """When several alignments score equally, report the voted offset —
+        not the edge of the refinement window."""
+        from app.dedupe import match_library
+        import random
+        rng = random.Random(11)
+        full = [rng.getrandbits(64) for _ in range(400)]
+        # Repeat a segment so ±1 shifts also align well
+        full[100:120] = full[80:100]
+        clip = list(full[80:140])
+        videos = [
+            {'path': 'full.mkv', 'size': 900, 'quick_hash': 'F', 'hashes': full},
+            {'path': 'clip.mkv', 'size': 90, 'quick_hash': 'C', 'hashes': clip},
+        ]
+        matches = match_library(videos)
+        assert len(matches) == 1
+        assert abs(matches[0]['offset_seconds'] - 80) <= 1
+
+    def test_quick_hash_identifies_identical_files(self, tmp_path):
+        """Sampled hash: identical content matches, single-byte change doesn't."""
+        from app.dedupe import quick_hash
+        payload = bytes(range(256)) * 5000
+        a = tmp_path / "a.mkv"; a.write_bytes(payload)
+        b = tmp_path / "b.mkv"; b.write_bytes(payload)
+        assert quick_hash(str(a)) == quick_hash(str(b))
+
+        # Differs at the very start (sampled region)
+        c = tmp_path / "c.mkv"; c.write_bytes(b'\xff' + payload[1:])
+        assert quick_hash(str(c)) != quick_hash(str(a))
+
+        # Same bytes, different length → different hash (size is mixed in)
+        d = tmp_path / "d.mkv"; d.write_bytes(payload + b'\x00')
+        assert quick_hash(str(d)) != quick_hash(str(a))
+
+    def test_quick_hash_missing_file(self, tmp_path):
+        from app.dedupe import quick_hash
+        assert quick_hash(str(tmp_path / "nope.mkv")) is None
+
+
+class TestDedupeRoutesRegistered:
+    def test_routes_present(self):
+        from app.api.routes import router
+        paths = {r.path for r in router.routes}
+        assert "/duplicates" in paths
+        assert "/duplicates/scan" in paths
+        assert "/duplicates/scan/cancel" in paths
+        assert "/duplicates/status" in paths
+        assert "/duplicates/delete-file" in paths
+
+
+# ---------------------------------------------------------------------------
+# Destination collisions — a container change must never eat a bystander
+# ---------------------------------------------------------------------------
+
+class TestDestinationCollision:
+    def _job(self, enc, fresh_db, src, container='mkv'):
+        qid = fresh_db.add_to_queue(file_path=str(src), profile_id=1,
+                                    status='processing')
+        job = enc.EncodingJob.__new__(enc.EncodingJob)
+        job.queue_item_id = qid
+        job.queue_item = {'file_path': str(src), 'current_specs': {},
+                          'duration_seconds': 0}
+        job.profile = {'name': 'P', 'codec': 'av1', 'container': container}
+        job._preprocessed = False
+        job._upscale_work_mpf = 0.0
+        job._paused_seconds = 0
+        job._paused_at_monotonic = None
+        job._hb_started_monotonic = None
+        job._job_started_monotonic = None
+        return job, qid
+
+    def test_finalize_refuses_to_clobber_existing_destination(
+            self, fresh_db, monkeypatch, tmp_path):
+        """source.mp4 -> .mkv when a DIFFERENT .mkv already holds the name:
+        the item fails, and BOTH the original and the bystander survive.
+
+        The old order (unlink source, then rename) deleted the original first,
+        so the failed rename left only the _optimized temp — which the orphan
+        sweeper then removed too, losing the file outright.
+        """
+        import app.encoder as enc
+        monkeypatch.setattr(enc, 'db', fresh_db)
+
+        src = tmp_path / "movie.mp4"
+        src.write_bytes(b"original" * 100)
+        bystander = tmp_path / "movie.mkv"
+        bystander.write_bytes(b"someone elses file")
+        temp_out = tmp_path / "movie_optimized.mkv"
+        temp_out.write_bytes(b"encoded")
+
+        job, qid = self._job(enc, fresh_db, src)
+        job._finalize_encoding()
+
+        assert src.exists(), "original must survive a destination collision"
+        assert bystander.read_bytes() == b"someone elses file"
+        assert not temp_out.exists(), "our redundant output is cleaned up"
+        item = fresh_db.get_queue_item(qid)
+        assert item['status'] == 'failed'
+        assert 'already exists' in item['error_message']
+
+    def test_finalize_replaces_source_when_container_unchanged(
+            self, fresh_db, monkeypatch, tmp_path):
+        """.mkv -> .mkv still overwrites its own source — that is the normal
+        path and must not be caught by the collision guard."""
+        import app.encoder as enc
+        monkeypatch.setattr(enc, 'db', fresh_db)
+
+        src = tmp_path / "movie.mkv"
+        src.write_bytes(b"original" * 100)
+        (tmp_path / "movie_optimized.mkv").write_bytes(b"encoded")
+
+        job, qid = self._job(enc, fresh_db, src)
+        job._finalize_encoding()
+
+        assert src.read_bytes() == b"encoded"
+        assert not (tmp_path / "movie_optimized.mkv").exists()
+        assert fresh_db.get_queue_item(qid)['status'] == 'completed'
+
+    def test_finalize_moves_then_deletes_on_container_change(
+            self, fresh_db, monkeypatch, tmp_path):
+        """.mp4 -> .mkv with a free destination: encode lands, source goes."""
+        import app.encoder as enc
+        monkeypatch.setattr(enc, 'db', fresh_db)
+
+        src = tmp_path / "movie.mp4"
+        src.write_bytes(b"original" * 100)
+        (tmp_path / "movie_optimized.mkv").write_bytes(b"encoded")
+
+        job, qid = self._job(enc, fresh_db, src)
+        job._finalize_encoding()
+
+        assert not src.exists()
+        assert (tmp_path / "movie.mkv").read_bytes() == b"encoded"
+        assert fresh_db.get_queue_item(qid)['status'] == 'completed'
+
+
+# ---------------------------------------------------------------------------
+# Upscale cost model — AI time scales with output pixels, not runtime
+# ---------------------------------------------------------------------------
+
+class TestUpscaleCostModel:
+    SD = {'width': 640, 'height': 480, 'duration': 7200, 'framerate': 24}
+    UHD = {'width': 3840, 'height': 2160, 'duration': 600, 'framerate': 60}
+
+    def _item(self, specs, factor=None, stereo=False):
+        item = {'duration_seconds': specs['duration'], 'current_specs': specs,
+                'target_specs': {'codec': 'av1'}}
+        if factor:
+            item['upscale_plan'] = json.dumps({'enabled': True, 'factor': factor})
+        if stereo:
+            item['stereo_plan'] = json.dumps({'enabled': True})
+        return item
+
+    def test_work_mpf_scales_with_pixels_and_frames(self):
+        from app.scanner import upscale_work_mpf
+
+        plan = json.dumps({'enabled': True, 'factor': 2})
+        # 7200s x 24fps x (1280*960 / 1e6) MP
+        assert abs(upscale_work_mpf(self.SD, plan) - 7200 * 24 * 1.2288) < 1
+        # Doubling the factor quadruples the work
+        plan4 = json.dumps({'enabled': True, 'factor': 4})
+        assert abs(upscale_work_mpf(self.SD, plan4)
+                   / upscale_work_mpf(self.SD, plan) - 4.0) < 1e-6
+        # Disabled plan or unknown dimensions -> no work
+        assert upscale_work_mpf(self.SD, json.dumps({'enabled': False})) == 0.0
+        assert upscale_work_mpf({}, plan) == 0.0
+
+    def test_short_4k_upscale_outranks_long_sd_upscale(self):
+        """The bug this replaces: a duration-based ratio ranked a 2-hour SD
+        upscale as far slower than a 10-minute 4K one. It is not."""
+        from app.scanner import estimate_item_seconds
+
+        stats = {'overall': 2.0, 'by_codec': {'av1': 2.0}, 'samples': 5}
+        sd = estimate_item_seconds(self._item(self.SD, factor=2), stats)
+        uhd = estimate_item_seconds(self._item(self.UHD, factor=2), stats)
+        assert uhd > sd
+
+    def test_upscale_outranks_plain_encode_with_no_history(self):
+        """A fresh install has no preprocessed history; an upscale must still
+        sort as far more expensive than a plain encode of the same file."""
+        from app.scanner import estimate_item_seconds
+
+        stats = {'overall': 2.0, 'by_codec': {'av1': 2.0}, 'samples': 5}
+        plain = estimate_item_seconds(self._item(self.SD), stats)
+        upscaled = estimate_item_seconds(self._item(self.SD, factor=2), stats)
+        assert plain == 7200 * 2.0
+        # ~59h of GPU work vs 4h of encoding for the same 2-hour file
+        assert upscaled > plain * 10
+
+    def test_measured_mpf_beats_legacy_ratio(self):
+        """Once real megapixel-frame samples exist they replace the rescaled
+        duration ratio."""
+        from app.scanner import _seconds_per_mpf, REFERENCE_MPF_PER_VIDEO_SECOND
+
+        assert _seconds_per_mpf({'pre_seconds_per_mpf': 3.0,
+                                 'preprocessed': 2000.0}) == 3.0
+        # No measured samples -> rescale the legacy ratio
+        assert abs(_seconds_per_mpf({'preprocessed': 295.0})
+                   - 295.0 / REFERENCE_MPF_PER_VIDEO_SECOND) < 1e-9
+        # Nothing learned at all -> built-in constant
+        assert _seconds_per_mpf({}) > 0
+
+    def test_history_learns_seconds_per_megapixel_frame(self, fresh_db):
+        from app.scanner import upscale_work_mpf
+
+        work = upscale_work_mpf(self.SD, json.dumps({'enabled': True, 'factor': 2}))
+        fresh_db.add_history(file_path="/x/up.mkv",
+                             encoding_time_seconds=int(work * 2),
+                             duration_seconds=7200, codec='av1',
+                             preprocessed=True, pre_work_mpf=work)
+        stats = fresh_db.get_encode_speed_stats()
+        assert stats['pre_mpf_samples'] == 1
+        assert abs(stats['pre_seconds_per_mpf'] - 2.0) < 0.01
+
+    def test_unknown_duration_still_returns_none(self):
+        from app.scanner import estimate_item_seconds
+
+        stats = {'overall': 2.0, 'by_codec': {}, 'samples': 1}
+        assert estimate_item_seconds(
+            {'duration_seconds': 0, 'current_specs': {}}, stats) is None
+
+    def test_stereo_only_job_costs_more_than_plain(self):
+        from app.scanner import estimate_item_seconds
+
+        stats = {'overall': 2.0, 'by_codec': {'av1': 2.0}, 'samples': 5}
+        plain = estimate_item_seconds(self._item(self.SD), stats)
+        stereo = estimate_item_seconds(self._item(self.SD, stereo=True), stats)
+        assert stereo > plain
+
+
+# ---------------------------------------------------------------------------
+# Short-output diagnosis — a container's duration is not its picture's length
+# ---------------------------------------------------------------------------
+
+class TestShortOutputDiagnosis:
+    """Verified against three real failures in the user's library:
+
+      Boondocks WEB-DL mkv  container 1324s, video ends 1266s, output 1266s
+      Boondocks WEB-DL mkv  container 1318s, video ends 1270s, output 1270s
+      FamilyTherapy mp4     video stream declares 1285s, data stops at 1030s
+    """
+
+    def _job(self):
+        import app.encoder as enc
+        return enc.EncodingJob.__new__(enc.EncodingJob)
+
+    def _patch(self, monkeypatch, last_pts, declared):
+        import app.scanner as scanner
+        monkeypatch.setattr(scanner, 'probe_last_video_pts',
+                            lambda p, start_seconds=0.0, timeout=300: last_pts)
+        monkeypatch.setattr(scanner, 'probe_declared_video_duration',
+                            lambda p: declared)
+
+    def test_subtitle_tail_is_not_truncation(self, monkeypatch):
+        """The mkv case: container says 1324s because a subtitle track runs
+        past the picture. Video really ends at 1266s and so does the output —
+        the encode is complete and must be accepted."""
+        self._patch(monkeypatch, last_pts=1266.1, declared=None)
+        verdict, msg = self._job()._diagnose_short_output(
+            Path("/x/ep.mkv"), out_duration=1266.0, source_duration=1324.0,
+            tolerance=26.5)
+        assert verdict == 'ok'
+        assert '1266' in msg
+
+    def test_damaged_source_is_quarantined_not_blamed_on_the_encode(
+            self, monkeypatch):
+        """The mp4 case: the VIDEO STREAM itself declares 1285s but the file
+        holds picture only to 1030s. No encode can ever be whole."""
+        self._patch(monkeypatch, last_pts=1030.4, declared=1284.5)
+        verdict, msg = self._job()._diagnose_short_output(
+            Path("/x/broken.mp4"), out_duration=1030.0, source_duration=1284.6,
+            tolerance=25.7)
+        assert verdict == 'bad_source'
+        assert 're-download' in msg.lower()
+
+    def test_real_truncation_still_fails(self, monkeypatch):
+        """HandBrake stopping at 10 minutes on a 22-minute source must still
+        keep the original — this is the case the check exists for."""
+        self._patch(monkeypatch, last_pts=1270.0, declared=None)
+        verdict, msg = self._job()._diagnose_short_output(
+            Path("/x/ep.mkv"), out_duration=600.0, source_duration=1318.0,
+            tolerance=26.4)
+        assert verdict == 'truncated'
+        assert 'stopped' in msg
+
+    def test_unverifiable_source_is_treated_as_truncation(self, monkeypatch):
+        """When the source can't be re-probed we must not gamble with the
+        only copy — fall back to keeping the original."""
+        self._patch(monkeypatch, last_pts=None, declared=None)
+        verdict, _ = self._job()._diagnose_short_output(
+            Path("/x/ep.mkv"), out_duration=600.0, source_duration=1318.0,
+            tolerance=26.4)
+        assert verdict == 'truncated'
+
+    def test_declared_duration_within_tolerance_is_not_damage(self, monkeypatch):
+        """An mp4 whose stream duration is a rounding-error longer than its
+        last packet is normal, not a damaged file."""
+        self._patch(monkeypatch, last_pts=1030.4, declared=1032.0)
+        verdict, _ = self._job()._diagnose_short_output(
+            Path("/x/ok.mp4"), out_duration=1030.0, source_duration=1060.0,
+            tolerance=21.2)
+        assert verdict == 'ok'
+
+
+# ---------------------------------------------------------------------------
+# "Show in folder" — opens the file manager on the HOST, never a client path
+# ---------------------------------------------------------------------------
+
+class TestRevealInFolder:
+    def test_refuses_paths_with_illegal_characters(self):
+        """The Windows arm builds a command STRING, so a quote in the path
+        would be a way out of it. No legal Windows path has one."""
+        from app.api.filesystem import reveal_path
+
+        for bad in ['C:\\a"b\\x.mkv', 'C:\\a\nb\\x.mkv', 'C:\\a\x00b\\x.mkv']:
+            result = reveal_path(bad)
+            assert result['ok'] is False
+            assert 'illegal' in result['detail']
+
+    def test_missing_folder_reports_instead_of_launching(self, tmp_path):
+        from app.api.filesystem import reveal_path
+
+        result = reveal_path(str(tmp_path / "gone" / "nothing.mkv"))
+        assert result['ok'] is False
+        assert 'no longer exists' in result['detail']
+
+    def test_empty_path_is_rejected(self):
+        from app.api.filesystem import reveal_path
+
+        assert reveal_path('')['ok'] is False
+        assert reveal_path('   ')['ok'] is False
+
+    def test_endpoint_uses_the_stored_path_not_a_client_supplied_one(
+            self, fresh_db, monkeypatch):
+        """The route takes an item id and reads the path from the queue row,
+        so there is no path parameter for a caller to aim elsewhere."""
+        import asyncio
+        from app.api import queue_routes, filesystem
+        monkeypatch.setattr(queue_routes, 'db', fresh_db)
+
+        seen = []
+
+        def _fake_reveal(path):
+            seen.append(path)
+            return {'ok': True, 'folder': '/media/tv', 'detail': 'Opened tv'}
+
+        monkeypatch.setattr(filesystem, 'reveal_path', _fake_reveal)
+
+        qid = fresh_db.add_to_queue(file_path="/media/tv/ep.mkv", profile_id=1)
+        result = asyncio.run(queue_routes.reveal_queue_item(qid, current_user={}))
+
+        assert seen == ["/media/tv/ep.mkv"]
+        assert result['success'] is True
+        assert result['path'] == "/media/tv/ep.mkv"
+        assert result['folder'] == '/media/tv'
+
+    def test_endpoint_404s_for_unknown_item(self, fresh_db, monkeypatch):
+        import asyncio
+        from fastapi import HTTPException
+        from app.api import queue_routes
+        monkeypatch.setattr(queue_routes, 'db', fresh_db)
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(queue_routes.reveal_queue_item(999999, current_user={}))
+        assert exc.value.status_code == 404
+
+    def test_failure_still_returns_the_path_for_the_clipboard_fallback(
+            self, fresh_db, monkeypatch):
+        """A headless host (or a browser on another device) can't be shown a
+        window — the UI copies the path instead, so it must come back."""
+        import asyncio
+        from app.api import queue_routes, filesystem
+        monkeypatch.setattr(queue_routes, 'db', fresh_db)
+        monkeypatch.setattr(filesystem, 'reveal_path', lambda path: {
+            'ok': False, 'folder': '/media/tv',
+            'detail': 'No file manager available on the Optimizarr host'})
+
+        qid = fresh_db.add_to_queue(file_path="/media/tv/ep.mkv", profile_id=1)
+        result = asyncio.run(queue_routes.reveal_queue_item(qid, current_user={}))
+
+        assert result['success'] is False
+        assert result['folder'] == '/media/tv'
+        assert result['path'] == "/media/tv/ep.mkv"

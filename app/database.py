@@ -443,6 +443,53 @@ class Database:
                 cursor.execute("ALTER TABLE history ADD COLUMN duration_seconds REAL DEFAULT 0")
                 print("  ↳ Migrated: added 'duration_seconds' to history")
 
+            # Duplicate detection: perceptual fingerprints + match results
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS fingerprints (
+                    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_path    TEXT UNIQUE NOT NULL,
+                    file_size    INTEGER,
+                    mtime        REAL,
+                    quick_hash   TEXT,
+                    frame_hashes BLOB,
+                    duration     REAL DEFAULT 0,
+                    error        TEXT,
+                    created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS duplicate_matches (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    file_a          TEXT NOT NULL,
+                    file_b          TEXT NOT NULL,
+                    kind            TEXT NOT NULL,
+                    score           REAL DEFAULT 0,
+                    offset_seconds  REAL DEFAULT 0,
+                    overlap_seconds REAL DEFAULT 0,
+                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(file_a, file_b)
+                )
+            """)
+
+            # preprocessed — job included an upscale/stereo phase, so its
+            # encode time is dominated by AI work, not HandBrake. Kept as a
+            # separate speed-learning group so day-long upscale jobs don't
+            # poison the plain-encode averages.
+            if 'preprocessed' not in history_cols:
+                cursor.execute("ALTER TABLE history ADD COLUMN preprocessed INTEGER DEFAULT 0")
+                # Backfill: legacy rows recorded wall-clock time including AI
+                # phases. No plain encode runs slower than 100× realtime, so
+                # anything above that was an upscale/stereo job (or slept
+                # through) — reclassify instead of letting it poison the
+                # plain-encode speed group.
+                cursor.execute("""
+                    UPDATE history SET preprocessed = 1
+                    WHERE encoding_time_seconds > 0 AND duration_seconds > 0
+                      AND (CAST(encoding_time_seconds AS REAL) / duration_seconds) > 100
+                """)
+                print(f"  ↳ Migrated: added 'preprocessed' to history "
+                      f"({cursor.rowcount} legacy row(s) reclassified)")
+
             # retry_count — automatic retry attempts for failed encodes
             cursor.execute("PRAGMA table_info(queue)")
             queue_cols_retry = [col[1] for col in cursor.fetchall()]
@@ -467,6 +514,36 @@ class Database:
             if 'retry_after' not in queue_cols_ra:
                 cursor.execute("ALTER TABLE queue ADD COLUMN retry_after TIMESTAMP")
                 print("  ↳ Migrated: added 'retry_after' to queue")
+
+            # Pipeline phase telemetry. A job is stereo → upscale → encode →
+            # finalize; each phase has its own progress and ETA. Without this
+            # the UI showed one undifferentiated bar, so a multi-hour upscale
+            # and a stalled finalize were indistinguishable from a live encode.
+            cursor.execute("PRAGMA table_info(queue)")
+            queue_cols_phase = [col[1] for col in cursor.fetchall()]
+            if 'phase' not in queue_cols_phase:
+                cursor.execute("ALTER TABLE queue ADD COLUMN phase TEXT")
+                print("  ↳ Migrated: added 'phase' to queue")
+            if 'phase_progress' not in queue_cols_phase:
+                cursor.execute(
+                    "ALTER TABLE queue ADD COLUMN phase_progress REAL DEFAULT 0")
+                print("  ↳ Migrated: added 'phase_progress' to queue")
+            if 'phase_eta_seconds' not in queue_cols_phase:
+                cursor.execute(
+                    "ALTER TABLE queue ADD COLUMN phase_eta_seconds INTEGER DEFAULT 0")
+                print("  ↳ Migrated: added 'phase_eta_seconds' to queue")
+
+            # pre_work_mpf — megapixel-frames of AI work an upscale job did
+            # (output frames × output megapixels). Upscale cost tracks pixels
+            # pushed through the model, NOT runtime: a 10-minute 4K ×2 job
+            # dwarfs a 2-hour 480p ×2 one. Learning seconds-per-megapixel-frame
+            # from this makes fastest/slowest-first rank upscales correctly.
+            cursor.execute("PRAGMA table_info(history)")
+            history_cols_mpf = [col[1] for col in cursor.fetchall()]
+            if 'pre_work_mpf' not in history_cols_mpf:
+                cursor.execute(
+                    "ALTER TABLE history ADD COLUMN pre_work_mpf REAL DEFAULT 0")
+                print("  ↳ Migrated: added 'pre_work_mpf' to history")
 
             # Auto-sync interval for external connections (Patch 37); 0 = off
             cursor.execute("PRAGMA table_info(external_connections)")
@@ -1055,6 +1132,8 @@ class Database:
             cursor = conn.cursor()
             cursor.execute(
                 "UPDATE queue SET status = 'pending', progress = 0.0, "
+                "phase = NULL, phase_progress = 0.0, phase_eta_seconds = 0, "
+                "current_fps = 0, eta_seconds = 0, "
                 "paused_reason = NULL WHERE status IN ('processing', 'paused')"
             )
             return cursor.rowcount
@@ -1263,16 +1342,94 @@ class Database:
             )
             return cursor.rowcount
 
+    # ── Duplicate detection ─────────────────────────────────────────────
+    def get_fingerprint(self, file_path: str) -> Optional[Dict]:
+        with self.get_read_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM fingerprints WHERE file_path = ?", (file_path,))
+            row = cursor.fetchone()
+            return dict(row) if row else None
+
+    def get_all_fingerprints(self) -> List[Dict]:
+        with self.get_read_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM fingerprints")
+            return [dict(r) for r in cursor.fetchall()]
+
+    def upsert_fingerprint(self, file_path: str, **kwargs):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO fingerprints
+                    (file_path, file_size, mtime, quick_hash, frame_hashes,
+                     duration, error)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(file_path) DO UPDATE SET
+                    file_size = excluded.file_size,
+                    mtime = excluded.mtime,
+                    quick_hash = excluded.quick_hash,
+                    frame_hashes = excluded.frame_hashes,
+                    duration = excluded.duration,
+                    error = excluded.error
+            """, (
+                file_path,
+                kwargs.get('file_size', 0),
+                kwargs.get('mtime', 0),
+                kwargs.get('quick_hash'),
+                kwargs.get('frame_hashes'),
+                kwargs.get('duration', 0),
+                kwargs.get('error'),
+            ))
+
+    def delete_fingerprint(self, file_path: str):
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM fingerprints WHERE file_path = ?", (file_path,))
+            cursor.execute(
+                "DELETE FROM duplicate_matches WHERE file_a = ? OR file_b = ?",
+                (file_path, file_path))
+
+    def replace_duplicate_matches(self, matches: List[Dict]):
+        """Atomically swap in a fresh set of match results."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM duplicate_matches")
+            cursor.executemany("""
+                INSERT OR REPLACE INTO duplicate_matches
+                    (file_a, file_b, kind, score, offset_seconds, overlap_seconds)
+                VALUES (?, ?, ?, ?, ?, ?)
+            """, [
+                (m['file_a'], m['file_b'], m['kind'], m.get('score', 0),
+                 m.get('offset_seconds', 0), m.get('overlap_seconds', 0))
+                for m in matches
+            ])
+
+    def get_duplicate_matches(self) -> List[Dict]:
+        with self.get_read_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT * FROM duplicate_matches
+                ORDER BY file_a, score DESC
+            """)
+            return [dict(r) for r in cursor.fetchall()]
+
+    def delete_queue_items_by_path(self, file_path: str) -> int:
+        """Remove all queue rows referencing a file (used after deletion)."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM queue WHERE file_path = ?", (file_path,))
+            return cursor.rowcount
+
     # History and Statistics
     def add_history(self, **kwargs) -> int:
         """Add a history record."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO history (file_path, profile_name, original_size_bytes, new_size_bytes, 
+                INSERT INTO history (file_path, profile_name, original_size_bytes, new_size_bytes,
                                      savings_bytes, encoding_time_seconds, codec, container,
-                                     duration_seconds)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                     duration_seconds, preprocessed, pre_work_mpf)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 kwargs.get('file_path'),
                 kwargs.get('profile_name'),
@@ -1283,39 +1440,80 @@ class Database:
                 kwargs.get('codec'),
                 kwargs.get('container'),
                 kwargs.get('duration_seconds', 0),
+                1 if kwargs.get('preprocessed') else 0,
+                kwargs.get('pre_work_mpf', 0) or 0,
             ))
             return cursor.lastrowid
     
+    # Sanity bounds for plain-encode speed ratios. History rows written
+    # before encode time was measured around the HandBrake phase alone
+    # include upscale phases / thermal pauses / sleep (ratios up to ~4900×);
+    # the median absorbs most of that, the clamp catches the rest.
+    _RATIO_MIN = 0.05
+    _RATIO_MAX = 100.0
+
     def get_encode_speed_stats(self) -> Dict:
-        """Average encode speed ratios from history.
+        """Encode speed ratios learned from history.
 
-        Ratio = encoding wall-clock seconds per second of video (2.0 means a
-        1-hour video takes ~2 hours to encode). Grouped by target codec since
-        speed differs wildly between e.g. NVENC H.265 and software AV1.
-        Only rows with a known duration count (pre-duration-tracking history
-        has duration_seconds = 0 and is excluded).
+        Ratio = encode seconds per second of video (2.0 means a 1-hour video
+        takes ~2 hours). Grouped by target codec since speed differs wildly
+        between e.g. NVENC H.265 and software AV1. Uses the MEDIAN of per-row
+        ratios, not the mean — a single polluted row (machine slept, legacy
+        wall-clock timing) shifts a mean arbitrarily far but barely moves a
+        median. Only rows with a known duration count.
 
-        Returns {'overall': float|None, 'by_codec': {codec: float}, 'samples': int}.
+        Preprocessed jobs (AI upscale / stereo phases) are their own group:
+        their times are genuinely days-long and would poison the plain-encode
+        numbers, but as a separate ratio they make slowest-first rank upscale
+        items realistically.
+
+        Returns {'overall': float|None, 'by_codec': {codec: float},
+                 'samples': int, 'preprocessed': float|None,
+                 'preprocessed_samples': int,
+                 'pre_seconds_per_mpf': float|None, 'pre_mpf_samples': int}.
         """
+        import statistics as _stats
         with self.get_read_connection() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                SELECT codec,
-                       AVG(CAST(encoding_time_seconds AS REAL) / duration_seconds) AS ratio,
-                       COUNT(*) AS n
+                SELECT codec, COALESCE(preprocessed, 0) AS preprocessed,
+                       COALESCE(pre_work_mpf, 0) AS pre_work_mpf,
+                       encoding_time_seconds,
+                       CAST(encoding_time_seconds AS REAL) / duration_seconds AS ratio
                 FROM history
                 WHERE encoding_time_seconds > 0 AND duration_seconds > 0
-                GROUP BY codec
             """)
-            by_codec = {}
-            weighted = 0.0
-            samples = 0
+            plain_by_codec: Dict[str, list] = {}
+            plain_all: list = []
+            pre_all: list = []
+            pre_mpf: list = []
             for row in cursor.fetchall():
-                by_codec[row['codec'] or ''] = row['ratio']
-                weighted += row['ratio'] * row['n']
-                samples += row['n']
-            overall = (weighted / samples) if samples else None
-            return {'overall': overall, 'by_codec': by_codec, 'samples': samples}
+                if row['preprocessed']:
+                    pre_all.append(row['ratio'])
+                    # Seconds of AI work per megapixel-frame — the only figure
+                    # that transfers between an upscale of a 480p short and one
+                    # of a 4K feature. Duration-based ratios do not.
+                    if row['pre_work_mpf'] > 0:
+                        pre_mpf.append(row['encoding_time_seconds'] / row['pre_work_mpf'])
+                else:
+                    plain_by_codec.setdefault(row['codec'] or '', []).append(row['ratio'])
+                    plain_all.append(row['ratio'])
+
+        def _clamped_median(ratios):
+            return max(self._RATIO_MIN, min(self._RATIO_MAX, _stats.median(ratios)))
+
+        by_codec = {codec: _clamped_median(r) for codec, r in plain_by_codec.items()}
+        overall = _clamped_median(plain_all) if plain_all else None
+        preprocessed = _stats.median(pre_all) if pre_all else None
+        return {
+            'overall': overall,
+            'by_codec': by_codec,
+            'samples': len(plain_all),
+            'preprocessed': preprocessed,
+            'preprocessed_samples': len(pre_all),
+            'pre_seconds_per_mpf': _stats.median(pre_mpf) if pre_mpf else None,
+            'pre_mpf_samples': len(pre_mpf),
+        }
 
     def get_pending_duration_by_codec(self) -> List[Dict]:
         """Sum of video durations for pending queue items, per target codec.
@@ -1328,13 +1526,35 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT COALESCE(json_extract(target_specs, '$.codec'), '') AS codec,
+                       CASE WHEN COALESCE(json_extract(upscale_plan, '$.enabled'), 0)
+                              OR COALESCE(json_extract(stereo_plan, '$.enabled'), 0)
+                            THEN 1 ELSE 0 END AS preprocessed,
                        COALESCE(SUM(CASE WHEN duration_seconds > 0
                            THEN duration_seconds ELSE 0 END), 0) AS total_duration,
                        SUM(CASE WHEN duration_seconds IS NULL OR duration_seconds <= 0
                            THEN 1 ELSE 0 END) AS unknown_count
                 FROM queue
                 WHERE status = 'pending'
-                GROUP BY 1
+                GROUP BY 1, 2
+            """)
+            return [dict(row) for row in cursor.fetchall()]
+
+    def get_pending_preprocessed_items(self) -> List[Dict]:
+        """Pending queue items that carry an AI upscale or stereo phase.
+
+        Their cost is driven by output pixels, not runtime, so the total-queue
+        ETA has to price them one at a time instead of summing durations by
+        codec the way plain encodes are handled.
+        """
+        with self.get_read_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, duration_seconds, current_specs, target_specs,
+                       upscale_plan, stereo_plan
+                FROM queue
+                WHERE status = 'pending'
+                  AND (COALESCE(json_extract(upscale_plan, '$.enabled'), 0)
+                       OR COALESCE(json_extract(stereo_plan, '$.enabled'), 0))
             """)
             return [dict(row) for row in cursor.fetchall()]
 

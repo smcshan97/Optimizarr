@@ -22,6 +22,7 @@ from app.api.connection_routes import router as connection_router
 from app.api.system_routes import router as system_router
 from app.api.upscaler_routes import router as upscaler_router
 from app.api.filesystem import router as filesystem_router
+from app.api.dedupe_routes import router as dedupe_router
 
 router = APIRouter()
 
@@ -32,3 +33,4 @@ router.include_router(connection_router)
 router.include_router(system_router)
 router.include_router(upscaler_router)
 router.include_router(filesystem_router)
+router.include_router(dedupe_router)

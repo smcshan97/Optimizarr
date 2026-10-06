@@ -213,12 +213,34 @@ if web_dir.exists():
 # Page routes
 # ============================================================
 
+def _serve_page_with_cache_busting(page_file: Path) -> HTMLResponse:
+    """Serve an HTML page with ?v=<mtime> stamped on /static/ asset URLs.
+
+    Browsers cache app.js/theme.css indefinitely, so after an update users
+    kept running stale JS until a manual hard refresh. The mtime changes
+    whenever the file on disk changes, forcing a re-fetch exactly then.
+    """
+    import re as _re
+    html = page_file.read_text(encoding='utf-8')
+
+    def _stamp(match):
+        rel = match.group(1)
+        asset = web_dir / "static" / rel
+        try:
+            return f'/static/{rel}?v={int(asset.stat().st_mtime)}'
+        except OSError:
+            return match.group(0)
+
+    html = _re.sub(r'/static/([\w/.-]+\.(?:js|css))', _stamp, html)
+    return HTMLResponse(html)
+
+
 @app.get("/", response_class=HTMLResponse)
 async def root():
     """Serve the main web interface."""
     index_file = web_dir / "templates" / "index.html"
     if index_file.exists():
-        return FileResponse(index_file)
+        return _serve_page_with_cache_busting(index_file)
     return HTMLResponse("""
     <!DOCTYPE html><html><head><title>Optimizarr</title></head>
     <body>
@@ -236,7 +258,7 @@ async def login_page():
     """Serve the login page."""
     login_file = web_dir / "templates" / "login.html"
     if login_file.exists():
-        return FileResponse(login_file)
+        return _serve_page_with_cache_busting(login_file)
     return HTMLResponse("""
     <!DOCTYPE html><html><head><title>Login - Optimizarr</title></head>
     <body><h1>Login</h1><p>Use the API at /api/auth/login</p></body></html>

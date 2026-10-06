@@ -84,13 +84,19 @@ GET /api/v3/episodefile?seriesId={id}
 ```
 
 **Register webhook (Sonarr/Radarr):**
+
+Sonarr/Radarr run in containers; Optimizarr runs natively on the Windows host.
+The callback URL must therefore resolve the *host* from inside the container —
+`host.docker.internal` — not an `optimizarr` service name on a shared Docker
+network. Use the host LAN IP instead if `host.docker.internal` is unavailable.
+
 ```
 POST /api/v3/notification
 {
   "name": "Optimizarr",
   "implementation": "Webhook",
   "fields": [
-    { "name": "url", "value": "http://optimizarr:5000/api/webhooks/sonarr" },
+    { "name": "url", "value": "http://host.docker.internal:5757/api/webhooks/sonarr" },
     { "name": "method", "value": 1 }   // POST
   ],
   "onDownload": true,

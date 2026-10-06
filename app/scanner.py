@@ -289,6 +289,15 @@ class MediaScanner:
         for file_path, current_specs in _probe_batches():
             if not current_specs:
                 continue
+            # A file with no decodable video stream (corrupt, incomplete, or
+            # still downloading) can never encode — queue it quarantined so it
+            # doesn't waste an encode slot. Only when a probe tool actually
+            # ran; otherwise 'unknown' just means we couldn't look.
+            broken = (
+                (self.ffprobe_available or self.handbrake_available)
+                and current_specs.get('codec', 'unknown') == 'unknown'
+                and current_specs.get('resolution', 'unknown') == 'unknown'
+            )
             perm_status, _ = self.check_file_permissions(file_path)
             target_specs = {
                 'codec': profile['codec'],
@@ -362,19 +371,30 @@ class MediaScanner:
                 stereo_plan=stereo_plan,
             )
 
-            db.add_to_queue(
+            if broken:
+                status = 'quarantined'
+            elif perm_status == 'ok':
+                status = 'pending'
+            else:
+                status = 'permission_error'
+            item_id = db.add_to_queue(
                 file_path=file_path, root_id=root_id, profile_id=scan_root['profile_id'],
-                status='pending' if perm_status == 'ok' else 'permission_error',
+                status=status,
                 current_specs=current_specs, target_specs=target_specs,
                 file_size_bytes=file_size, estimated_savings_bytes=savings,
                 duration_seconds=current_specs.get('duration', 0),
                 upscale_plan=upscale_plan,
                 stereo_plan=stereo_plan,
             )
+            if broken:
+                db.update_queue_item(item_id, error_message=(
+                    'No decodable video stream found — file is corrupt, '
+                    'incomplete, or still downloading'))
             upscale_tag = " 🔼upscale" if upscale_plan else ""
             stereo_tag = " 🎥3D" if stereo_plan else ""
             added_count += 1
-            print(f"  + Added: {Path(file_path).name} [{current_specs.get('codec','?')} {current_specs.get('resolution','?')}]{upscale_tag}{stereo_tag}")
+            marker = "☣" if broken else "+"
+            print(f"  {marker} Added: {Path(file_path).name} [{current_specs.get('codec','?')} {current_specs.get('resolution','?')}]{upscale_tag}{stereo_tag}{' (quarantined)' if broken else ''}")
         print(f"✓ Added {added_count} files to queue")
         from app.devlog import devlog
         devlog('scan', root=root_id, queued=added_count)
@@ -555,25 +575,230 @@ class MediaScanner:
         return sum(self.scan_root(root['id']) for root in scan_roots)
 
 
-def estimate_encode_seconds(duration_seconds, target_codec, speed_stats) -> Optional[float]:
+def probe_declared_video_duration(file_path: str) -> Optional[float]:
+    """Duration the VIDEO STREAM itself claims, in seconds, or None.
+
+    Deliberately not the container duration. A container reports the longest
+    track it holds, and a subtitle track that runs past the end of the picture
+    (routine in WEB-DL mkvs) inflates it by a minute or more. The video
+    stream's own duration is a claim about the picture — MKV usually declares
+    nothing (None), while MP4/MOV state it exactly.
+    """
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries', 'stream=duration', '-of', 'csv=p=0', file_path],
+            capture_output=True, text=True, timeout=30,
+            encoding='utf-8', errors='replace',
+        )
+        if result.returncode != 0:
+            return None
+        value = result.stdout.strip().splitlines()[0].strip() if result.stdout.strip() else ''
+        return float(value) if value and value != 'N/A' else None
+    except (subprocess.TimeoutExpired, OSError, ValueError, IndexError):
+        return None
+
+
+def probe_last_video_pts(file_path: str, start_seconds: float = 0.0,
+                         timeout: int = 300) -> Optional[float]:
+    """Timestamp of the last video packet at or after ``start_seconds``.
+
+    Demuxes (does not decode) from ``start_seconds`` to the end of the file,
+    so it answers "does this file actually contain picture past time T?" for
+    a few seconds of I/O rather than a full pass.
+
+    Returns the largest packet timestamp found, 0.0 when the window held no
+    video packets at all, or None when the probe could not be run — the
+    caller must treat None as "unknown", never as "no content".
+    """
+    start = max(0.0, start_seconds)
+    try:
+        result = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries', 'packet=pts_time', '-of', 'csv=p=0',
+             '-read_intervals', f'{start:.3f}%+#100000000', file_path],
+            capture_output=True, text=True, timeout=timeout,
+            encoding='utf-8', errors='replace',
+        )
+        if result.returncode != 0:
+            return None
+        last = 0.0
+        for line in result.stdout.splitlines():
+            line = line.strip().rstrip(',')
+            if not line or line == 'N/A':
+                continue
+            try:
+                last = max(last, float(line))
+            except ValueError:
+                continue
+        return last
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+
+
+def estimate_encode_seconds(duration_seconds, target_codec, speed_stats,
+                            preprocessed: bool = False) -> Optional[float]:
     """Estimate wall-clock encode time for a video.
 
     duration × speed ratio (encode seconds per video second), using the
-    history average for the target codec, falling back to the overall
-    average across all codecs, then to 1.0× realtime when there's no
+    learned median for the target codec, falling back to the overall
+    median across all codecs, then to 1.0× realtime when there's no
     history at all. Returns None when the video duration is unknown —
     callers should sort those last rather than guessing.
+
+    ``preprocessed`` selects the (much larger) ratio learned from past AI
+    upscale/stereo jobs. Kept for callers that only have a duration to work
+    with; anything holding a whole queue item should use
+    ``estimate_item_seconds`` instead, which prices the AI phase by output
+    pixels rather than runtime.
     """
     if not duration_seconds or duration_seconds <= 0:
         return None
     ratio = None
     if speed_stats:
-        ratio = (speed_stats.get('by_codec') or {}).get(target_codec)
+        if preprocessed:
+            ratio = speed_stats.get('preprocessed')
+        if ratio is None:
+            ratio = (speed_stats.get('by_codec') or {}).get(target_codec)
         if ratio is None:
             ratio = speed_stats.get('overall')
     if ratio is None or ratio <= 0:
         ratio = 1.0
     return duration_seconds * ratio
+
+
+# Fallback cost of AI upscaling when nothing has been learned yet: seconds of
+# GPU time per output megapixel-frame. Real-ESRGAN ncnn on a mid-range card
+# runs roughly 1s for a ~1MP output frame. Only the ORDER it produces matters
+# for sorting; the learned median from history replaces it after the first
+# completed upscale.
+DEFAULT_UPSCALE_SECONDS_PER_MPF = 1.0
+
+# Fallback multiplier for stereo-only (no upscale) jobs with no history: depth
+# estimation is expensive but nothing like a 4× upscale.
+STEREO_FALLBACK_MULTIPLIER = 20.0
+
+# Megapixel-frames per second of video for a "typical" upscale job: 640×480
+# source, ×2, 24fps → 24 × (1280·960 / 1e6). Used to convert the OLD
+# duration-based preprocessed ratio into a per-megapixel-frame figure, so a
+# library that has only ever learned "upscales run at N× realtime" keeps that
+# hard-won magnitude while still ranking jobs by the pixels they actually
+# push. Superseded as soon as one upscale completes under the new accounting.
+REFERENCE_MPF_PER_VIDEO_SECOND = 29.5
+
+
+def _seconds_per_mpf(speed_stats) -> float:
+    """Learned seconds of AI time per output megapixel-frame.
+
+    Prefers the directly measured median. Falls back to rescaling the legacy
+    duration-based preprocessed ratio, then to a built-in constant.
+    """
+    stats = speed_stats or {}
+    measured = stats.get('pre_seconds_per_mpf')
+    if measured and measured > 0:
+        return measured
+    ratio = stats.get('preprocessed')
+    if ratio and ratio > 0:
+        return ratio / REFERENCE_MPF_PER_VIDEO_SECOND
+    return DEFAULT_UPSCALE_SECONDS_PER_MPF
+
+
+def _plan_dict(raw):
+    """Parse an upscale/stereo plan (JSON string or dict); {} when absent."""
+    if not raw:
+        return {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (ValueError, TypeError):
+            return {}
+    return raw if isinstance(raw, dict) else {}
+
+
+def upscale_work_mpf(specs, upscale_plan) -> float:
+    """Megapixel-frames of AI work an upscale plan implies.
+
+    ``frames × output_megapixels``. This — not runtime — is what an upscaler
+    actually charges for: every output pixel goes through the model once. A
+    10-minute 4K ×2 job is far more work than a 2-hour 480p ×2 one, which a
+    duration-based estimate gets exactly backwards.
+
+    Returns 0.0 when the plan is off or the source dimensions are unknown.
+    """
+    plan = _plan_dict(upscale_plan)
+    if not plan.get('enabled'):
+        return 0.0
+    specs = _plan_dict(specs)
+    width = float(specs.get('width') or 0)
+    height = float(specs.get('height') or 0)
+    duration = float(specs.get('duration') or 0)
+    if width <= 0 or height <= 0 or duration <= 0:
+        return 0.0
+    # Missing framerate is common on odd containers; 24fps under-counts a
+    # 60fps source rather than inventing a wild number.
+    fps = float(specs.get('framerate') or 0) or 24.0
+    factor = float(plan.get('factor') or 2)
+    out_megapixels = (width * factor) * (height * factor) / 1_000_000.0
+    return duration * fps * out_megapixels
+
+
+def estimate_item_seconds(item, speed_stats) -> Optional[float]:
+    """Total estimated wall-clock seconds for a queue item, all phases.
+
+    Plain encode: duration × the learned ratio for its target codec.
+    Upscale job:  AI time (megapixel-frames × learned seconds-per-MPF) PLUS
+                  the HandBrake encode that follows it — the upscale is the
+                  dominant term but the encode is not free, and it runs on the
+                  UPSCALED frames, so it is scaled by the pixel growth.
+    Stereo job:   the learned preprocessed ratio, or a flat multiplier.
+
+    Returns None when the duration is unknown — callers decide where to sort
+    those rather than being handed a fabricated number.
+    """
+    specs = item.get('current_specs')
+    if isinstance(specs, str):
+        specs = _plan_dict(specs)
+    specs = specs if isinstance(specs, dict) else {}
+
+    duration = float(item.get('duration_seconds') or specs.get('duration') or 0)
+    if duration <= 0:
+        return None
+
+    target = item.get('target_specs')
+    if isinstance(target, str):
+        target = _plan_dict(target)
+    codec = target.get('codec') if isinstance(target, dict) else None
+
+    upscale_plan = _plan_dict(item.get('upscale_plan'))
+    stereo_plan = _plan_dict(item.get('stereo_plan'))
+    has_upscale = bool(upscale_plan.get('enabled'))
+    has_stereo = bool(stereo_plan.get('enabled'))
+
+    if not has_upscale and not has_stereo:
+        return estimate_encode_seconds(duration, codec, speed_stats)
+
+    # HandBrake still has to run afterwards, on bigger frames.
+    encode_part = estimate_encode_seconds(duration, codec, speed_stats) or 0.0
+    factor = float(upscale_plan.get('factor') or 1) if has_upscale else 1.0
+    encode_part *= max(1.0, factor ** 2)
+
+    ai_part = 0.0
+    if has_upscale:
+        work = upscale_work_mpf(specs, upscale_plan)
+        if work > 0:
+            ai_part = work * _seconds_per_mpf(speed_stats)
+        else:
+            # No dimensions recorded — fall back to the duration-based
+            # preprocessed ratio so the item still outranks plain encodes.
+            ratio = (speed_stats or {}).get('preprocessed')
+            ai_part = duration * (ratio if ratio and ratio > 0
+                                  else STEREO_FALLBACK_MULTIPLIER)
+    if has_stereo:
+        ratio = (speed_stats or {}).get('preprocessed')
+        ai_part += duration * (ratio if ratio and ratio > 0
+                               else STEREO_FALLBACK_MULTIPLIER)
+
+    return ai_part + encode_part
 
 
 def cleanup_orphaned_outputs(exclude_paths=None, min_age_seconds: float = 60.0) -> int:

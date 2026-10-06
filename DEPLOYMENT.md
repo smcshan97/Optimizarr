@@ -32,7 +32,7 @@ pip install -r requirements.txt
 python -m app.main
 ```
 
-Server starts on **http://localhost:5000**.
+Server starts on **http://localhost:5757**.
 
 First-run credentials are `admin` / `admin` — you are forced to change the
 password on first login. The `SECRET_KEY` is auto-generated and persisted to
@@ -53,19 +53,17 @@ By design the heavy startup work (orphan-temp sweep, encode resume, duration
 backfill) runs in background threads at **program start**, so launching is
 quick and it does **not** belong in Windows boot. Pick whichever launcher fits:
 
-**A. Shortcut / batch file (simplest).** A `start-optimizarr.bat`:
+**A. Batch file (simplest).** `start-optimizarr.bat` ships in the repo — just
+double-click it, or pin a shortcut to it.
 
-```bat
-@echo off
-cd /d D:\Downloads\optimizarr
-call .venv\Scripts\activate.bat
-python -m app.main
-```
+It self-elevates through UAC, so you get **CPU-temp throttling** without having
+to tick *Run as administrator* on a shortcut. It uses `.venv\Scripts\python.exe`
+if a venv exists and falls back to system Python otherwise, and it keeps the
+window open on exit so you can read any error.
 
-Double-click it (or pin a shortcut). To get **CPU-temp throttling**, run it
-elevated: shortcut → Properties → Advanced → *Run as administrator*. (GPU temp
-via pynvml works without elevation; CPU temp via WMI needs admin. The app
-degrades gracefully — GPU temp is the primary trigger on RTX hardware.)
+Cancelling the UAC prompt just means no CPU-temp trigger — GPU temp via pynvml
+works unelevated and is the primary trigger on RTX hardware, so the app degrades
+gracefully rather than failing.
 
 **B. PyInstaller elevated .exe.** Build a single launchable exe that requests
 admin via its manifest, so a normal double-click gets CPU-temp monitoring:

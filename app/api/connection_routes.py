@@ -339,7 +339,7 @@ async def register_webhook(
 ):
     """
     Register Optimizarr as a webhook in Sonarr/Radarr.
-    Body: { optimizarr_url: "http://your-optimizarr:5000" }
+    Body: { optimizarr_url: "http://your-optimizarr:5757" }
     """
     from app.external_connections import connection_manager
 

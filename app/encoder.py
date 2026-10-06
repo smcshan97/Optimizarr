@@ -22,10 +22,128 @@ from app.resources import resource_monitor, resource_throttler
 # HandBrakeCLI progress line, e.g.:
 #   Encoding: task 1 of 1, 23.45 % (113.06 fps, avg 102.33 fps, ETA 00h12m34s)
 # The fps/ETA group is absent on the first few lines of an encode.
+# Kept as a fallback — the primary path is now the --json stream below.
 HB_PROGRESS_RE = re.compile(
     r'Encoding: task \d+ of \d+, ([\d.]+) %'
     r'(?:\s*\(([\d.]+) fps, avg ([\d.]+) fps, ETA (\d+)h(\d+)m(\d+)s\))?'
 )
+
+
+class HBJsonStream:
+    """Incremental parser for HandBrakeCLI --json output.
+
+    With --json, HandBrake emits labelled multi-line JSON blocks like:
+
+        Progress: {
+            "State": "WORKING",
+            "Working": { "Progress": 0.1234, "Rate": 45.6, "ETASeconds": 321, ... }
+        }
+
+    feed() consumes one line at a time and returns (label, dict) when a block
+    completes, else None. Brace depth is tracked with JSON string/escape
+    awareness so braces inside string values can't derail it.
+    """
+
+    _START_RE = re.compile(r'^(\w[\w ]*):\s*(\{.*)$')
+
+    def __init__(self):
+        self._label = None
+        self._buf: list = []
+        self._depth = 0
+        self._in_str = False
+        self._esc = False
+
+    def feed(self, line: str):
+        if self._label is None:
+            m = self._START_RE.match(line)
+            if not m:
+                return None
+            self._label = m.group(1)
+            self._buf = []
+            self._depth = 0
+            self._in_str = False
+            self._esc = False
+            return self._consume(m.group(2))
+        return self._consume(line)
+
+    def _consume(self, chunk: str):
+        self._buf.append(chunk)
+        for ch in chunk:
+            if self._esc:
+                self._esc = False
+                continue
+            if ch == '\\' and self._in_str:
+                self._esc = True
+            elif ch == '"':
+                self._in_str = not self._in_str
+            elif not self._in_str:
+                if ch == '{':
+                    self._depth += 1
+                elif ch == '}':
+                    self._depth -= 1
+                    if self._depth == 0:
+                        import json as _json
+                        label, text = self._label, ''.join(self._buf)
+                        self._label = None
+                        try:
+                            return label, _json.loads(text)
+                        except ValueError:
+                            return None
+        return None
+
+
+def parse_hb_json_progress(label: str, data: dict):
+    """Map a --json Progress block to (percent, fps, eta_seconds) or None."""
+    if label != 'Progress' or not isinstance(data, dict):
+        return None
+    state = data.get('State')
+    if state == 'WORKING':
+        w = data.get('Working') or {}
+        try:
+            pct = float(w.get('Progress') or 0) * 100.0
+        except (TypeError, ValueError):
+            return None
+        fps = w.get('Rate') or None
+        eta = w.get('ETASeconds') or None
+        return (max(0.0, min(100.0, pct)),
+                float(fps) if fps else None,
+                int(eta) if eta else None)
+    if state == 'MUXING':
+        return (100.0, None, None)
+    return None
+
+
+def preflight_source_check(file_path: str) -> Optional[str]:
+    """Validate an encode source before committing any work to it.
+
+    Returns:
+      None       — file looks encodable
+      'missing'  — file no longer exists on disk (caller should drop it)
+      other str  — human-readable reason the file is unreadable/incomplete
+                   (caller should quarantine it, without touching the file)
+    """
+    p = Path(file_path)
+    if not p.exists():
+        return 'missing'
+    try:
+        if p.stat().st_size == 0:
+            return 'File is empty (0 bytes)'
+    except OSError as e:
+        return f'File is unreadable: {e}'
+
+    from app.scanner import scanner as _scanner
+    if not (_scanner.ffprobe_available or _scanner.handbrake_available):
+        return None  # no probe tool available — can't validate, let HandBrake try
+
+    try:
+        specs = _scanner.analyze_file(file_path) or {}
+    except Exception:
+        specs = {}
+    if (specs.get('codec', 'unknown') == 'unknown'
+            and specs.get('resolution', 'unknown') == 'unknown'):
+        return ('No decodable video stream found — file is corrupt, incomplete, '
+                'or still downloading')
+    return None
 
 
 def parse_hb_progress(line: str):
@@ -52,12 +170,28 @@ class EncodingJob:
         self.queue_item_id = queue_item_id
         self.profile = profile
         self.process: Optional[subprocess.Popen] = None
+        # Active pre-phase subprocess (ffmpeg/upscaler) — registered by the
+        # upscale pipeline so stop() can kill it; HandBrake uses self.process.
+        self.pipeline_process: Optional[subprocess.Popen] = None
         self.progress = 0.0
         self.is_paused = False
         self.paused_reason = None
         self.monitoring_thread = None
         self.stop_monitoring = False
         self._manually_stopped = False
+        # Honest encode timing: monotonic clock around the HandBrake phase
+        # only, minus time spent thermally paused. The old completed_at −
+        # started_at wall clock swallowed upscale phases and pauses, teaching
+        # the speed learner ratios like 4800× realtime.
+        self._hb_started_monotonic: Optional[float] = None
+        self._paused_seconds = 0.0
+        self._paused_at_monotonic: Optional[float] = None
+        self._preprocessed = False
+        # Megapixel-frames of AI work actually performed, recorded to history
+        # so the estimator learns seconds-per-megapixel-frame. Stays 0 unless
+        # an upscale genuinely ran — a failed upscale that fell back to a
+        # plain encode must not teach that the work was free.
+        self._upscale_work_mpf = 0.0
         
         # Resource limits — temperature-first defaults
         self.resource_limits = resource_limits or {
@@ -105,8 +239,10 @@ class EncodingJob:
         output_ext = container_info['ext']
         output_file = str(original_path.parent / f"{original_path.stem}_optimized{output_ext}")
 
-        # Base command
-        cmd = ['HandBrakeCLI', '-i', input_file, '-o', output_file]
+        # Base command. --json emits structured Progress/scan blocks instead
+        # of the human text lines — exact progress/fps/ETA, immune to output
+        # format drift between HandBrake versions.
+        cmd = ['HandBrakeCLI', '--json', '-i', input_file, '-o', output_file]
 
         # Container format
         cmd.extend(['--format', container_info['format']])
@@ -139,6 +275,17 @@ class EncodingJob:
         
         hb_encoder = encoder_map.get(encoder, encoder)
         cmd.extend(['--encoder', hb_encoder])
+
+        # Hardware DECODING (independent of the encoder choice): NVDEC/QSV
+        # offloads source decode to the GPU, freeing CPU for software encoders
+        # like SVT-AV1. HandBrake falls back to software decoding on its own
+        # for sources the hardware can't handle.
+        if self.profile.get('hw_accel_enabled'):
+            hw = detect_hardware_acceleration()
+            if hw.get('nvidia'):
+                cmd.extend(['--enable-hw-decoding', 'nvdec'])
+            elif hw.get('intel'):
+                cmd.extend(['--enable-hw-decoding', 'qsv'])
         
         # Quality
         cmd.extend(['--quality', str(self.profile['quality'])])
@@ -413,14 +560,78 @@ class EncodingJob:
         """
         import json as _json
 
+        from app.logger import optimizarr_logger
+        from app.devlog import devlog
+
+        # ── Pre-flight: validate the source before committing any work ──────
+        # Files can vanish (deleted/moved after queueing) or be unreadable
+        # (incomplete downloads, corrupt sources). HandBrake fails identically
+        # for both ("unrecognized file type"), so catch them here instead of
+        # burning retries on a file that can never encode.
+        source_path = self.queue_item['file_path']
+        problem = preflight_source_check(source_path)
+        if problem == 'missing':
+            optimizarr_logger.app_logger.warning(
+                "Source file no longer exists — removing from queue: %s",
+                source_path)
+            devlog('enc_gone', id=self.queue_item_id, f=Path(source_path).name)
+            db.delete_queue_item(self.queue_item_id)
+            return False
+        if problem is not None:
+            # Non-invasive quarantine: the file stays exactly where it is;
+            # only the queue row is flagged. Re-check from the UI re-probes it.
+            optimizarr_logger.app_logger.warning(
+                "Quarantined (not encodable): %s — %s", source_path, problem)
+            devlog('enc_quarantine', id=self.queue_item_id,
+                   f=Path(source_path).name, why=problem[:120])
+            db.update_queue_item(
+                self.queue_item_id,
+                status='quarantined',
+                error_message=problem,
+                progress=0.0,
+                retry_after=None,
+            )
+            return False
+
+        # ── Pre-flight: destination name must be free ───────────────────────
+        # When the profile changes container (.mp4 source → .mkv output) the
+        # encode has to land on a name we don't own. Catching a collision here
+        # costs a stat() instead of the hours of encoding it would take to hit
+        # the same wall in _finalize_encoding.
+        _src = Path(source_path)
+        _ext = {'mkv': '.mkv', 'mp4': '.mp4', 'webm': '.webm'}.get(
+            self.profile.get('container', 'mkv'), '.mkv')
+        _dest = _src.parent / f"{_src.stem}{_ext}"
+        if (os.path.normcase(str(_dest)) != os.path.normcase(str(_src))
+                and _dest.exists()):
+            msg = (f"Destination already exists: {_dest.name}. Another file "
+                   f"already occupies the encoded name — remove or rename it "
+                   f"(they are usually duplicates — see Duplicates) and "
+                   f"re-queue.")
+            optimizarr_logger.app_logger.warning(
+                "Skipping %s — destination %s already exists",
+                _src.name, _dest.name)
+            devlog('enc_collision', id=self.queue_item_id, f=_src.name,
+                   dest=_dest.name)
+            db.update_queue_item(
+                self.queue_item_id,
+                status='failed',
+                progress=0.0,
+                phase=None,
+                phase_progress=0.0,
+                phase_eta_seconds=0,
+                error_message=msg,
+                retry_after=None,
+            )
+            return False
+
         db.update_queue_item(
             self.queue_item_id,
             status='processing',
             started_at=datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
         )
 
-        from app.logger import optimizarr_logger
-        from app.devlog import devlog
+        self._job_started_monotonic = time.monotonic()
         devlog('enc_start', id=self.queue_item_id,
                f=Path(self.queue_item['file_path']).name,
                c=self.profile.get('codec'))
@@ -452,6 +663,7 @@ class EncodingJob:
 
         has_stereo  = stereo_plan.get('enabled', False)
         has_upscale = upscale_plan.get('enabled', False)
+        self._preprocessed = bool(has_stereo or has_upscale)
 
         # ── Calculate progress ranges per phase ──────────────────────────────
         # Three phases: stereo → upscale → handbrake
@@ -487,10 +699,17 @@ class EncodingJob:
 
             s_range = stereo_end - stereo_start
 
-            def _stereo_progress(pct: float):
+            db.update_queue_item(self.queue_item_id, phase='stereo',
+                                 phase_progress=0.0, phase_eta_seconds=0)
+
+            def _stereo_progress(pct: float, eta: Optional[float] = None):
                 mapped = stereo_start + (pct / 100.0) * s_range
                 self.progress = mapped
-                db.update_queue_item(self.queue_item_id, progress=mapped)
+                db.update_queue_item(
+                    self.queue_item_id, progress=mapped, phase='stereo',
+                    phase_progress=pct,
+                    phase_eta_seconds=int(eta) if eta and eta > 0 else 0,
+                )
                 if progress_callback:
                     progress_callback(mapped)
 
@@ -516,6 +735,13 @@ class EncodingJob:
                     original_input,
                 )
 
+        if self._manually_stopped:
+            # Stopped during the stereo phase — don't start an upscale/encode
+            if stereo_temp:
+                from app.stereo import cleanup_stereo_workdir
+                cleanup_stereo_workdir(stereo_temp)
+            return False
+
         # ── Upscale phase ────────────────────────────────────────────────────
         if has_upscale:
             from app.upscaler import run_upscale_pipeline, cleanup_upscale_workdir
@@ -529,13 +755,28 @@ class EncodingJob:
             )
 
             u_range = upscale_end - upscale_start
+            db.update_queue_item(self.queue_item_id, phase='upscale',
+                                 phase_progress=0.0, phase_eta_seconds=0,
+                                 current_fps=0, eta_seconds=0)
 
-            def _upscale_progress(pct: float):
+            def _upscale_progress(pct: float, eta: Optional[float] = None):
                 mapped = upscale_start + (pct / 100.0) * u_range
                 self.progress = mapped
-                db.update_queue_item(self.queue_item_id, progress=mapped)
+                # eta_seconds is the row's overall "time left" figure. During
+                # the upscale that IS the upscale's ETA plus the encode still
+                # to come; the encode part is unknowable until HandBrake
+                # starts, so report the AI time and let the phase bar label it.
+                db.update_queue_item(
+                    self.queue_item_id, progress=mapped, phase='upscale',
+                    phase_progress=pct,
+                    phase_eta_seconds=int(eta) if eta and eta > 0 else 0,
+                    eta_seconds=int(eta) if eta and eta > 0 else 0,
+                )
                 if progress_callback:
                     progress_callback(mapped)
+
+            def _register_pipeline_proc(proc):
+                self.pipeline_process = proc
 
             upscaled_path = run_upscale_pipeline(
                 input_path=encode_input,
@@ -543,11 +784,25 @@ class EncodingJob:
                 model=model,
                 factor=factor,
                 progress_callback=_upscale_progress,
+                register_process=_register_pipeline_proc,
             )
+
+            if self._manually_stopped:
+                # Stopped mid-upscale — don't fall through and encode anyway
+                if stereo_temp:
+                    from app.stereo import cleanup_stereo_workdir
+                    cleanup_stereo_workdir(stereo_temp)
+                return False
 
             if upscaled_path:
                 encode_input  = upscaled_path
                 upscale_temp  = upscaled_path
+                try:
+                    from app.scanner import upscale_work_mpf
+                    self._upscale_work_mpf = upscale_work_mpf(
+                        self.queue_item.get('current_specs'), upscale_plan)
+                except Exception:
+                    self._upscale_work_mpf = 0.0
                 optimizarr_logger.app_logger.info(
                     "Upscale complete — encoding from temp: %s", upscaled_path
                 )
@@ -562,6 +817,10 @@ class EncodingJob:
         optimizarr_logger.log_handbrake_start(original_input, cmd)
 
         try:
+            self._hb_started_monotonic = time.monotonic()
+            db.update_queue_item(self.queue_item_id, phase='encode',
+                                 phase_progress=0.0, phase_eta_seconds=0,
+                                 eta_seconds=0)
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -586,6 +845,7 @@ class EncodingJob:
 
             last_lines = []  # Keep last 20 lines for diagnostics
             last_db_write = 0.0
+            json_stream = HBJsonStream()
 
             for line in self.process.stdout:
                 line_stripped = line.rstrip()
@@ -595,7 +855,15 @@ class EncodingJob:
                         last_lines.pop(0)
                     optimizarr_logger.log_handbrake_output(line_stripped)
 
-                parsed = parse_hb_progress(line)
+                # Primary: structured --json Progress blocks. Fallback: the
+                # legacy "Encoding: task…" regex (older HandBrake or a custom
+                # build without JSON output).
+                parsed = None
+                block = json_stream.feed(line_stripped)
+                if block:
+                    parsed = parse_hb_json_progress(block[0], block[1])
+                if parsed is None:
+                    parsed = parse_hb_progress(line)
                 if parsed:
                     hb_pct, fps, hb_eta = parsed
                     # Remap HandBrake 0-100 → hb_start to hb_start+hb_range
@@ -607,11 +875,14 @@ class EncodingJob:
                     now = time.monotonic()
                     if now - last_db_write >= 2.0:
                         last_db_write = now
-                        fields = {'progress': self.progress}
+                        fields = {'progress': self.progress,
+                                  'phase': 'encode',
+                                  'phase_progress': hb_pct}
                         if fps is not None:
                             fields['current_fps'] = fps
                         if hb_eta is not None:
                             fields['eta_seconds'] = hb_eta
+                            fields['phase_eta_seconds'] = hb_eta
                         db.update_queue_item(self.queue_item_id, **fields)
 
                     if progress_callback:
@@ -669,11 +940,81 @@ class EncodingJob:
                 from app.upscaler import cleanup_upscale_workdir
                 cleanup_upscale_workdir(upscale_temp)
     
+    def _diagnose_short_output(self, input_path, out_duration: float,
+                               source_duration: float, tolerance: float):
+        """Work out WHY the encode came out shorter than the source's duration.
+
+        A container's duration is the length of its longest track, not the
+        length of its picture. WEB-DL mkvs routinely carry a subtitle track
+        that runs a minute past the last video frame, so a perfectly complete
+        encode reads as "88s short" against the container. Failing those threw
+        away good encodes and left whole seasons stuck.
+
+        So instead of trusting the declared duration, ask the source directly
+        whether it holds any picture past the point the encode ends:
+
+          'ok'          — it does not. The encode is complete; the container
+                          duration was simply counting a longer sidecar track.
+          'bad_source'  — it does not, but the source's own VIDEO stream
+                          claimed it should. The source file is damaged or
+                          incomplete (truncated download): no encode of it can
+                          ever be whole.
+          'truncated'   — it does. HandBrake stopped early (disk full mid-mux,
+                          bad source tail), or we could not verify either way.
+                          Keep the original.
+
+        Returns (verdict, message).
+        """
+        from app.scanner import probe_last_video_pts, probe_declared_video_duration
+
+        short_by = source_duration - out_duration
+        # Start a little before the output ends so a stream whose final packet
+        # lands just shy of the reported duration still registers.
+        real_end = probe_last_video_pts(
+            str(input_path), start_seconds=out_duration - 10)
+
+        if real_end is None:
+            return 'truncated', (
+                f"Output duration {out_duration:.0f}s is shorter than source "
+                f"{source_duration:.0f}s and the source could not be re-probed "
+                f"to confirm — output kept out of the library and original "
+                f"file kept")
+
+        if real_end > out_duration + tolerance:
+            return 'truncated', (
+                f"Output duration {out_duration:.0f}s is shorter than source "
+                f"{source_duration:.0f}s — the source really does hold video "
+                f"through {real_end:.0f}s, so the encode stopped "
+                f"{real_end - out_duration:.0f}s early; original file kept")
+
+        declared = probe_declared_video_duration(str(input_path))
+        if declared and real_end < declared - tolerance:
+            return 'bad_source', (
+                f"Source file is damaged: its video stream declares "
+                f"{declared:.0f}s but the file only contains picture through "
+                f"{real_end:.0f}s. The encode is not at fault — re-download "
+                f"this file. Original left untouched.")
+
+        return 'ok', (
+            f"source container claims {source_duration:.0f}s but its video "
+            f"ends at {real_end:.0f}s (a longer subtitle/metadata track "
+            f"inflates the container duration); encode is complete at "
+            f"{out_duration:.0f}s, {short_by:.0f}s of the claim was never "
+            f"picture")
+
     def _finalize_encoding(self):
         """Replace original file with encoded version and update database."""
         from app.logger import optimizarr_logger
+        from app.devlog import devlog
 
         input_path = Path(self.queue_item['file_path'])
+
+        # Finalizing is its own phase, and not a quick one: it re-probes the
+        # output with ffprobe and moves a multi-GB file. Without a marker the
+        # row just sat at 100% looking hung.
+        db.update_queue_item(self.queue_item_id, phase='finalize',
+                             phase_progress=0.0, phase_eta_seconds=0,
+                             current_fps=0, eta_seconds=0)
 
         # Determine output extension based on container format
         container = self.profile.get('container', 'mkv')
@@ -713,7 +1054,9 @@ class EncodingJob:
         # ── Sanity-check the output BEFORE deleting the original ──────────
         # HandBrake can exit 0 with a truncated file (disk full mid-mux, bad
         # source tail). Deleting the original is irreversible, so compare
-        # durations first; a short output fails the item and keeps the source.
+        # durations first. A shorter output is only a SUSPICION — container
+        # durations lie — so _diagnose_short_output re-probes the source
+        # before anything is thrown away.
         source_duration = 0.0
         specs_for_check = self.queue_item.get('current_specs')
         if isinstance(specs_for_check, str):
@@ -738,40 +1081,119 @@ class EncodingJob:
             # when we could actually measure the output (ffprobe available).
             tolerance = max(5.0, source_duration * 0.02)
             if out_duration > 0 and out_duration < source_duration - tolerance:
-                msg = (f"Output duration {out_duration:.0f}s is shorter than "
-                       f"source {source_duration:.0f}s — output looks truncated; "
-                       f"original file kept")
-                optimizarr_logger.app_logger.error(
-                    "Truncated output for %s: %s", input_path.name, msg)
-                try:
-                    output_path.unlink()
-                except OSError:
-                    pass
-                db.update_queue_item(
-                    self.queue_item_id,
-                    status='failed',
-                    error_message=msg,
-                )
-                optimizarr_logger.log_handbrake_error(str(input_path), msg)
-                return
+                verdict, msg = self._diagnose_short_output(
+                    input_path, out_duration, source_duration, tolerance)
 
-        # Calculate encoding duration
+                if verdict == 'ok':
+                    # Container duration was overstated; the encode holds
+                    # everything the source actually had. Carry on.
+                    optimizarr_logger.app_logger.info(
+                        "Short output accepted for %s: %s", input_path.name, msg)
+                    devlog('enc_shortok', id=self.queue_item_id,
+                           f=input_path.name, out=round(out_duration),
+                           claimed=round(source_duration))
+                else:
+                    optimizarr_logger.app_logger.error(
+                        "%s for %s: %s",
+                        'Damaged source' if verdict == 'bad_source'
+                        else 'Truncated output',
+                        input_path.name, msg)
+                    try:
+                        output_path.unlink()
+                    except OSError:
+                        pass
+                    db.update_queue_item(
+                        self.queue_item_id,
+                        # A damaged source can never encode fully, so retrying
+                        # it is wasted GPU time — quarantine keeps the file
+                        # untouched and takes it out of rotation instead.
+                        status=('quarantined' if verdict == 'bad_source'
+                                else 'failed'),
+                        phase=None,
+                        phase_progress=0.0,
+                        phase_eta_seconds=0,
+                        retry_after=None,
+                        error_message=msg,
+                    )
+                    optimizarr_logger.log_handbrake_error(str(input_path), msg)
+                    return
+
+        # Calculate encoding duration for the speed learner, minus thermal
+        # pauses. Plain encodes: HandBrake phase only. Preprocessed jobs
+        # (upscale/stereo): the whole pipeline — their true cost IS the
+        # multi-hour AI phase, and they're learned as a separate group so
+        # they can't pollute the plain-encode ratios.
         encoding_time = 0
-        started_at = self.queue_item.get('started_at')
-        if started_at:
-            try:
-                start_dt = datetime.strptime(started_at, '%Y-%m-%d %H:%M:%S')
-                encoding_time = int((datetime.utcnow() - start_dt).total_seconds())
-            except (ValueError, TypeError):
-                encoding_time = 0
+        phase_start = (getattr(self, '_job_started_monotonic', None)
+                       if self._preprocessed else self._hb_started_monotonic)
+        if phase_start is not None:
+            paused = self._paused_seconds
+            if self._paused_at_monotonic is not None:
+                paused += time.monotonic() - self._paused_at_monotonic
+            encoding_time = max(0, int(time.monotonic() - phase_start - paused))
+        else:
+            # Fallback (shouldn't happen): legacy wall-clock from started_at
+            started_at = self.queue_item.get('started_at')
+            if started_at:
+                try:
+                    start_dt = datetime.strptime(started_at, '%Y-%m-%d %H:%M:%S')
+                    encoding_time = int((datetime.utcnow() - start_dt).total_seconds())
+                except (ValueError, TypeError):
+                    encoding_time = 0
+
+        final_path = input_path.parent / f"{input_path.stem}{output_ext}"
+        # Same name as the source when the container didn't change.
+        # normcase because Windows paths are case-insensitive.
+        in_place = (os.path.normcase(str(final_path))
+                    == os.path.normcase(str(input_path)))
+
+        # A container change lands the encode on a name we don't own. If a
+        # DIFFERENT file already holds it — typically the same title already
+        # present as .mkv next to the .mp4 — claiming it would destroy a file
+        # nobody asked us to touch. Refuse, and keep the source: the old order
+        # (unlink source, THEN rename) had already deleted the original by
+        # this point, so the failed rename left only the _optimized temp,
+        # which the orphan sweeper then deleted as well. That path lost files.
+        if not in_place and final_path.exists():
+            msg = (f"Destination already exists: {final_path.name}. Another "
+                   f"file already occupies the encoded name, so the original "
+                   f"was kept and nothing was overwritten. Remove or rename "
+                   f"the existing file (they are usually duplicates — see "
+                   f"Duplicates) and re-queue.")
+            optimizarr_logger.app_logger.error(
+                "Destination collision for %s: %s already exists — original kept",
+                input_path.name, final_path.name)
+            # Our own output is redundant now; the source is still intact.
+            self._cleanup_partial_output()
+            db.update_queue_item(
+                self.queue_item_id,
+                status='failed',
+                phase=None,
+                phase_progress=0.0,
+                phase_eta_seconds=0,
+                error_message=msg,
+            )
+            optimizarr_logger.log_handbrake_error(str(input_path), msg)
+            return
 
         try:
-            # Remove original file
-            input_path.unlink()
-
-            # Rename encoded file to original stem with (possibly new) extension
-            final_path = input_path.parent / f"{input_path.stem}{output_ext}"
-            output_path.rename(final_path)
+            if in_place:
+                # Atomic overwrite of the source — no window in which neither
+                # the original nor the encode exists.
+                os.replace(str(output_path), str(final_path))
+            else:
+                # Move the encode into place FIRST, drop the source only once
+                # it is safely there. rename() (not replace()) so a file that
+                # appeared since the check above still can't be clobbered.
+                output_path.rename(final_path)
+                try:
+                    input_path.unlink()
+                except OSError as unlink_err:
+                    # Encode is in place and correct; only the old container
+                    # lingers. Worth a warning, not a failure.
+                    optimizarr_logger.app_logger.warning(
+                        "Encoded %s but could not remove the original %s: %s",
+                        final_path.name, input_path.name, unlink_err)
 
             # Update queue item
             db.update_queue_item(
@@ -780,6 +1202,9 @@ class EncodingJob:
                 progress=100.0,
                 current_fps=0,
                 eta_seconds=0,
+                phase=None,
+                phase_progress=0.0,
+                phase_eta_seconds=0,
                 completed_at=datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
             )
 
@@ -804,9 +1229,10 @@ class EncodingJob:
                 codec=self.profile.get('codec'),
                 container=container,
                 duration_seconds=video_duration,
+                preprocessed=self._preprocessed,
+                pre_work_mpf=self._upscale_work_mpf,
             )
 
-            from app.devlog import devlog
             devlog('enc_done', id=self.queue_item_id, f=final_path.name,
                    s=encoding_time, sv=savings)
 
@@ -862,6 +1288,7 @@ class EncodingJob:
 
                 self.is_paused = True
                 self.paused_reason = reason
+                self._paused_at_monotonic = time.monotonic()
 
                 db.update_queue_item(
                     self.queue_item_id,
@@ -892,6 +1319,9 @@ class EncodingJob:
 
                 self.is_paused = False
                 self.paused_reason = None
+                if self._paused_at_monotonic is not None:
+                    self._paused_seconds += time.monotonic() - self._paused_at_monotonic
+                    self._paused_at_monotonic = None
 
                 db.update_queue_item(
                     self.queue_item_id,
@@ -971,6 +1401,9 @@ class EncodingJob:
                 progress=0.0,
                 current_fps=0,
                 eta_seconds=0,
+                phase=None,
+                phase_progress=0.0,
+                phase_eta_seconds=0,
                 error_message=f"Retry {new_count}/{max_retries} in {delay}s: {error_message[:180]}",
             )
             optimizarr_logger.app_logger.warning(
@@ -986,6 +1419,9 @@ class EncodingJob:
             status='failed',
             current_fps=0,
             eta_seconds=0,
+            phase=None,
+            phase_progress=0.0,
+            phase_eta_seconds=0,
             error_message=error_message[:500],
         )
         optimizarr_logger.app_logger.error(
@@ -1012,6 +1448,27 @@ class EncodingJob:
         self.stop_monitoring = True
         if self.monitoring_thread and self.monitoring_thread.is_alive():
             self.monitoring_thread.join(timeout=2)
+
+        # Kill any pre-phase subprocess (ffmpeg extraction/reassembly or the
+        # AI upscaler). Without this, stopping during the upscale phase left
+        # the upscaler running as a GPU-burning orphan — there is no HandBrake
+        # process yet at that point, so the block below had nothing to kill.
+        pipeline_proc = self.pipeline_process
+        if pipeline_proc is not None and pipeline_proc.poll() is None:
+            try:
+                import psutil as _psutil
+                try:
+                    parent = _psutil.Process(pipeline_proc.pid)
+                    for child in parent.children(recursive=True):
+                        child.kill()
+                    parent.kill()
+                except _psutil.NoSuchProcess:
+                    pass
+            except Exception:
+                try:
+                    pipeline_proc.kill()
+                except Exception:
+                    pass
 
         if self.process:
             try:
@@ -1044,6 +1501,9 @@ class EncodingJob:
                 status='cancelled',
                 current_fps=0,
                 eta_seconds=0,
+                phase=None,
+                phase_progress=0.0,
+                phase_eta_seconds=0,
                 error_message='Manually stopped'
             )
             from app.devlog import devlog
@@ -1097,10 +1557,16 @@ class EncoderPool:
             # encoder can be started again (and isn't wedged "running").
             self.is_running = False
             print("Encoder pool stopped")
-            # Encoder is idle now — sweep any leftover _optimized temp files.
+            # Encoder is idle now — sweep any leftover _optimized temp files
+            # and stale upscale work directories from crashed/killed jobs.
             try:
                 from app.scanner import cleanup_orphaned_outputs
                 cleanup_orphaned_outputs()
+            except Exception:
+                pass
+            try:
+                from app.upscaler import cleanup_stale_upscale_workdirs
+                cleanup_stale_upscale_workdirs()
             except Exception:
                 pass
 
