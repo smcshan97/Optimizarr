@@ -21,17 +21,19 @@ router = APIRouter()
 async def encode_progress_events(token: Optional[str] = None):
     """Server-sent events stream of live encode progress (~every 2s).
 
-    EventSource cannot set an Authorization header, so the JWT is passed as
-    a ``token`` query parameter and validated the same way the header is.
+    EventSource cannot set an Authorization header, so a one-minute stream
+    token from POST /auth/stream-token is passed as the ``token`` query
+    parameter.
     Each event is JSON: {"processing": [{id, progress, fps, eta_seconds,
     phase, phase_progress, phase_eta_seconds, file}, ...]}. ``phase`` is one
     of stereo/upscale/encode/finalize so the UI can colour the bar and label
     the ETA for the phase that is actually running. The stream ends only when
     the client disconnects.
     """
+    # Only short-lived stream tokens (POST /auth/stream-token) are accepted
+    # here — the full API token must never sit in a URL.
     from app.auth import auth as _auth
-    payload = _auth.decode_token(token) if token else None
-    if not payload or not db.get_user_by_id(int(payload.get("sub", 0) or 0)):
+    if not _auth.user_from_token(token, scope="stream"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                             detail="Invalid or expired token")
 

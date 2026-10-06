@@ -909,6 +909,85 @@ class TestWebhookKeyUrls:
         assert mgr.upgrade_webhook_secret({"app_type": "sonarr"}, 'SEC') == 0
 
 
+class TestAuthHardening:
+    """Login throttling, token revocation and stream-token scoping."""
+
+    def _user(self, fresh_db, monkeypatch, password='correct-horse'):
+        import app.auth as auth_mod
+        monkeypatch.setattr(auth_mod, 'db', fresh_db)
+        uid = fresh_db.create_user('u', auth_mod.auth.hash_password(password), is_admin=True)
+        return auth_mod, fresh_db.get_user_by_id(uid)
+
+    def test_rate_limiter_locks_after_max_failures(self):
+        from app.auth import LoginRateLimiter
+        rl = LoginRateLimiter(max_failures=3, window=60)
+        for _ in range(2):
+            rl.record_failure('ip')
+        assert rl.retry_after('ip') == 0
+        rl.record_failure('ip')
+        assert rl.retry_after('ip') > 0
+        assert rl.retry_after('other-ip') == 0
+        rl.reset('ip')
+        assert rl.retry_after('ip') == 0
+
+    def test_login_route_throttles(self, fresh_db, monkeypatch):
+        from fastapi import HTTPException
+        from app.api import auth_routes
+        from app.api.models import LoginRequest
+        from app.auth import LoginRateLimiter
+        auth_mod, _ = self._user(fresh_db, monkeypatch)
+        monkeypatch.setattr(auth_routes, 'login_limiter', LoginRateLimiter(max_failures=2))
+
+        class _Req:
+            class client:
+                host = '10.0.0.9'
+        bad = LoginRequest(username='u', password='nope')
+        for _ in range(2):
+            with pytest.raises(HTTPException) as exc:
+                auth_routes.login(bad, _Req())
+            assert exc.value.status_code == 401
+        # Even the right password is refused while locked out
+        with pytest.raises(HTTPException) as exc:
+            auth_routes.login(LoginRequest(username='u', password='correct-horse'), _Req())
+        assert exc.value.status_code == 429
+
+    def test_password_change_revokes_old_tokens(self, fresh_db, monkeypatch):
+        auth_mod, user = self._user(fresh_db, monkeypatch)
+        a = auth_mod.auth
+        old = a.create_access_token(user['id'], 'u', True, user['token_version'])
+        assert a.user_from_token(old)['id'] == user['id']
+        fresh_db.set_user_password(user['id'], a.hash_password('another-pass'))
+        assert a.user_from_token(old) is None
+        user = fresh_db.get_user_by_id(user['id'])
+        new = a.create_access_token(user['id'], 'u', True, user['token_version'])
+        assert a.user_from_token(new) is not None
+
+    def test_stream_token_scope_is_separate(self, fresh_db, monkeypatch):
+        auth_mod, user = self._user(fresh_db, monkeypatch)
+        a = auth_mod.auth
+        stream = a.create_stream_token(user)
+        api = a.create_access_token(user['id'], 'u', True, user['token_version'])
+        assert a.user_from_token(stream, scope='stream') is not None
+        assert a.user_from_token(stream) is None            # not an API token
+        assert a.user_from_token(api, scope='stream') is None  # not a stream token
+
+    def test_weak_default_admin_must_change_password(self, fresh_db, monkeypatch):
+        import app.auth as auth_mod
+        monkeypatch.setattr(auth_mod, 'db', fresh_db)
+        monkeypatch.setattr(auth_mod.settings, 'admin_username', 'boot')
+        monkeypatch.setattr(auth_mod.settings, 'admin_password', 'admin')
+        auth_mod.auth.create_default_admin()
+        assert fresh_db.get_user_by_username('boot')['must_change_password']
+
+    def test_strong_admin_password_not_flagged(self, fresh_db, monkeypatch):
+        import app.auth as auth_mod
+        monkeypatch.setattr(auth_mod, 'db', fresh_db)
+        monkeypatch.setattr(auth_mod.settings, 'admin_username', 'boot2')
+        monkeypatch.setattr(auth_mod.settings, 'admin_password', 'a-long-unique-pass')
+        auth_mod.auth.create_default_admin()
+        assert not fresh_db.get_user_by_username('boot2')['must_change_password']
+
+
 # ---------------------------------------------------------------------------
 # Permission-error re-check (Patch 35)
 # ---------------------------------------------------------------------------

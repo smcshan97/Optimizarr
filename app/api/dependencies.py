@@ -5,7 +5,6 @@ from fastapi import Depends, HTTPException, status, Header
 from typing import Optional, Dict
 
 from app.auth import auth
-from app.database import db
 
 
 async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict:
@@ -44,27 +43,16 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict:
             headers={"WWW-Authenticate": "Bearer"},
         )
     
-    # Decode token
-    payload = auth.decode_token(token)
-    
-    if not payload:
+    # Decode token (also rejects tokens revoked by a password change)
+    user = auth.user_from_token(token)
+
+    if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or expired token",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
-    # Get user from database
-    user_id = int(payload.get("sub"))
-    user = db.get_user_by_id(user_id)
-    
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="User not found",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
+
     return user
 
 

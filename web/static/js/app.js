@@ -833,7 +833,24 @@ function ensureProgressStream() {
     if (_progressES) return;         // already streaming
     if (_esRetryTimer) { clearTimeout(_esRetryTimer); _esRetryTimer = null; }
 
-    const url = `${API_BASE}/events/encode-progress?token=${encodeURIComponent(getToken() || '')}`;
+    // Placeholder so a second caller during the token fetch doesn't open a
+    // duplicate stream; replaced by the real EventSource below.
+    _progressES = { close() {} };
+    _openProgressStream();
+}
+
+async function _openProgressStream() {
+    // The stream URL carries a one-minute, stream-only token — never the
+    // API token, which would end up in server/proxy logs.
+    const res = await apiRequest('/auth/stream-token', { method: 'POST' });
+    if (!res || !res.token) {
+        _progressES = null;
+        if (!_esRetryTimer) {
+            _esRetryTimer = setTimeout(() => { _esRetryTimer = null; ensureProgressStream(); }, 8000);
+        }
+        return;
+    }
+    const url = `${API_BASE}/events/encode-progress?token=${encodeURIComponent(res.token)}`;
     _progressES = new EventSource(url);
 
     _progressES.onmessage = (e) => {
@@ -2108,8 +2125,8 @@ async function changePassword() {
         return;
     }
     
-    if (newPass.length < 6) {
-        showMessage('Password must be at least 6 characters', 'error');
+    if (newPass.length < 8) {
+        showMessage('Password must be at least 8 characters', 'error');
         return;
     }
     
@@ -2122,7 +2139,10 @@ async function changePassword() {
     });
     
     if (result) {
-        showMessage('Password updated successfully!', 'success');
+        // The change revoked every older token, including ours — keep this
+        // session alive with the fresh one the server returned.
+        if (result.access_token) localStorage.setItem('token', result.access_token);
+        showMessage('Password updated — other sessions have been signed out.', 'success');
         document.getElementById('currentPassword').value = '';
         document.getElementById('newPassword').value = '';
         document.getElementById('confirmPassword').value = '';
