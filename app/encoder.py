@@ -24,6 +24,14 @@ from app.handbrake import (  # noqa: F401  (re-exported)
 )
 
 
+def min_savings_percent() -> float:
+    """Minimum size reduction (percent) for an encode to replace its source."""
+    try:
+        return max(0.0, min(90.0, float(db.get_setting('min_savings_percent', '5'))))
+    except (TypeError, ValueError):
+        return 5.0
+
+
 class EncodingJob:
     """Represents a single video encoding job."""
     
@@ -1048,8 +1056,33 @@ class EncodingJob:
                     optimizarr_logger.log_handbrake_error(str(input_path), msg)
                     return
 
+        # ── Keep the original if the encode isn't meaningfully smaller ─────
+        # Low-bitrate sources often come out LARGER at a fixed CRF (this
+        # install's history: 899 of ~5,000 plain encodes grew, +94 GB).
+        # Upscale/3D jobs are exempt — growth is the point there.
+        if not self._preprocessed:
+            min_pct = min_savings_percent()
+            if original_size > 0 and savings < original_size * (min_pct / 100.0):
+                change = (new_size - original_size) / original_size * 100
+                try:
+                    output_path.unlink()
+                except OSError:
+                    pass
+                msg = (f"Kept original — re-encode was {change:+.1f}% "
+                       f"({new_size / 1024**2:.0f} MB vs {original_size / 1024**2:.0f} MB); "
+                       f"needs ≥{min_pct:g}% savings")
+                db.update_queue_item(
+                    self.queue_item_id, status='kept_original', progress=100.0,
+                    phase=None, phase_progress=0.0, phase_eta_seconds=0,
+                    eta_seconds=0, current_fps=0, error_message=msg,
+                    completed_at=utc_now().strftime('%Y-%m-%d %H:%M:%S'))
+                optimizarr_logger.app_logger.info("%s: %s", input_path.name, msg)
+                from app.devlog import devlog
+                devlog('kept_original', id=self.queue_item_id, pct=round(change, 1))
+                return
+
         # Calculate encoding duration for the speed learner, minus thermal
-        # pauses. Plain encodes: HandBrake phase only. Preprocessed jobs
+        # pauses.Plain encodes: HandBrake phase only. Preprocessed jobs
         # (upscale/stereo): the whole pipeline — their true cost IS the
         # multi-hour AI phase, and they're learned as a separate group so
         # they can't pollute the plain-encode ratios.

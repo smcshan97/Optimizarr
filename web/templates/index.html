@@ -202,6 +202,7 @@
                             <option value="cancelled">⏹️ Cancelled</option>
                             <option value="permission_error">🔒 Permission Error</option>
                             <option value="quarantined">☣️ Quarantined</option>
+                            <option value="kept_original">↩️ Kept Original</option>
                         </select>
                     </div>
                     <!-- Sort & Prioritize -->
@@ -449,6 +450,18 @@
                         <input type="number" id="maxRetries" min="0" max="20" step="1" value="3"
                             class="w-20 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center" style="font-size:14px">
                         <span style="font-size:13px;color:var(--text-muted)">Auto-retry a failed encode this many times before marking it failed (0 = no retry)</span>
+                    </div>
+                </div>
+
+                <!-- Keep original unless the encode is smaller -->
+                <div style="margin-top:20px">
+                    <label style="font-size:14px;font-weight:500;color:var(--text-heading);display:block;margin-bottom:6px">
+                        Minimum Savings to Replace
+                    </label>
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <input type="number" id="minSavingsPercent" min="0" max="90" step="1" value="5"
+                            class="w-20 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center" style="font-size:14px">
+                        <span style="font-size:13px;color:var(--text-muted)">% — if an encode doesn't shrink the file by at least this much, the new file is discarded and the original kept (upscale/3D jobs exempt)</span>
                     </div>
                 </div>
                 

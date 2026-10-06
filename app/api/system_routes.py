@@ -149,6 +149,7 @@ def get_encoding_settings(current_user: dict = Depends(get_current_user)):
     """Get general encoding settings (e.g. retry behavior)."""
     return {
         'max_retries': db.get_setting('max_retries', '3'),
+        'min_savings_percent': db.get_setting('min_savings_percent', '5'),
     }
 
 
@@ -164,6 +165,12 @@ def update_encoding_settings(
         except (ValueError, TypeError):
             val = 3
         db.set_setting('max_retries', str(val))
+    if 'min_savings_percent' in settings:
+        try:
+            pct = max(0.0, min(90.0, float(settings['min_savings_percent'])))
+        except (ValueError, TypeError):
+            pct = 5.0
+        db.set_setting('min_savings_percent', f"{pct:g}")
     return MessageResponse(message="Encoding settings updated")
 
 

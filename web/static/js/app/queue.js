@@ -317,7 +317,8 @@ function displayQueueItems(items) {
             'paused':     { emoji: '⏸️', color: 'text-orange-400', barColor: 'bg-orange-500' },
             'cancelled':  { emoji: '⏹️', color: 'text-gray-400',   barColor: 'bg-gray-500' },
             'permission_error': { emoji: '🔒', color: 'text-orange-300', barColor: 'bg-orange-500' },
-            'quarantined': { emoji: '☣️', color: 'text-purple-300', barColor: 'bg-purple-500' }
+            'quarantined': { emoji: '☣️', color: 'text-purple-300', barColor: 'bg-purple-500' },
+            'kept_original': { emoji: '↩️', color: 'text-teal-300', barColor: 'bg-teal-500' }
         };
         const sc = statusConfig[item.status] || { emoji: '❓', color: 'text-gray-400', barColor: 'bg-gray-500' };
         const progress = item.progress || 0;
@@ -360,6 +361,11 @@ function displayQueueItems(items) {
                         <div class="bg-red-500 h-2.5 rounded-full" style="width: ${progress}%"></div>
                     </div>
                     <span class="text-red-400 font-mono text-xs w-14 text-right" title="${_esc(item.error_message || '')}">${progress > 0 ? progress.toFixed(1) + '%' : 'ERR'}</span>
+                </div>`;
+        } else if (item.status === 'kept_original') {
+            progressBar = `
+                <div class="flex items-center gap-2">
+                    <span class="text-teal-300 text-xs truncate" title="${_esc(item.error_message || '')}">Kept original — encode wasn't smaller</span>
                 </div>`;
         } else if (item.status === 'cancelled') {
             progressBar = `
@@ -799,6 +805,8 @@ async function loadSettings() {
     const encSettings = await apiRequest('/settings/encoding');
     if (encSettings) {
         document.getElementById('maxRetries').value = parseInt(encSettings.max_retries || '3');
+        const ms = document.getElementById('minSavingsPercent');
+        if (ms) ms.value = parseFloat(encSettings.min_savings_percent ?? '5');
     }
 }
 
@@ -824,7 +832,10 @@ async function saveResourceSettings() {
     // Save general encoding settings (retry behavior)
     await apiRequest('/settings/encoding', {
         method: 'POST',
-        body: JSON.stringify({ max_retries: document.getElementById('maxRetries').value })
+        body: JSON.stringify({
+            max_retries: document.getElementById('maxRetries').value,
+            min_savings_percent: document.getElementById('minSavingsPercent')?.value ?? '5',
+        })
     });
 
     if (result) {

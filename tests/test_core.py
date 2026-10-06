@@ -2608,6 +2608,45 @@ class TestDestinationCollision:
         assert item['status'] == 'failed'
         assert 'already exists' in item['error_message']
 
+    def test_finalize_keeps_original_when_encode_is_bigger(
+            self, fresh_db, monkeypatch, tmp_path):
+        import app.encoder as enc
+        monkeypatch.setattr(enc, 'db', fresh_db)
+        src = tmp_path / "show.mkv"
+        src.write_bytes(b"o" * 1000)
+        out = tmp_path / "show_optimized.mkv"
+        out.write_bytes(b"e" * 1200)
+        job, qid = self._job(enc, fresh_db, src)
+        job._finalize_encoding()
+        assert src.read_bytes() == b"o" * 1000 and not out.exists()
+        item = fresh_db.get_queue_item(qid)
+        assert item['status'] == 'kept_original'
+        assert '+20.0%' in item['error_message']
+        # Not recorded as a completed encode (no history row)
+        with fresh_db.get_read_connection() as conn:
+            assert conn.execute("SELECT COUNT(*) FROM history").fetchone()[0] == 0
+
+    def test_finalize_threshold_and_upscale_exemption(
+            self, fresh_db, monkeypatch, tmp_path):
+        import app.encoder as enc
+        monkeypatch.setattr(enc, 'db', fresh_db)
+        fresh_db.set_setting('min_savings_percent', '10')
+        src = tmp_path / "a.mkv"
+        src.write_bytes(b"o" * 1000)
+        (tmp_path / "a_optimized.mkv").write_bytes(b"e" * 950)   # only 5% smaller
+        job, qid = self._job(enc, fresh_db, src)
+        job._finalize_encoding()
+        assert fresh_db.get_queue_item(qid)['status'] == 'kept_original'
+
+        src2 = tmp_path / "b.mkv"
+        src2.write_bytes(b"o" * 1000)
+        (tmp_path / "b_optimized.mkv").write_bytes(b"e" * 3000)  # upscaled: bigger is fine
+        job, qid = self._job(enc, fresh_db, src2)
+        job._preprocessed = True
+        job._finalize_encoding()
+        assert fresh_db.get_queue_item(qid)['status'] == 'completed'
+        assert src2.read_bytes() == b"e" * 3000
+
     def test_finalize_replaces_source_when_container_unchanged(
             self, fresh_db, monkeypatch, tmp_path):
         """.mkv -> .mkv still overwrites its own source — that is the normal
