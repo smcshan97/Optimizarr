@@ -12,6 +12,7 @@ from app.api.dependencies import get_current_user, get_current_admin_user
 from app.database import db
 from app.resources import resource_monitor
 from app.logger import optimizarr_logger
+from app.timeutil import utc_now
 
 router = APIRouter()
 
@@ -660,7 +661,7 @@ def export_config_json(current_user: dict = Depends(get_current_admin_user)):
     return {
         "optimizarr_config": True,
         "version": __version__,
-        "exported_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "exported_at": utc_now().strftime("%Y-%m-%d %H:%M:%S"),
         "profiles": export_profiles,
         "scan_roots": export_roots,
         "settings": {k: v for k, v in db.get_all_settings().items()

@@ -17,6 +17,7 @@ import platform
 
 from app.database import db
 from app.resources import resource_monitor, resource_throttler
+from app.timeutil import utc_now
 
 
 # HandBrakeCLI progress line, e.g.:
@@ -693,7 +694,7 @@ class EncodingJob:
         db.update_queue_item(
             self.queue_item_id,
             status='processing',
-            started_at=datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+            started_at=utc_now().strftime('%Y-%m-%d %H:%M:%S')
         )
 
         self._job_started_monotonic = time.monotonic()
@@ -1205,7 +1206,7 @@ class EncodingJob:
             if started_at:
                 try:
                     start_dt = datetime.strptime(started_at, '%Y-%m-%d %H:%M:%S')
-                    encoding_time = int((datetime.utcnow() - start_dt).total_seconds())
+                    encoding_time = int((utc_now() - start_dt).total_seconds())
                 except (ValueError, TypeError):
                     encoding_time = 0
 
@@ -1273,7 +1274,7 @@ class EncodingJob:
                 phase=None,
                 phase_progress=0.0,
                 phase_eta_seconds=0,
-                completed_at=datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                completed_at=utc_now().strftime('%Y-%m-%d %H:%M:%S')
             )
 
             # Add to history — use db.add_history so all fields are populated
@@ -1459,7 +1460,7 @@ class EncodingJob:
             # Exponential backoff so a transient failure doesn't burn every
             # retry in seconds: 60s, 120s, 240s … capped at 30 min.
             delay = min(60 * (2 ** (new_count - 1)), 1800)
-            retry_at = (datetime.utcnow() + timedelta(seconds=delay)).strftime(
+            retry_at = (utc_now() + timedelta(seconds=delay)).strftime(
                 '%Y-%m-%d %H:%M:%S')
             db.update_queue_item(
                 self.queue_item_id,

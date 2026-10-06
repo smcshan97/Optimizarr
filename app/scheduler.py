@@ -10,6 +10,7 @@ import threading
 import time
 from typing import Optional, Dict
 from app.database import db
+from app.timeutil import utc_now
 
 
 class ScheduleManager:
@@ -262,7 +263,7 @@ class ScheduleManager:
             connections = db.get_external_connections()
         except Exception:
             return
-        now = datetime.utcnow()
+        now = utc_now()
         for conn in connections:
             if not _sync_due(conn, now):
                 continue

@@ -5,7 +5,7 @@ Loads settings from environment variables with sensible defaults.
 import os
 import secrets
 from pathlib import Path
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from typing import Optional
 
 # Project root. Every relative path (data/, logs/, .env) is resolved against
@@ -99,10 +99,11 @@ class Settings(BaseSettings):
     pgid: int = 1000
     tz: str = "UTC"
 
-    class Config:
-        env_prefix = "OPTIMIZARR_"
-        env_file = str(BASE_DIR / ".env")
-        case_sensitive = False
+    model_config = SettingsConfigDict(
+        env_prefix="OPTIMIZARR_",
+        env_file=str(BASE_DIR / ".env"),
+        case_sensitive=False,
+    )
 
 
 # Global settings instance

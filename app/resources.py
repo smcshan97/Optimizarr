@@ -22,7 +22,7 @@ import json
 import time
 import concurrent.futures
 from typing import Dict, Optional, List, Tuple
-from datetime import datetime
+from app.timeutil import utc_now
 
 
 class ResourceMonitor:
@@ -465,7 +465,7 @@ class ResourceMonitor:
         gpu_data = self.get_gpu_usage()
 
         return {
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': utc_now().isoformat(),
             'cpu': {
                 'percent': self.get_cpu_usage(interval=0),
                 'per_core': self.get_cpu_per_core(interval=0),

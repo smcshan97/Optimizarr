@@ -1,5 +1,4 @@
 """External connections (Sonarr, Radarr, Stash) and webhook routes."""
-from datetime import datetime
 
 import hmac
 import os
@@ -12,6 +11,7 @@ from app.api.models import MessageResponse
 from app.api.dependencies import get_current_user, get_current_admin_user
 from app.database import db
 from app.logger import optimizarr_logger
+from app.timeutil import utc_now
 
 router = APIRouter()
 
@@ -134,7 +134,7 @@ def create_connection(
     # Stamp last_tested
     db.update_external_connection(
         conn_id,
-        last_tested=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        last_tested=utc_now().strftime("%Y-%m-%d %H:%M:%S"),
     )
 
     conn = db.get_external_connection(conn_id)
@@ -211,7 +211,7 @@ def test_connection(
     # Update last_tested regardless of result
     db.update_external_connection(
         conn_id,
-        last_tested=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        last_tested=utc_now().strftime("%Y-%m-%d %H:%M:%S"),
     )
     return result
 
@@ -379,7 +379,7 @@ def _sync_connection_task(conn_id: int):
 
     db.update_external_connection(
         conn_id,
-        last_synced=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        last_synced=utc_now().strftime("%Y-%m-%d %H:%M:%S"),
     )
     optimizarr_logger.app_logger.info(
         "Sync complete: %s — %d added, %d skipped", conn["name"], added, skipped

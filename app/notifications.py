@@ -7,7 +7,6 @@ Supports Discord, Slack, and generic JSON webhooks.
 import json
 import threading
 from typing import Dict, List, Optional
-from datetime import datetime
 
 try:
     import requests
@@ -15,6 +14,7 @@ except ImportError:
     requests = None
 
 from app.database import db
+from app.timeutil import utc_now
 
 
 def _format_size(bytes_val: int) -> str:
@@ -85,7 +85,7 @@ def _format_discord(payload: Dict) -> Dict:
         "title": payload.get('title', 'Optimizarr'),
         "description": payload.get('message', ''),
         "color": color_map.get(event, 0x95a5a6),
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": utc_now().isoformat(),
         "footer": {"text": "Optimizarr"},
     }
     fields = payload.get('fields')

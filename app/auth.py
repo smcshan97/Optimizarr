@@ -72,11 +72,15 @@ login_limiter = LoginRateLimiter()
 class AuthManager:
     """Manages authentication, password hashing, and token generation."""
 
+    # bcrypt only reads the first 72 bytes. bcrypt < 5 truncated silently;
+    # bcrypt 5 raises ValueError instead (a 500 on a long password). Truncate
+    # explicitly so both behave the same and existing hashes still verify.
+    _BCRYPT_MAX = 72
+
     @staticmethod
     def hash_password(password: str) -> str:
         """Hash a password using bcrypt."""
-        # Convert to bytes and hash
-        password_bytes = password.encode('utf-8')
+        password_bytes = password.encode('utf-8')[:AuthManager._BCRYPT_MAX]
         salt = bcrypt.gensalt()
         hashed = bcrypt.hashpw(password_bytes, salt)
         return hashed.decode('utf-8')
@@ -84,7 +88,7 @@ class AuthManager:
     @staticmethod
     def verify_password(plain_password: str, hashed_password: str) -> bool:
         """Verify a password against its hash."""
-        password_bytes = plain_password.encode('utf-8')
+        password_bytes = plain_password.encode('utf-8')[:AuthManager._BCRYPT_MAX]
         hashed_bytes = hashed_password.encode('utf-8')
         return bcrypt.checkpw(password_bytes, hashed_bytes)
 
