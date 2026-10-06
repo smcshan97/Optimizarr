@@ -377,7 +377,8 @@ def health_check():
     
     # Disk space for data directory
     try:
-        data_path = Path("data")
+        from app.config import settings as _settings
+        data_path = Path(_settings.db_path).parent
         if data_path.exists():
             usage = shutil.disk_usage(str(data_path))
             health["disk"] = {

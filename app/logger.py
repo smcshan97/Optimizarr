@@ -15,7 +15,8 @@ class OptimizarrLogger:
     """Centralized logging for application, HandBrake, errors, and statistics."""
     
     def __init__(self, log_dir: str = "logs"):
-        self.log_dir = Path(log_dir)
+        from app.config import project_path
+        self.log_dir = project_path(log_dir)
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
         # Log file paths
