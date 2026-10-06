@@ -2706,13 +2706,18 @@ class TestUpscaleModelScale:
         assert model_scale_for('realesrgan', 'custom-model', 2) == 2
 
     def test_color_matrix_defaults(self):
-        from app.upscaler import _color_matrix, _color_tag_args
+        from app.upscaler import _color_matrix, _color_setparams
         assert _color_matrix({'color_space': 'bt709', 'height': 480}) == 'bt709'
         assert _color_matrix({'height': 1080}) == 'bt709'
         assert _color_matrix({'height': 480}) == 'smpte170m'
         assert _color_matrix({'color_space': 'bt2020nc'}) == 'bt2020'
-        args = _color_tag_args({'color_primaries': 'unknown'}, 'bt709')
-        assert '-color_primaries' not in args and args[:2] == ['-colorspace', 'bt709']
+        # Unknown tags fall back to the matrix's standard (never PNG's sRGB)
+        assert _color_setparams({'color_primaries': 'unknown'}, 'bt709') == (
+            'setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv')
+        assert _color_setparams({}, 'smpte170m') == (
+            'setparams=colorspace=smpte170m:color_primaries=smpte170m:color_trc=smpte170m:range=tv')
+        assert 'color_primaries=bt470bg' in _color_setparams(
+            {'color_primaries': 'bt470bg', 'color_space': 'bt470bg'}, 'bt470')
 
 
 class TestUpscaleCostModel:

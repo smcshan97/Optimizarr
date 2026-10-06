@@ -662,20 +662,27 @@ def _get_video_info(input_path: str) -> Dict:
         return {"width": 0, "height": 0, "fps": 24.0, "duration": 0, "vfr": False}
 
 
-def _color_tag_args(info: Dict, matrix: str) -> list:
-    """ffmpeg output flags that carry the source's colour description over,
-    so HandBrake doesn't have to guess (and mis-guess) it."""
+def _color_setparams(info: Dict, matrix: str) -> str:
+    """``setparams`` filter that tags the reassembled video with the source's
+    colour description, so HandBrake doesn't have to guess (and mis-guess).
+
+    Done in the filter graph because output flags (-color_trc etc.) are
+    overridden by frame properties: left untagged, the PNG frames' sRGB
+    transfer (iec61966-2-1) leaked into the video.
+    """
     def known(v):
         return v and v not in ("unknown", "reserved", "unspecified")
 
-    tag_space = {"bt470": "bt470bg", "bt2020": "bt2020nc"}.get(matrix, matrix)
-    args = ["-colorspace", info.get("color_space") if known(info.get("color_space")) else tag_space,
-            "-color_range", "tv"]
-    if known(info.get("color_primaries")):
-        args += ["-color_primaries", info["color_primaries"]]
-    if known(info.get("color_transfer")):
-        args += ["-color_trc", info["color_transfer"]]
-    return args
+    # Defaults for untagged sources, matching the matrix chosen for them.
+    tag_space, default_prim, default_trc = {
+        "bt709": ("bt709", "bt709", "bt709"),
+        "bt470": ("bt470bg", "bt470bg", "smpte170m"),
+        "bt2020": ("bt2020nc", "bt2020", "bt2020-10"),
+    }.get(matrix, (matrix, "smpte170m", "smpte170m"))
+    space = info["color_space"] if known(info.get("color_space")) else tag_space
+    prim = info["color_primaries"] if known(info.get("color_primaries")) else default_prim
+    trc = info["color_transfer"] if known(info.get("color_transfer")) else default_trc
+    return f"setparams=colorspace={space}:color_primaries={prim}:color_trc={trc}:range=tv"
 
 
 def run_upscale_pipeline(
@@ -1078,8 +1085,8 @@ def run_upscale_pipeline(
             # the target size when the model ran at a larger native scale)
             "-vf", ",".join(
                 ([f"scale={out_w}:{out_h}:flags=lanczos"] if model_scale != factor else [])
-                + [f"scale=out_color_matrix={matrix}:out_range=tv", "format=yuv420p"]),
-            *_color_tag_args(info, matrix),
+                + [f"scale=out_color_matrix={matrix}:out_range=tv", "format=yuv420p",
+                   _color_setparams(info, matrix)]),
             "-c:v", "ffv1",              # lossless intermediate — HandBrake re-encodes
             "-c:a", "copy",
             "-c:s", "copy",
