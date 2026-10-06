@@ -16,7 +16,7 @@ LIBRARY_TYPES = {
         "description": "Feature films, documentaries",
         "icon": "🎬",
         "recommended": {
-            "codec": "av1", "encoder": "svt_av1", "quality": 28,
+            "codec": "av1", "encoder": "svt_av1_10bit", "quality": 28,
             "preset": "6", "container": "mkv", "audio_codec": "opus"
         }
     },
@@ -25,7 +25,7 @@ LIBRARY_TYPES = {
         "description": "Series, sitcoms, episodic content",
         "icon": "📺",
         "recommended": {
-            "codec": "av1", "encoder": "svt_av1", "quality": 32,
+            "codec": "av1", "encoder": "svt_av1_10bit", "quality": 32,
             "preset": "10", "container": "mkv", "audio_codec": "aac"
         }
     },
@@ -34,7 +34,7 @@ LIBRARY_TYPES = {
         "description": "Japanese animation",
         "icon": "🎌",
         "recommended": {
-            "codec": "av1", "encoder": "svt_av1", "quality": 26,
+            "codec": "av1", "encoder": "svt_av1_10bit", "quality": 26,
             "preset": "6", "container": "mkv", "audio_codec": "opus"
         }
     },
@@ -43,7 +43,7 @@ LIBRARY_TYPES = {
         "description": "Personal recordings, family videos",
         "icon": "🎥",
         "recommended": {
-            "codec": "h265", "encoder": "x265", "quality": 20,
+            "codec": "h265", "encoder": "x265_10bit", "quality": 20,
             "preset": "medium", "container": "mp4", "audio_codec": "aac"
         }
     },
@@ -52,7 +52,7 @@ LIBRARY_TYPES = {
         "description": "Ultra HD, 4K movies/shows",
         "icon": "🖥️",
         "recommended": {
-            "codec": "av1", "encoder": "svt_av1", "quality": 32,
+            "codec": "av1", "encoder": "svt_av1_10bit", "quality": 32,
             "preset": "8", "container": "mkv", "audio_codec": "opus"
         }
     },
@@ -61,7 +61,7 @@ LIBRARY_TYPES = {
         "description": "Downloaded web videos, streams",
         "icon": "🌐",
         "recommended": {
-            "codec": "av1", "encoder": "svt_av1", "quality": 35,
+            "codec": "av1", "encoder": "svt_av1_10bit", "quality": 35,
             "preset": "12", "container": "mp4", "audio_codec": "aac"
         }
     },
@@ -70,7 +70,7 @@ LIBRARY_TYPES = {
         "description": "Long-term storage, near-lossless",
         "icon": "📦",
         "recommended": {
-            "codec": "h265", "encoder": "x265", "quality": 18,
+            "codec": "h265", "encoder": "x265_10bit", "quality": 18,
             "preset": "slow", "container": "mkv", "audio_codec": "passthrough"
         }
     },
@@ -79,7 +79,7 @@ LIBRARY_TYPES = {
         "description": "Music content, concerts",
         "icon": "🎵",
         "recommended": {
-            "codec": "av1", "encoder": "svt_av1", "quality": 26,
+            "codec": "av1", "encoder": "svt_av1_10bit", "quality": 26,
             "preset": "6", "container": "mkv", "audio_codec": "opus"
         }
     },

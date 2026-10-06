@@ -738,15 +738,36 @@
                             <label class="block text-sm font-medium mb-2">Encoder *</label>
                             <select id="profileEncoder" required onchange="updatePresetOptions()"
                                 class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
-                                <option value="x264">x264 (CPU)</option>
-                                <option value="x265">x265 (CPU)</option>
-                                <option value="svt_av1" selected>SVT-AV1 (CPU) ⭐</option>
-                                <option value="nvenc_h264">NVENC H.264 (GPU)</option>
-                                <option value="nvenc_h265">NVENC H.265 (GPU)</option>
-                                <option value="nvenc_av1">NVENC AV1 (GPU)</option>
-                                <option value="qsv_h264">QuickSync H.264 (GPU)</option>
-                                <option value="qsv_h265">QuickSync H.265 (GPU)</option>
+                                <optgroup label="CPU">
+                                    <option value="svt_av1_10bit" selected>SVT-AV1 10-bit ⭐</option>
+                                    <option value="svt_av1">SVT-AV1 8-bit</option>
+                                    <option value="x265_10bit">x265 10-bit</option>
+                                    <option value="x265">x265 8-bit</option>
+                                    <option value="x264">x264</option>
+                                </optgroup>
+                                <optgroup label="NVIDIA (NVENC)">
+                                    <option value="nvenc_av1_10bit">NVENC AV1 10-bit</option>
+                                    <option value="nvenc_av1">NVENC AV1</option>
+                                    <option value="nvenc_h265_10bit">NVENC H.265 10-bit</option>
+                                    <option value="nvenc_h265">NVENC H.265</option>
+                                    <option value="nvenc_h264">NVENC H.264</option>
+                                </optgroup>
+                                <optgroup label="Intel (QuickSync)">
+                                    <option value="qsv_av1_10bit">QuickSync AV1 10-bit</option>
+                                    <option value="qsv_av1">QuickSync AV1</option>
+                                    <option value="qsv_h265_10bit">QuickSync H.265 10-bit</option>
+                                    <option value="qsv_h265">QuickSync H.265</option>
+                                    <option value="qsv_h264">QuickSync H.264</option>
+                                </optgroup>
+                                <optgroup label="AMD (VCN)">
+                                    <option value="vce_av1_10bit">AMD AV1 10-bit</option>
+                                    <option value="vce_av1">AMD AV1</option>
+                                    <option value="vce_h265_10bit">AMD H.265 10-bit</option>
+                                    <option value="vce_h265">AMD H.265</option>
+                                    <option value="vce_h264">AMD H.264</option>
+                                </optgroup>
                             </select>
+                            <p class="text-xs text-gray-400 mt-1">10-bit keeps HDR intact and reduces banding. 8-bit profiles switch to 10-bit automatically for HDR / 10-bit sources. Encoders your HandBrake can't run are greyed out.</p>
                         </div>
                     </div>
                     

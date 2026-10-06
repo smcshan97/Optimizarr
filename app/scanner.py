@@ -15,6 +15,39 @@ import os
 from app.database import db
 
 
+_PIX_DEPTH_RE = re.compile(r'p(\d{2})(?:le|be)?$')
+
+# Transfer characteristics that mean HDR: PQ (HDR10/HDR10+/DV) and HLG.
+HDR_TRANSFERS = {'smpte2084', 'arib-std-b67'}
+
+
+def video_color_info(stream: Dict) -> Dict:
+    """Bit depth, colour tags and HDR flags from one ffprobe video stream."""
+    pix_fmt = stream.get('pix_fmt') or ''
+    depth = 8
+    m = _PIX_DEPTH_RE.search(pix_fmt)
+    if m:
+        depth = int(m.group(1))
+    else:
+        try:
+            depth = int(stream.get('bits_per_raw_sample') or 8)
+        except (TypeError, ValueError):
+            depth = 8
+    transfer = stream.get('color_transfer') or ''
+    dovi = any('DOVI' in (sd.get('side_data_type') or '')
+               for sd in stream.get('side_data_list') or [])
+    return {
+        'pix_fmt': pix_fmt,
+        'bit_depth': depth,
+        'color_primaries': stream.get('color_primaries') or '',
+        'color_transfer': transfer,
+        'color_space': stream.get('color_space') or '',
+        'color_range': stream.get('color_range') or '',
+        'hdr': transfer in HDR_TRANSFERS or dovi,
+        'dolby_vision': dovi,
+    }
+
+
 class MediaScanner:
     """Scans directories for video files and analyzes their specifications."""
     
@@ -98,10 +131,18 @@ class MediaScanner:
             specs['bit_rate'] = int(fmt.get('bit_rate', 0))
         except (ValueError, TypeError):
             pass
+        seen_video = False
         for stream in data.get('streams', []):
             codec_type = stream.get('codec_type', '')
             if codec_type == 'video':
+                # Only the first real video stream counts. Embedded cover art
+                # (MKV attachments / MP4 covr) is a 'video' stream too, and
+                # used to overwrite the real codec/resolution with a JPEG's.
+                if seen_video or (stream.get('disposition') or {}).get('attached_pic'):
+                    continue
+                seen_video = True
                 specs['codec'] = self._normalise_codec(stream.get('codec_name', 'unknown'))
+                specs.update(video_color_info(stream))
                 w, h = stream.get('width', 0), stream.get('height', 0)
                 if w and h:
                     specs['resolution'] = f"{w}x{h}"
@@ -137,6 +178,31 @@ class MediaScanner:
                     'sample_rate': stream.get('sample_rate', ''),
                 })
         return specs
+
+    def probe_video_color(self, file_path: str) -> Dict:
+        """Bit depth / HDR info of the first video stream ({} on failure).
+
+        Cheap single-stream ffprobe used at encode time for queue items whose
+        specs came from Sonarr/Radarr (which don't report bit depth/HDR).
+        """
+        if not self.ffprobe_available:
+            return {}
+        try:
+            result = subprocess.run(
+                ['ffprobe', '-v', 'quiet', '-print_format', 'json',
+                 '-select_streams', 'V', '-show_streams', file_path],
+                capture_output=True, text=True, timeout=30,
+                encoding='utf-8', errors='replace'
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                return {}
+            for stream in json.loads(result.stdout).get('streams', []):
+                if (stream.get('disposition') or {}).get('attached_pic'):
+                    continue
+                return video_color_info(stream)
+        except Exception:
+            pass
+        return {}
 
     def _probe_with_handbrake(self, file_path: str) -> Optional[Dict]:
         try:

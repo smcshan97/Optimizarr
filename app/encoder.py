@@ -247,33 +247,8 @@ class EncodingJob:
         # Container format
         cmd.extend(['--format', container_info['format']])
         
-        # ---- Encoder Selection (with HW accel support) ----
-        encoder = self.profile['encoder']
-        
-        # If hardware acceleration is enabled, try to use a GPU encoder
-        if self.profile.get('hw_accel_enabled'):
-            hw_encoder = self._get_hw_encoder(encoder)
-            if hw_encoder:
-                encoder = hw_encoder
-        
-        # Map encoder names to HandBrake encoder names
-        encoder_map = {
-            'svt_av1': 'svt_av1',
-            'x265': 'x265',
-            'x264': 'x264',
-            'nvenc_h265': 'nvenc_h265',
-            'nvenc_h264': 'nvenc_h264',
-            'nvenc_av1': 'nvenc_av1',
-            'qsv_h265': 'qsv_h265',
-            'qsv_h264': 'qsv_h264',
-            'qsv_av1': 'qsv_av1',
-            'vce_h264': 'vce_h264',
-            'vce_h265': 'vce_h265',
-            'vt_h264': 'vt_h264',
-            'vt_h265': 'vt_h265',
-        }
-        
-        hb_encoder = encoder_map.get(encoder, encoder)
+        # ---- Encoder Selection (HW accel + 10-bit/HDR) ----
+        hb_encoder = self.select_encoder()
         cmd.extend(['--encoder', hb_encoder])
 
         # Hardware DECODING (independent of the encoder choice): NVDEC/QSV
@@ -459,45 +434,115 @@ class EncodingJob:
         return filters
     
     def _get_hw_encoder(self, current_encoder: str) -> Optional[str]:
-        """Try to map a software encoder to a hardware encoder.
-        
-        Conservative approach: only map codecs that are reliably supported
-        across all GPUs for each vendor. AV1 hardware encoding requires
-        specific GPU generations (NVIDIA RTX 40+, Intel Arc) that we
-        cannot reliably detect from HandBrake alone, so we skip those
-        and let the software encoder handle them.
+        """Map the profile's codec to a hardware encoder HandBrake offers.
+
+        HandBrake only lists a hardware encoder when the installed GPU can
+        actually run it (e.g. nvenc_av1 is absent on pre-RTX-40 cards), so
+        its encoder list is the authority — AV1 now goes to NVENC/QSV/VCN
+        on GPUs that support it. If the list couldn't be read, fall back to
+        the codecs every GPU generation supports (H.264/H.265).
         """
-        # Detect what's available
         hw = detect_hardware_acceleration()
-        
+        names = set(hw.get('encoder_names') or [])
         codec = self.profile.get('codec', 'av1')
-        
-        # NVIDIA: H.264/H.265 are safe on all NVENC GPUs.
-        # AV1 requires RTX 40+ (Ada Lovelace) — skip to avoid silent failures.
-        if hw.get('nvidia'):
-            safe_map = {'h264': 'nvenc_h264', 'h265': 'nvenc_h265'}
-            if codec in safe_map:
-                return safe_map[codec]
-        
-        # Intel QSV: H.264/H.265 are broadly supported.
-        # AV1 requires Arc GPUs — skip for safety.
-        if hw.get('intel'):
-            safe_map = {'h264': 'qsv_h264', 'h265': 'qsv_h265'}
-            if codec in safe_map:
-                return safe_map[codec]
-        
-        if hw.get('amd'):
-            safe_map = {'h264': 'vce_h264', 'h265': 'vce_h265'}
-            if codec in safe_map:
-                return safe_map[codec]
-        
-        if hw.get('apple'):
-            safe_map = {'h264': 'vt_h264', 'h265': 'vt_h265'}
-            if codec in safe_map:
-                return safe_map[codec]
-        
-        # No safe HW encoder for this codec — keep software encoder
+
+        for vendor, prefix in (('nvidia', 'nvenc'), ('intel', 'qsv'),
+                               ('amd', 'vce'), ('apple', 'vt')):
+            if not hw.get(vendor):
+                continue
+            candidate = f"{prefix}_{codec}"
+            if names:
+                if candidate in names:
+                    return candidate
+            elif codec in ('h264', 'h265'):
+                return candidate
+
+        # No hardware encoder for this codec — keep the software encoder
         return None
+
+    def source_video_info(self) -> Dict:
+        """Bit depth / HDR info for the ORIGINAL source (cached per job).
+
+        Scan-queued items carry it in current_specs; webhook/sync items only
+        have Sonarr/Radarr's codec+resolution, so probe once here.
+        """
+        if getattr(self, '_source_info', None) is not None:
+            return self._source_info
+        specs = self.queue_item.get('current_specs') or {}
+        if isinstance(specs, str):
+            import json as _json
+            try:
+                specs = _json.loads(specs)
+            except ValueError:
+                specs = {}
+        if 'bit_depth' in specs:
+            info = specs
+        else:
+            try:
+                from app.scanner import scanner
+                info = scanner.probe_video_color(self.queue_item['file_path'])
+            except Exception:
+                info = {}
+        self._source_info = info
+        return info
+
+    def select_encoder(self) -> str:
+        """Choose the HandBrake encoder name for this job.
+
+        1. Hardware encoder if the profile enables it and one exists.
+        2. 10-bit: when the source is HDR or >8-bit, use the encoder's
+           ``_10bit`` variant — an 8-bit encode of an HDR source drops the
+           HDR metadata and comes out washed out. H.264 is left alone (10-bit
+           H.264 barely plays anywhere and can't carry HDR anyway).
+        3. A ``*_10bit`` encoder HandBrake doesn't offer falls back to its
+           8-bit base rather than failing the encode.
+        """
+        encoder = self.profile['encoder']
+        if self.profile.get('hw_accel_enabled'):
+            encoder = self._get_hw_encoder(encoder) or encoder
+
+        names = set(detect_hardware_acceleration().get('encoder_names') or [])
+        base = encoder[:-6] if encoder.endswith('_10bit') else encoder
+        info = self.source_video_info()
+        wants_10bit = (encoder.endswith('_10bit') or bool(info.get('hdr'))
+                       or (info.get('bit_depth') or 8) > 8)
+        is_h264 = base == 'x264' or base.endswith('h264')
+
+        chosen = encoder
+        if wants_10bit and not is_h264:
+            ten = f"{base}_10bit"
+            if not names or ten in names:
+                chosen = ten
+            else:
+                chosen = base
+        if names and chosen not in names and chosen.endswith('_10bit'):
+            chosen = chosen[:-6]
+
+        if chosen != self.profile['encoder']:
+            reason = []
+            if info.get('hdr'):
+                reason.append('HDR source')
+            elif (info.get('bit_depth') or 8) > 8:
+                reason.append(f"{info.get('bit_depth')}-bit source")
+            if self.profile.get('hw_accel_enabled') and not chosen.startswith(
+                    self.profile['encoder'].replace('_10bit', '')):
+                reason.append('hardware acceleration')
+            try:
+                from app.logger import optimizarr_logger
+                optimizarr_logger.app_logger.info(
+                    "Encoder %s -> %s (%s)", self.profile['encoder'], chosen,
+                    ', '.join(reason) or 'availability')
+            except Exception:
+                pass
+        if info.get('hdr') and is_h264:
+            try:
+                from app.logger import optimizarr_logger
+                optimizarr_logger.app_logger.warning(
+                    "HDR source encoded with an H.264 profile — HDR will be lost: %s",
+                    self.queue_item.get('file_path'))
+            except Exception:
+                pass
+        return chosen
     
     def _monitor_resources(self):
         """Background thread to monitor resources and pause/resume if needed."""
@@ -1779,6 +1824,28 @@ class EncoderPool:
 _hw_accel_cache: Optional[Dict] = None
 
 
+def parse_hb_encoder_list(help_text: str) -> list:
+    """Video encoder names from ``HandBrakeCLI --help``.
+
+    The list sits under the ``-e, --encoder <string>`` option, one name per
+    line, and ends at the next option line. Returns [] if not found.
+    """
+    names, in_list = [], False
+    for line in help_text.splitlines():
+        stripped = line.strip()
+        if not in_list:
+            if '--encoder <string>' in line:
+                in_list = True
+            continue
+        if not stripped or stripped.startswith('-'):
+            break
+        if re.fullmatch(r'[A-Za-z0-9_]+', stripped):
+            names.append(stripped)
+        else:
+            break
+    return names
+
+
 def detect_hardware_acceleration() -> Dict:
     """Detect available hardware encoders by querying HandBrakeCLI (cached)."""
     global _hw_accel_cache
@@ -1803,42 +1870,31 @@ def detect_hardware_acceleration() -> Dict:
             errors='replace'
         )
         
-        output = result.stdout.lower() + result.stderr.lower()
-        
-        if "nvenc" in output:
-            available["nvidia"] = True
-            available["encoders"].append("NVENC (NVIDIA)")
-            available["details"]["nvidia"] = {
-                "h264": "nvenc_h264" in output,
-                "h265": "nvenc_h265" in output,
-                "av1": "nvenc_av1" in output,
-            }
-        
-        if "vce" in output:
-            available["amd"] = True
-            available["encoders"].append("VCE (AMD)")
-            available["details"]["amd"] = {
-                "h264": "vce_h264" in output,
-                "h265": "vce_h265" in output,
-            }
-        
-        if "qsv" in output:
-            available["intel"] = True
-            available["encoders"].append("QuickSync (Intel)")
-            available["details"]["intel"] = {
-                "h264": "qsv_h264" in output,
-                "h265": "qsv_h265" in output,
-                "av1": "qsv_av1" in output,
-            }
-        
-        if "videotoolbox" in output or "vt_h" in output:
-            available["apple"] = True
-            available["encoders"].append("VideoToolbox (Apple)")
-            available["details"]["apple"] = {
-                "h264": "vt_h264" in output,
-                "h265": "vt_h265" in output,
-            }
-        
+        raw_output = (result.stdout or '') + (result.stderr or '')
+        names = parse_hb_encoder_list(raw_output)
+        available["encoder_names"] = names
+        # Prefer the exact encoder list: a bare substring search matched
+        # option text (e.g. "--enable-qsv-decoding") and reported Intel
+        # QuickSync on machines without it. Substring search stays only as
+        # a fallback for help output we can't parse.
+        tokens = set(names) if names else None
+        output = raw_output.lower()
+
+        def has(name):
+            return name in tokens if tokens is not None else name in output
+
+        for vendor, prefix, label in (
+            ("nvidia", "nvenc", "NVENC (NVIDIA)"),
+            ("amd", "vce", "VCE (AMD)"),
+            ("intel", "qsv", "QuickSync (Intel)"),
+            ("apple", "vt", "VideoToolbox (Apple)"),
+        ):
+            detail = {c: has(f"{prefix}_{c}") for c in ("h264", "h265", "av1")}
+            if any(detail.values()):
+                available[vendor] = True
+                available["encoders"].append(label)
+                available["details"][vendor] = detail
+
     except FileNotFoundError:
         available["error"] = "HandBrakeCLI not found"
     except subprocess.TimeoutExpired:

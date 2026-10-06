@@ -287,7 +287,7 @@ DEFAULT_PROFILES = [
         {
             "name": "🎬 Movies — AV1 1080p High Quality",
             "resolution": "", "framerate": None,
-            "codec": "av1", "encoder": "svt_av1", "quality": 28,
+            "codec": "av1", "encoder": "svt_av1_10bit", "quality": 28,
             "audio_codec": "passthrough", "container": "mkv",
             "audio_handling": "preserve_all", "subtitle_handling": "preserve_all",
             "chapter_markers": True, "enable_filters": False,
@@ -297,7 +297,7 @@ DEFAULT_PROFILES = [
         {
             "name": "📺 TV Shows — AV1 1080p Balanced",
             "resolution": "", "framerate": None,
-            "codec": "av1", "encoder": "svt_av1", "quality": 32,
+            "codec": "av1", "encoder": "svt_av1_10bit", "quality": 32,
             "audio_codec": "aac", "container": "mkv",
             "audio_handling": "keep_primary", "subtitle_handling": "keep_english",
             "chapter_markers": False, "enable_filters": False,
@@ -307,7 +307,7 @@ DEFAULT_PROFILES = [
         {
             "name": "⚡ Fast H.265 — GPU Encode (NVENC)",
             "resolution": "", "framerate": None,
-            "codec": "h265", "encoder": "nvenc_h265", "quality": 28,
+            "codec": "h265", "encoder": "nvenc_h265_10bit", "quality": 28,
             "audio_codec": "aac", "container": "mkv",
             "audio_handling": "preserve_all", "subtitle_handling": "none",
             "chapter_markers": True, "enable_filters": False,
@@ -317,13 +317,13 @@ DEFAULT_PROFILES = [
         {
             "name": "📦 Archive — HEVC 10-bit Near Lossless",
             "resolution": "", "framerate": None,
-            "codec": "h265", "encoder": "x265", "quality": 18,
+            "codec": "h265", "encoder": "x265_10bit", "quality": 18,
             "audio_codec": "passthrough", "container": "mkv",
             "audio_handling": "preserve_all", "subtitle_handling": "preserve_all",
             "chapter_markers": True, "enable_filters": False,
             "hw_accel_enabled": False, "preset": "slower",
             "two_pass": False,
-            "custom_args": "--encoder-profile main10 --encoder-level 5.1",
+            "custom_args": "--encoder-level 5.1",
             "is_default": False,
         },
         {

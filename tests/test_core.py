@@ -2144,6 +2144,121 @@ class TestHandBrakeJsonProgress:
         assert blocks[0][1]['Note'] == 'weird { brace }'
 
 
+_HB_HELP_SAMPLE = """
+   -e, --encoder <string>  Select video encoder:
+                               svt_av1
+                               svt_av1_10bit
+                               x264
+                               nvenc_h264
+                               x265
+                               x265_10bit
+                               nvenc_h265
+                               nvenc_h265_10bit
+       --encoder-preset <string>
+       --enable-qsv-decoding   Use QSV decoding
+"""
+
+
+class TestEncoderSelection:
+    """10-bit/HDR upgrade and HandBrake-list-driven hardware encoders."""
+
+    def _job(self, fresh_db, monkeypatch, profile, source_info, names, vendors=None):
+        import app.encoder as enc
+        hw = {'nvidia': False, 'intel': False, 'amd': False, 'apple': False,
+              'encoder_names': names}
+        hw.update(vendors or {})
+        monkeypatch.setattr(enc, 'detect_hardware_acceleration', lambda: hw)
+        monkeypatch.setattr(enc, 'db', fresh_db)
+        item_id = fresh_db.add_to_queue(file_path='/x/in.mkv', root_id=1, profile_id=1,
+                                        current_specs=source_info, target_specs={})
+        base = {'name': 'p', 'codec': 'av1', 'encoder': 'svt_av1', 'quality': 30,
+                'container': 'mkv', 'hw_accel_enabled': False}
+        base.update(profile)
+        return enc.EncodingJob(item_id, base)
+
+    def test_parse_encoder_list(self):
+        from app.encoder import parse_hb_encoder_list
+        names = parse_hb_encoder_list(_HB_HELP_SAMPLE)
+        assert names[0] == 'svt_av1' and 'nvenc_h265_10bit' in names
+        assert '--encoder-preset' not in ' '.join(names)
+        assert parse_hb_encoder_list('no list here') == []
+
+    def test_qsv_option_text_is_not_intel_hardware(self, monkeypatch):
+        import app.encoder as enc
+        class R:
+            stdout = _HB_HELP_SAMPLE
+            stderr = ''
+        monkeypatch.setattr(enc, '_hw_accel_cache', None)
+        monkeypatch.setattr(enc.subprocess, 'run', lambda *a, **k: R())
+        hw = enc.detect_hardware_acceleration()
+        monkeypatch.setattr(enc, '_hw_accel_cache', None)
+        assert hw['nvidia'] and not hw['intel']
+        assert hw['details']['nvidia'] == {'h264': True, 'h265': True, 'av1': False}
+
+    def test_hdr_source_upgrades_to_10bit(self, fresh_db, monkeypatch):
+        job = self._job(fresh_db, monkeypatch, {}, {'bit_depth': 10, 'hdr': True},
+                        ['svt_av1', 'svt_av1_10bit'])
+        assert job.select_encoder() == 'svt_av1_10bit'
+
+    def test_8bit_source_keeps_8bit_profile(self, fresh_db, monkeypatch):
+        job = self._job(fresh_db, monkeypatch, {}, {'bit_depth': 8, 'hdr': False},
+                        ['svt_av1', 'svt_av1_10bit'])
+        assert job.select_encoder() == 'svt_av1'
+
+    def test_10bit_profile_falls_back_when_unavailable(self, fresh_db, monkeypatch):
+        job = self._job(fresh_db, monkeypatch, {'encoder': 'svt_av1_10bit'},
+                        {'bit_depth': 8}, ['svt_av1'])
+        assert job.select_encoder() == 'svt_av1'
+
+    def test_h264_never_upgraded(self, fresh_db, monkeypatch):
+        job = self._job(fresh_db, monkeypatch, {'codec': 'h264', 'encoder': 'x264'},
+                        {'bit_depth': 10, 'hdr': True}, ['x264', 'x264_10bit'])
+        assert job.select_encoder() == 'x264'
+
+    def test_hw_av1_only_when_handbrake_offers_it(self, fresh_db, monkeypatch):
+        job = self._job(fresh_db, monkeypatch, {'hw_accel_enabled': True},
+                        {'bit_depth': 8}, ['svt_av1', 'nvenc_h265'], {'nvidia': True})
+        assert job.select_encoder() == 'svt_av1'  # no nvenc_av1 on this GPU
+        job = self._job(fresh_db, monkeypatch, {'hw_accel_enabled': True},
+                        {'bit_depth': 10, 'hdr': True},
+                        ['svt_av1', 'nvenc_av1', 'nvenc_av1_10bit'], {'nvidia': True})
+        assert job.select_encoder() == 'nvenc_av1_10bit'
+
+    def test_hw_unknown_list_keeps_conservative_codecs(self, fresh_db, monkeypatch):
+        job = self._job(fresh_db, monkeypatch, {'hw_accel_enabled': True},
+                        {'bit_depth': 8}, [], {'nvidia': True})
+        assert job.select_encoder() == 'svt_av1'
+        job = self._job(fresh_db, monkeypatch,
+                        {'hw_accel_enabled': True, 'codec': 'h265', 'encoder': 'x265'},
+                        {'bit_depth': 8}, [], {'nvidia': True})
+        assert job.select_encoder() == 'nvenc_h265'
+
+
+class TestVideoColorInfo:
+    def test_pix_fmt_depth_and_hdr(self):
+        from app.scanner import video_color_info
+        info = video_color_info({'pix_fmt': 'yuv420p10le', 'color_transfer': 'smpte2084',
+                                 'color_primaries': 'bt2020'})
+        assert info['bit_depth'] == 10 and info['hdr'] and not info['dolby_vision']
+        assert video_color_info({'pix_fmt': 'yuv420p'})['bit_depth'] == 8
+        assert video_color_info({'pix_fmt': 'yuv420p', 'color_transfer': 'arib-std-b67'})['hdr']
+
+    def test_dolby_vision_side_data(self):
+        from app.scanner import video_color_info
+        info = video_color_info({'pix_fmt': 'yuv420p10le', 'side_data_list': [
+            {'side_data_type': 'DOVI configuration record'}]})
+        assert info['hdr'] and info['dolby_vision']
+
+    def test_cover_art_ignored(self, scanner):
+        specs = scanner._parse_ffprobe_json({'streams': [
+            {'codec_type': 'video', 'codec_name': 'hevc', 'width': 3840, 'height': 2160,
+             'pix_fmt': 'yuv420p10le', 'color_transfer': 'smpte2084'},
+            {'codec_type': 'video', 'codec_name': 'mjpeg', 'width': 600, 'height': 900,
+             'disposition': {'attached_pic': 1}},
+        ], 'format': {}})
+        assert specs['codec'] == 'h265' and specs['height'] == 2160 and specs['hdr']
+
+
 class TestBuildCommandFlags:
     """--json always present; NVDEC gated on the profile hw-accel flag."""
 

@@ -1439,7 +1439,12 @@ async function editProfile(id) {
     document.getElementById('profileId').value = profile.id;
     document.getElementById('profileName').value = profile.name;
     document.getElementById('profileCodec').value = profile.codec;
-    document.getElementById('profileEncoder').value = profile.encoder;
+    const encSel = document.getElementById('profileEncoder');
+    if (![...encSel.options].some(o => o.value === profile.encoder)) {
+        // Encoder set via import/API that the dropdown doesn't list — keep it
+        encSel.add(new Option(profile.encoder, profile.encoder));
+    }
+    encSel.value = profile.encoder;
     document.getElementById('profileResolution').value = profile.resolution || '';
     document.getElementById('profileContainer').value = profile.container || 'mkv';
     
@@ -1920,8 +1925,11 @@ function updatePresetOptions() {
     const presetSelect = document.getElementById('profilePreset');
     const presetHelp = document.getElementById('presetHelp');
     
-    const options = PRESET_OPTIONS[encoder] || [{ value: '', label: 'Auto (recommended)' }];
-    
+    // 10-bit variants share their 8-bit encoder's presets
+    const options = PRESET_OPTIONS[encoder]
+        || PRESET_OPTIONS[encoder.replace(/_10bit$/, '')]
+        || [{ value: '', label: 'Auto (recommended)' }];
+
     // Save current value
     const currentValue = presetSelect.value;
     
@@ -1938,7 +1946,7 @@ function updatePresetOptions() {
     // Update help text
     if (encoder.startsWith('nvenc')) {
         presetHelp.textContent = 'NVENC: p1=fastest, p7=slowest/best quality';
-    } else if (encoder === 'svt_av1') {
+    } else if (encoder.startsWith('svt_av1')) {
         presetHelp.textContent = 'SVT-AV1: 0=slowest/best, 13=fastest';
     } else {
         presetHelp.textContent = 'Speed vs quality trade-off';
@@ -2008,6 +2016,21 @@ function showCodecGuide() {
     alert(guide);
 }
 
+// Grey out encoders the installed HandBrake can't run (it only lists GPU
+// encoders the hardware actually supports, e.g. no nvenc_av1 before RTX 40).
+async function markUnavailableEncoders() {
+    const select = document.getElementById('profileEncoder');
+    if (!select) return;
+    const hw = await apiRequest('/hardware-detect');
+    const names = new Set((hw && hw.encoder_names) || []);
+    if (!names.size) return; // couldn't read the list — leave everything enabled
+    select.querySelectorAll('option').forEach(opt => {
+        const ok = names.has(opt.value);
+        opt.disabled = !ok;
+        opt.textContent = opt.textContent.replace(/ \(unavailable\)$/, '') + (ok ? '' : ' (unavailable)');
+    });
+}
+
 // Initialize encoder change listener
 document.addEventListener('DOMContentLoaded', function() {
     const encoderSelect = document.getElementById('profileEncoder');
@@ -2015,6 +2038,7 @@ document.addEventListener('DOMContentLoaded', function() {
         encoderSelect.addEventListener('change', updatePresetOptions);
         // Initialize on load
         updatePresetOptions();
+        markUnavailableEncoders();
     }
 });
 
