@@ -33,7 +33,7 @@ async def encode_progress_events(token: Optional[str] = None):
     # Only short-lived stream tokens (POST /auth/stream-token) are accepted
     # here — the full API token must never sit in a URL.
     from app.auth import auth as _auth
-    if not _auth.user_from_token(token, scope="stream"):
+    if not await asyncio.to_thread(_auth.user_from_token, token, "stream"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                             detail="Invalid or expired token")
 
@@ -190,7 +190,7 @@ def compute_pending_eta(speed_stats: Optional[dict] = None) -> tuple:
 
 
 @router.post("/queue/scan", response_model=MessageResponse)
-async def trigger_scan(
+def trigger_scan(
     background_tasks: BackgroundTasks,
     root_id: Optional[int] = None,
     current_user: dict = Depends(get_current_user)
@@ -211,7 +211,7 @@ async def trigger_scan(
 
 
 @router.patch("/queue/{item_id}", response_model=MessageResponse)
-async def update_queue_item(
+def update_queue_item(
     item_id: int,
     update: QueueUpdateRequest,
     current_user: dict = Depends(get_current_user)
@@ -230,7 +230,7 @@ async def update_queue_item(
 
 
 @router.delete("/queue/{item_id}", response_model=MessageResponse)
-async def delete_queue_item(
+def delete_queue_item(
     item_id: int,
     current_user: dict = Depends(get_current_user)
 ):
@@ -247,7 +247,7 @@ async def delete_queue_item(
 
 
 @router.post("/queue/clear", response_model=MessageResponse)
-async def clear_queue(
+def clear_queue(
     status: Optional[str] = None,
     current_user: dict = Depends(get_current_admin_user)
 ):
@@ -263,7 +263,7 @@ async def clear_queue(
 
 # Control Endpoints
 @router.post("/control/start", response_model=MessageResponse)
-async def start_encoding(
+def start_encoding(
     background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user)
 ):
@@ -292,7 +292,7 @@ async def start_encoding(
 
 
 @router.post("/control/stop", response_model=MessageResponse)
-async def stop_encoding(current_user: dict = Depends(get_current_user)):
+def stop_encoding(current_user: dict = Depends(get_current_user)):
     """Stop processing the encoding queue."""
     if not encoder_pool.is_running:
         return MessageResponse(
@@ -357,20 +357,20 @@ async def get_statistics(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/stats/clear-names", response_model=MessageResponse)
-async def clear_history_file_names(current_user: dict = Depends(get_current_admin_user)):
+def clear_history_file_names(current_user: dict = Depends(get_current_admin_user)):
     """Anonymize file paths in history while preserving all statistical data (admin only)."""
     count = db.clear_history_file_names()
     return MessageResponse(message=f"Cleared file names from {count} history records")
 
 
 @router.post("/stats/purge", response_model=MessageResponse)
-async def purge_history(current_user: dict = Depends(get_current_admin_user)):
+def purge_history(current_user: dict = Depends(get_current_admin_user)):
     """Delete all history records. Aggregate stats will reset to zero (admin only)."""
     count = db.purge_history()
     return MessageResponse(message=f"Purged {count} history records")
 
 @router.post("/queue/prioritize")
-async def prioritize_queue(
+def prioritize_queue(
     data: dict,
     current_user: dict = Depends(get_current_user)
 ):
@@ -449,7 +449,7 @@ async def prioritize_queue(
 
 
 @router.post("/queue/reprobe")
-async def reprobe_queue_items(
+def reprobe_queue_items(
     current_user: dict = Depends(get_current_user)
 ):
     """
@@ -501,7 +501,7 @@ async def reprobe_queue_items(
 
 
 @router.post("/queue/clear-completed")
-async def clear_completed_queue(
+def clear_completed_queue(
     current_user: dict = Depends(get_current_user)
 ):
     """Remove all completed items from the queue."""
@@ -543,7 +543,7 @@ def _recheck_permission_item(item: dict) -> bool:
 
 
 @router.post("/queue/recheck-permissions", response_model=MessageResponse)
-async def recheck_all_permissions(current_user: dict = Depends(get_current_user)):
+def recheck_all_permissions(current_user: dict = Depends(get_current_user)):
     """Re-check every permission_error item; accessible files go pending."""
     items = db.get_queue_items(status='permission_error')
     if not items:
@@ -556,7 +556,7 @@ async def recheck_all_permissions(current_user: dict = Depends(get_current_user)
 
 
 @router.post("/queue/{item_id}/recheck-permissions", response_model=MessageResponse)
-async def recheck_item_permissions(
+def recheck_item_permissions(
     item_id: int,
     current_user: dict = Depends(get_current_user)
 ):
@@ -672,7 +672,7 @@ async def cleanup_temp_outputs(current_user: dict = Depends(get_current_admin_us
 
 
 @router.post("/queue/retry-failed", response_model=MessageResponse)
-async def retry_all_failed(current_user: dict = Depends(get_current_user)):
+def retry_all_failed(current_user: dict = Depends(get_current_user)):
     """Re-queue every failed item (resets retry counters)."""
     failed = db.get_queue_items(status='failed')
     for it in failed:
@@ -713,7 +713,7 @@ async def reveal_queue_item(item_id: int,
 
 
 @router.post("/queue/{item_id}/retry", response_model=MessageResponse)
-async def retry_queue_item(item_id: int, current_user: dict = Depends(get_current_user)):
+def retry_queue_item(item_id: int, current_user: dict = Depends(get_current_user)):
     """Re-queue a single failed or cancelled item (resets its retry counter)."""
     item = db.get_queue_item(item_id)
     if not item:
@@ -733,7 +733,7 @@ async def retry_queue_item(item_id: int, current_user: dict = Depends(get_curren
 
 
 @router.post("/queue/reorder", response_model=MessageResponse)
-async def reorder_queue(
+def reorder_queue(
     data: dict,
     current_user: dict = Depends(get_current_user)
 ):

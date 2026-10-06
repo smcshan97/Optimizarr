@@ -7,7 +7,7 @@ from typing import Optional, Dict
 from app.auth import auth
 
 
-async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict:
+def get_current_user(authorization: Optional[str] = Header(None)) -> Dict:
     """
     Dependency to get current authenticated user from JWT token.
     
@@ -56,7 +56,7 @@ async def get_current_user(authorization: Optional[str] = Header(None)) -> Dict:
     return user
 
 
-async def get_current_admin_user(current_user: Dict = Depends(get_current_user)) -> Dict:
+def get_current_admin_user(current_user: Dict = Depends(get_current_user)) -> Dict:
     """
     Dependency to ensure current user is an admin.
     
@@ -78,15 +78,15 @@ async def get_current_admin_user(current_user: Dict = Depends(get_current_user))
     return current_user
 
 
-async def optional_authentication(authorization: Optional[str] = Header(None)) -> Optional[Dict]:
+def optional_authentication(authorization: Optional[str] = Header(None)) -> Optional[Dict]:
     """
     Optional authentication - returns user if authenticated, None otherwise.
     Useful for endpoints that can work with or without authentication.
     """
     if not authorization:
         return None
-    
+
     try:
-        return await get_current_user(authorization)
+        return get_current_user(authorization)
     except HTTPException:
         return None

@@ -163,7 +163,7 @@ def _list_directory(dir_path: str) -> dict:
 
 
 @router.get("/browse")
-async def browse_filesystem(
+def browse_filesystem(
     path: Optional[str] = Query(default=None),
     current_user: dict = Depends(get_current_user),
 ):
@@ -177,7 +177,7 @@ async def browse_filesystem(
 
 
 @router.get("/validate")
-async def validate_path(
+def validate_path(
     path: str = Query(...),
     current_user: dict = Depends(get_current_user),
 ):

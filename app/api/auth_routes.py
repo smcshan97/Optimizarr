@@ -67,7 +67,7 @@ def login(credentials: LoginRequest, request: Request):
 
 
 @router.get("/me", response_model=UserResponse)
-async def get_current_user_info(current_user: Dict = Depends(get_current_user)):
+def get_current_user_info(current_user: Dict = Depends(get_current_user)):
     """Get current authenticated user's information."""
     return UserResponse(
         id=current_user['id'],
@@ -80,7 +80,7 @@ async def get_current_user_info(current_user: Dict = Depends(get_current_user)):
 
 
 @router.post("/stream-token")
-async def stream_token(current_user: Dict = Depends(get_current_user)):
+def stream_token(current_user: Dict = Depends(get_current_user)):
     """Short-lived token for the progress EventSource URL.
 
     EventSource can't send an Authorization header, so the token travels in
@@ -91,7 +91,7 @@ async def stream_token(current_user: Dict = Depends(get_current_user)):
 
 
 @router.post("/logout", response_model=MessageResponse)
-async def logout(current_user: Dict = Depends(get_current_user)):
+def logout(current_user: Dict = Depends(get_current_user)):
     """Logout current user (client should discard token)."""
     # JWT logout is client-side; changing the password revokes all tokens.
     return MessageResponse(

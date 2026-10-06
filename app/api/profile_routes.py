@@ -10,14 +10,14 @@ router = APIRouter()
 
 
 @router.get("/profiles", response_model=List[ProfileResponse])
-async def list_profiles(current_user: dict = Depends(get_current_user)):
+def list_profiles(current_user: dict = Depends(get_current_user)):
     """Get all encoding profiles."""
     profiles = db.get_profiles()
     return profiles
 
 
 @router.post("/profiles", response_model=ProfileResponse, status_code=status.HTTP_201_CREATED)
-async def create_profile(
+def create_profile(
     profile: ProfileCreate,
     current_user: dict = Depends(get_current_admin_user)
 ):
@@ -37,7 +37,7 @@ async def create_profile(
 # declaration order, and the old placement made GET /profiles/export hit the
 # int path param ("export" → 422), silently breaking profile export in the UI.
 @router.get("/profiles/export")
-async def export_profiles(current_user: dict = Depends(get_current_user)):
+def export_profiles(current_user: dict = Depends(get_current_user)):
     """Export all profiles as JSON for backup/sharing."""
     profiles = db.export_profiles()
     return {
@@ -49,7 +49,7 @@ async def export_profiles(current_user: dict = Depends(get_current_user)):
 
 
 @router.get("/profiles/{profile_id}", response_model=ProfileResponse)
-async def get_profile(
+def get_profile(
     profile_id: int,
     current_user: dict = Depends(get_current_user)
 ):
@@ -66,7 +66,7 @@ async def get_profile(
 
 
 @router.put("/profiles/{profile_id}", response_model=MessageResponse)
-async def update_profile(
+def update_profile(
     profile_id: int,
     profile: ProfileCreate,
     current_user: dict = Depends(get_current_admin_user)
@@ -124,7 +124,7 @@ async def update_profile(
 
 
 @router.delete("/profiles/{profile_id}", response_model=MessageResponse)
-async def delete_profile(
+def delete_profile(
     profile_id: int,
     current_user: dict = Depends(get_current_admin_user)
 ):
@@ -140,7 +140,7 @@ async def delete_profile(
     return MessageResponse(message=f"Profile {profile_id} deleted")
 
 @router.post("/profiles/import")
-async def import_profiles(
+def import_profiles(
     data: dict,
     current_user: dict = Depends(get_current_admin_user)
 ):
@@ -156,7 +156,7 @@ async def import_profiles(
 
 
 @router.post("/profiles/seed-defaults")
-async def seed_default_profiles(
+def seed_default_profiles(
     current_user: dict = Depends(get_current_admin_user)
 ):
     """

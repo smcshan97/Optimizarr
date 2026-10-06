@@ -1148,7 +1148,7 @@ class TestConfigExportImport:
             api_key_encrypted="SECRET-ENCRYPTED", sync_interval_hours=6,
         )
 
-        cfg = asyncio.run(system_routes.export_config_json(current_user={}))
+        cfg = system_routes.export_config_json(current_user={})
         assert cfg["optimizarr_config"] is True
         assert cfg["profiles"][0]["name"] == "Movies AV1"
         assert "id" not in cfg["profiles"][0]
@@ -1188,7 +1188,7 @@ class TestConfigExportImport:
             "settings": {"max_retries": "9"},
             "connections": [{"name": "R", "app_type": "radarr"}],
         }
-        res = asyncio.run(system_routes.import_config_json(config, current_user={}))
+        res = system_routes.import_config_json(config, current_user={})
         s = res["summary"]
         assert s["profiles_added"] == 1 and s["profiles_skipped"] == 1
         assert s["scan_roots_added"] == 1 and s["scan_roots_skipped"] == 1
@@ -1213,7 +1213,7 @@ class TestConfigExportImport:
         from app.api import system_routes
         monkeypatch.setattr(system_routes, 'db', fresh_db)
         with pytest.raises(HTTPException) as ei:
-            asyncio.run(system_routes.import_config_json({"foo": "bar"}, current_user={}))
+            system_routes.import_config_json({"foo": "bar"}, current_user={})
         assert ei.value.status_code == 400
 
 
@@ -1379,7 +1379,7 @@ class TestRetryBackoff:
                                     status='failed')
         fresh_db.update_queue_item(qid, retry_count=3,
                                    retry_after="2999-01-01 00:00:00")
-        asyncio.run(queue_routes.retry_queue_item(qid, current_user={}))
+        queue_routes.retry_queue_item(qid, current_user={})
         item = fresh_db.get_queue_item(qid)
         assert item['status'] == 'pending'
         assert item['retry_count'] == 0
@@ -1763,8 +1763,8 @@ class TestFastestFirstFallback:
                                       duration_seconds=0, file_size_bytes=200_000_000,
                                       target_specs={'codec': 'av1'})
 
-        asyncio.run(queue_routes.prioritize_queue(
-            {'sort_by': 'fastest_first', 'order': 'asc'}, current_user={}))
+        queue_routes.prioritize_queue(
+            {'sort_by': 'fastest_first', 'order': 'asc'}, current_user={})
 
         # Small clip gets rank 1, giant VR last — even with no durations
         assert fresh_db.get_queue_item(small)['priority'] < fresh_db.get_queue_item(big)['priority']
@@ -1786,8 +1786,8 @@ class TestFastestFirstFallback:
                                            duration_seconds=0, file_size_bytes=60_000_000_000,
                                            target_specs={'codec': 'av1'})
 
-        asyncio.run(queue_routes.prioritize_queue(
-            {'sort_by': 'fastest_first', 'order': 'asc'}, current_user={}))
+        queue_routes.prioritize_queue(
+            {'sort_by': 'fastest_first', 'order': 'asc'}, current_user={})
         assert fresh_db.get_queue_item(short)['priority'] < fresh_db.get_queue_item(bigunknown)['priority']
 
 
@@ -1817,13 +1817,13 @@ class TestAutostartIntent:
 
         # Manual Start records intent=true (background task is only queued)
         monkeypatch.setattr(queue_routes.encoder_pool, 'is_running', False)
-        asyncio.run(queue_routes.start_encoding(BackgroundTasks(), current_user={}))
+        queue_routes.start_encoding(BackgroundTasks(), current_user={})
         assert fresh_db.get_setting('encoder_autostart') == 'true'
 
         # Manual Stop records intent=false
         monkeypatch.setattr(queue_routes.encoder_pool, 'is_running', True)
         monkeypatch.setattr(queue_routes.encoder_pool, 'stop', lambda *a, **k: None)
-        asyncio.run(queue_routes.stop_encoding(current_user={}))
+        queue_routes.stop_encoding(current_user={})
         assert fresh_db.get_setting('encoder_autostart') == 'false'
 
     def test_default_intent_is_resume(self, fresh_db):

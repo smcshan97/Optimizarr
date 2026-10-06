@@ -12,7 +12,7 @@ router = APIRouter()
 
 
 @router.post("/duplicates/scan", response_model=MessageResponse)
-async def start_duplicate_scan(
+def start_duplicate_scan(
     data: dict = None,
     current_user: dict = Depends(get_current_user)
 ):
@@ -35,7 +35,7 @@ async def start_duplicate_scan(
 
 
 @router.post("/duplicates/scan/cancel", response_model=MessageResponse)
-async def cancel_duplicate_scan(current_user: dict = Depends(get_current_user)):
+def cancel_duplicate_scan(current_user: dict = Depends(get_current_user)):
     """Stop a running scan. Completed fingerprints are kept, so restarting
     the scan resumes rather than starting over."""
     from app.dedupe import cancel_scan, get_scan_status
@@ -46,13 +46,13 @@ async def cancel_duplicate_scan(current_user: dict = Depends(get_current_user)):
 
 
 @router.get("/duplicates/status")
-async def duplicate_scan_status(current_user: dict = Depends(get_current_user)):
+def duplicate_scan_status(current_user: dict = Depends(get_current_user)):
     from app.dedupe import get_scan_status
     return get_scan_status()
 
 
 @router.get("/duplicates")
-async def list_duplicates(current_user: dict = Depends(get_current_user)):
+def list_duplicates(current_user: dict = Depends(get_current_user)):
     """All match results, grouped by the kept (longer/original) file.
 
     Each group: {file_a, size_a, duration_a, matches: [{file_b, size_b,
@@ -94,7 +94,7 @@ async def list_duplicates(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/duplicates/delete-file", response_model=MessageResponse)
-async def delete_duplicate_file(
+def delete_duplicate_file(
     data: dict,
     current_user: dict = Depends(get_current_admin_user)
 ):

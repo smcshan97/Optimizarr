@@ -68,7 +68,7 @@ def upgrade_registered_webhooks() -> int:
 
 
 @router.get("/connections")
-async def list_connections(current_user: dict = Depends(get_current_user)):
+def list_connections(current_user: dict = Depends(get_current_user)):
     """List all external connections (API keys are masked)."""
     from app.external_connections import public_connection
     conns = db.get_external_connections()
@@ -76,7 +76,7 @@ async def list_connections(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/connections", status_code=status.HTTP_201_CREATED)
-async def create_connection(
+def create_connection(
     data: dict,
     current_user: dict = Depends(get_current_admin_user),
 ):
@@ -147,7 +147,7 @@ async def create_connection(
 
 
 @router.put("/connections/{conn_id}")
-async def update_connection(
+def update_connection(
     conn_id: int,
     data: dict,
     current_user: dict = Depends(get_current_admin_user),
@@ -181,7 +181,7 @@ async def update_connection(
 
 
 @router.delete("/connections/{conn_id}")
-async def delete_connection(
+def delete_connection(
     conn_id: int,
     current_user: dict = Depends(get_current_admin_user),
 ):
@@ -195,7 +195,7 @@ async def delete_connection(
 
 
 @router.post("/connections/{conn_id}/test")
-async def test_connection(
+def test_connection(
     conn_id: int,
     current_user: dict = Depends(get_current_user),
 ):
@@ -217,7 +217,7 @@ async def test_connection(
 
 
 @router.post("/connections/{conn_id}/sync")
-async def sync_connection(
+def sync_connection(
     conn_id: int,
     background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_admin_user),
@@ -387,7 +387,7 @@ def _sync_connection_task(conn_id: int):
 
 
 @router.post("/connections/{conn_id}/register-webhook")
-async def register_webhook(
+def register_webhook(
     conn_id: int,
     data: dict,
     current_user: dict = Depends(get_current_admin_user),
