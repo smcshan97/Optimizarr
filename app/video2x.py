@@ -160,7 +160,7 @@ def video_packet_count(path: str) -> Optional[int]:
     """Frame count of the first video stream by counting packets (no decode)."""
     try:
         r = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets",
+            ["ffprobe", "-v", "error", "-select_streams", "V:0", "-count_packets",
              "-show_entries", "stream=nb_read_packets", "-of", "csv=p=0", path],
             capture_output=True, text=True, timeout=600)
         return int(r.stdout.strip().splitlines()[0])

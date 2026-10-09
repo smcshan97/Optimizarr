@@ -491,7 +491,26 @@ class EncodingJob:
                         current_cpu_percent=process_resources['cpu_percent'],
                         current_memory_mb=process_resources['memory_mb']
                     )
-    
+
+    def _source_already_at_target(self, input_path: str, upscale_plan: Dict) -> bool:
+        """True when the file on disk no longer needs the planned upscale.
+
+        The plan was decided at scan time from the queue row's specs, which
+        can be stale (file replaced since) or wrong (older scans read embedded
+        cover art as the video: a 1080p file queued as "960x540 png" spent a
+        projected 45 hours AI-upscaling to 4K). Re-probe the real stream and
+        apply the scanner's own eligibility rule before burning GPU days.
+        """
+        from app.upscaler import _get_video_info
+        height = _get_video_info(input_path).get('height', 0)
+        target = upscale_plan.get('target_height') or 0
+        if not height or not target or height < target * 0.85:
+            return False
+        optimizarr_logger.app_logger.warning(
+            "Skipping planned upscale of %s — source is already %dp (target %dp; "
+            "the queued specs were stale)", Path(input_path).name, height, target)
+        return True
+
     def _run_target_quality(self) -> Optional[str]:
         """Pick this file's encoder quality from the profile's VMAF target.
 
@@ -733,6 +752,8 @@ class EncodingJob:
 
         has_stereo  = stereo_plan.get('enabled', False)
         has_upscale = upscale_plan.get('enabled', False)
+        if has_upscale and self._source_already_at_target(original_input, upscale_plan):
+            has_upscale = False
         self._preprocessed = bool(has_stereo or has_upscale)
 
         # ── Calculate progress ranges per phase ──────────────────────────────

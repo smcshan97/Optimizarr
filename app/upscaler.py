@@ -730,7 +730,7 @@ def _get_video_info(input_path: str) -> Dict:
         result = subprocess.run(
             [
                 "ffprobe", "-v", "quiet", "-print_format", "json",
-                "-show_streams", "-show_format", "-select_streams", "v:0", input_path,
+                "-show_streams", "-show_format", "-select_streams", "V:0", input_path,
             ],
             capture_output=True, text=True, timeout=30,
             encoding='utf-8', errors='replace',

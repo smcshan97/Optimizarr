@@ -3286,3 +3286,34 @@ class TestRevealInFolder:
         assert result['success'] is False
         assert result['folder'] == '/media/tv'
         assert result['path'] == "/media/tv/ep.mkv"
+
+
+class TestStaleUpscalePlan:
+    """A 1080p MKV with a 960x540 PNG cover was queued as "960x540 png" and
+    sent into a ~45-hour x2 AI upscale to 4K. The encoder re-probes first."""
+
+    PLAN = {"enabled": True, "factor": 2, "source_height": 540, "target_height": 1080}
+
+    def _check(self, monkeypatch, height):
+        import app.encoder as enc
+        import app.upscaler as up
+        monkeypatch.setattr(up, '_get_video_info', lambda p: {"height": height})
+        job = enc.EncodingJob.__new__(enc.EncodingJob)
+        return job._source_already_at_target("/x/DS14.mkv", self.PLAN)
+
+    def test_source_already_at_target_skips(self, monkeypatch):
+        assert self._check(monkeypatch, 1080) is True
+
+    def test_low_res_source_still_upscales(self, monkeypatch):
+        assert self._check(monkeypatch, 540) is False
+
+    def test_unprobeable_source_keeps_plan(self, monkeypatch):
+        assert self._check(monkeypatch, 0) is False
+
+    def test_probe_ignores_cover_art(self):
+        import inspect
+        import app.upscaler as up
+        import app.video2x as v2x
+        # Capital V = video streams that aren't attached pictures
+        assert '"V:0"' in inspect.getsource(up._get_video_info)
+        assert '"V:0"' in inspect.getsource(v2x.video_packet_count)
