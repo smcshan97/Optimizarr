@@ -396,6 +396,13 @@ def prioritize_queue(
     }
 
 
+@router.get("/queue/check-status")
+def get_queue_check_status(current_user: dict = Depends(get_current_user)):
+    """Result of the last background queue check (for a passive status line)."""
+    from app.queue_maintenance import last_check, interval_minutes
+    return {**last_check(), "interval_minutes": interval_minutes()}
+
+
 @router.get("/queue/auto-sort")
 def get_queue_auto_sort(current_user: dict = Depends(get_current_user)):
     """The "Prioritize by" mode re-applied after each encode (null = none)."""
@@ -535,32 +542,9 @@ def recheck_item_permissions(
 
 
 def _recheck_quarantined_item(item: dict) -> str:
-    """Re-probe one quarantined queue item.
-
-    Returns 'pending' (file is a valid video now — re-queued), 'removed'
-    (file no longer exists — row deleted), or 'quarantined' (still broken).
-    """
-    from app.encoder import preflight_source_check
-    problem = preflight_source_check(item['file_path'])
-    if problem is None:
-        # Re-probe specs too — the quarantined row was queued before the
-        # file was complete, so codec/resolution/duration are likely stale.
-        specs = scanner.analyze_file(item['file_path']) or {}
-        db.update_queue_item(
-            item['id'],
-            status='pending',
-            error_message=None,
-            retry_count=0,
-            retry_after=None,
-            current_specs=_json.dumps(specs),
-            duration_seconds=specs.get('duration', 0),
-        )
-        return 'pending'
-    if problem == 'missing':
-        db.delete_queue_item(item['id'])
-        return 'removed'
-    db.update_queue_item(item['id'], error_message=problem)
-    return 'quarantined'
+    """Re-probe one quarantined item (shared with the background queue check)."""
+    from app.queue_maintenance import recheck_quarantined_item
+    return recheck_quarantined_item(item)
 
 
 @router.post("/queue/recheck-quarantined", response_model=MessageResponse)

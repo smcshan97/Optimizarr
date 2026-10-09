@@ -421,35 +421,10 @@ class MediaScanner:
                 continue
             file_size = Path(file_path).stat().st_size
 
-            # ── Upscale plan ─────────────────────────────────────────────────
+            # ── Upscale plan (scan root settings > profile settings) ─────────
             import json as _json
-            upscale_plan = None
-            # Priority: scan_root upscale settings > profile upscale settings
-            if scan_root.get('upscale_enabled'):
-                upscale_source = scan_root
-            elif profile.get('upscale_enabled'):
-                upscale_source = profile
-            else:
-                upscale_source = None
-
-            if upscale_source:
-                src_height     = current_specs.get('height', 0) or 0
-                trigger_below  = upscale_source.get('upscale_trigger_below', 720)
-                target_height  = upscale_source.get('upscale_target_height', 1080)
-                upscale_model  = upscale_source.get('upscale_model', 'realesrgan-x4plus')
-                upscale_factor = upscale_source.get('upscale_factor', 2)
-                upscale_key    = upscale_source.get('upscale_key', 'realesrgan')
-
-                # Only flag if source is meaningfully below trigger and target
-                if src_height > 0 and src_height < trigger_below and src_height < (target_height * 0.85):
-                    upscale_plan = _json.dumps({
-                        "enabled":       True,
-                        "upscaler_key":  upscale_key,
-                        "model":         upscale_model,
-                        "factor":        upscale_factor,
-                        "source_height": src_height,
-                        "target_height": target_height,
-                    })
+            upscale_plan = upscale_plan_for(
+                upscale_source_for(scan_root, profile), current_specs.get('height', 0))
 
             # ── Stereo plan ──────────────────────────────────────────────────
             stereo_plan = None
@@ -687,6 +662,40 @@ class MediaScanner:
             optimizarr_logger.app_logger.warning("⚠ No enabled scan roots found")
             return 0
         return sum(self.scan_root(root['id']) for root in scan_roots)
+
+
+def upscale_source_for(scan_root: Optional[Dict], profile: Optional[Dict]) -> Optional[Dict]:
+    """Where upscale settings come from: the scan root when it has upscaling
+    on, else the profile when it does, else None."""
+    if scan_root and scan_root.get('upscale_enabled'):
+        return scan_root
+    if profile and profile.get('upscale_enabled'):
+        return profile
+    return None
+
+
+def upscale_plan_for(source: Optional[Dict], src_height: int) -> Optional[str]:
+    """The upscale plan (JSON) for a source of ``src_height``, or None.
+
+    Only flags sources meaningfully below both the trigger and the target.
+    Shared by the scanner, the Sonarr/Radarr paths and the queue check.
+    """
+    if not source:
+        return None
+    src_height = src_height or 0
+    trigger_below = source.get('upscale_trigger_below', 720)
+    target_height = source.get('upscale_target_height', 1080)
+    if not (src_height > 0 and src_height < trigger_below
+            and src_height < target_height * 0.85):
+        return None
+    return json.dumps({
+        "enabled":       True,
+        "upscaler_key":  source.get('upscale_key', 'realesrgan'),
+        "model":         source.get('upscale_model', 'realesrgan-x4plus'),
+        "factor":        source.get('upscale_factor', 2),
+        "source_height": src_height,
+        "target_height": target_height,
+    })
 
 
 def probe_declared_video_duration(file_path: str) -> Optional[float]:

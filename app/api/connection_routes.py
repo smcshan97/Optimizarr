@@ -343,26 +343,10 @@ def _sync_connection_task(conn_id: int):
 
         # Evaluate upscale eligibility: linked scan root > profile fallback
         import json as _json
-        upscale_plan   = None
+        from app.scanner import upscale_plan_for, upscale_source_for
         linked_root    = db.get_scan_root(root_id) if root_id else None
-        upscale_source = None
-        if linked_root and linked_root.get("upscale_enabled"):
-            upscale_source = linked_root
-        elif profile.get("upscale_enabled"):
-            upscale_source = profile
-        if upscale_source:
-            src_h   = current_specs.get("height", 0) or 0
-            trigger = upscale_source.get("upscale_trigger_below", 720)
-            t_h     = upscale_source.get("upscale_target_height", 1080)
-            if src_h > 0 and src_h < trigger and src_h < (t_h * 0.85):
-                upscale_plan = _json.dumps({
-                    "enabled":       True,
-                    "upscaler_key":  upscale_source.get("upscale_key", "realesrgan"),
-                    "model":         upscale_source.get("upscale_model", "realesrgan-x4plus"),
-                    "factor":        upscale_source.get("upscale_factor", 2),
-                    "source_height": src_h,
-                    "target_height": t_h,
-                })
+        upscale_plan   = upscale_plan_for(upscale_source_for(linked_root, profile),
+                                          current_specs.get("height", 0))
 
         # Evaluate stereo eligibility: linked scan root > profile fallback
         stereo_plan    = None
@@ -605,26 +589,10 @@ def process_webhook_payload(app_type: str, payload: dict) -> dict:
 
     # Evaluate upscale eligibility: linked scan root > profile fallback
     import json as _json
-    upscale_plan   = None
+    from app.scanner import upscale_plan_for, upscale_source_for
     linked_root    = db.get_scan_root(root_id) if root_id else None
-    upscale_source = None
-    if linked_root and linked_root.get("upscale_enabled"):
-        upscale_source = linked_root
-    elif profile.get("upscale_enabled"):
-        upscale_source = profile
-    if upscale_source:
-        src_h   = current_specs.get("height", 0) or 0
-        trigger = upscale_source.get("upscale_trigger_below", 720)
-        t_h     = upscale_source.get("upscale_target_height", 1080)
-        if src_h > 0 and src_h < trigger and src_h < (t_h * 0.85):
-            upscale_plan = _json.dumps({
-                "enabled":       True,
-                "upscaler_key":  upscale_source.get("upscale_key", "realesrgan"),
-                "model":         upscale_source.get("upscale_model", "realesrgan-x4plus"),
-                "factor":        upscale_source.get("upscale_factor", 2),
-                "source_height": src_h,
-                "target_height": t_h,
-            })
+    upscale_plan   = upscale_plan_for(upscale_source_for(linked_root, profile),
+                                      current_specs.get("height", 0))
 
     # Evaluate stereo eligibility: linked scan root > profile fallback
     stereo_plan    = None

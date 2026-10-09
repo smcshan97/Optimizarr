@@ -18,7 +18,33 @@ let queuePendingEta = 0;        // estimated seconds to encode ALL pending items
 let queuePendingEtaUnknown = 0; // pending items with unknown duration (no ETA)
 
 // Load queue from API → display current page
+// Passive "last checked" line for the background queue check (no button —
+// the check runs on a timer and after every encode).
+const _QUEUE_CHECK_LABELS = {
+    removed_missing: 'missing removed', duplicates_removed: 'duplicates removed',
+    updated: 'refreshed', removed_optimized: 'already optimized',
+    plans_synced: 'upscale plans synced', targets_synced: 'targets synced',
+    unquarantined: 'un-quarantined',
+};
+
+async function loadQueueCheckStatus() {
+    const el = document.getElementById('queueCheckStatus');
+    if (!el) return;
+    const res = await apiRequest('/queue/check-status');
+    if (!res || !res.at) { el.textContent = ''; return; }
+    const mins = Math.max(0, Math.round((Date.now() / 1000 - res.at) / 60));
+    const ago = mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : `${Math.round(mins / 60)} h ago`;
+    const parts = Object.entries(res.counts || {})
+        .filter(([k, v]) => v && _QUEUE_CHECK_LABELS[k])
+        .map(([k, v]) => `${v} ${_QUEUE_CHECK_LABELS[k]}`);
+    el.textContent = `Queue checked ${ago}` + (parts.length ? ` — ${parts.join(', ')}` : ' — all good');
+    el.title = res.interval_minutes
+        ? `Checked automatically every ${res.interval_minutes} min and after each encode`
+        : 'Checked automatically after each encode';
+}
+
 async function loadQueue() {
+    loadQueueCheckStatus();
     // Ensure profiles are cached so queue rows can render profile names
     if (Object.keys(_profilesMap).length === 0) {
         const profiles = await apiRequest('/profiles');
@@ -810,6 +836,8 @@ async function loadSettings() {
         if (ms) ms.value = parseFloat(encSettings.min_savings_percent ?? '5');
         const mb = document.getElementById('minSourceBpp');
         if (mb) mb.value = parseFloat(encSettings.min_source_bpp ?? '0.03');
+        const qc = document.getElementById('queueCheckInterval');
+        if (qc) qc.value = parseInt(encSettings.queue_check_interval_minutes ?? '15');
     }
 }
 
@@ -839,6 +867,7 @@ async function saveResourceSettings() {
             max_retries: document.getElementById('maxRetries').value,
             min_savings_percent: document.getElementById('minSavingsPercent')?.value ?? '5',
             min_source_bpp: document.getElementById('minSourceBpp')?.value ?? '0.03',
+            queue_check_interval_minutes: document.getElementById('queueCheckInterval')?.value ?? '15',
         })
     });
 

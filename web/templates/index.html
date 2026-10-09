@@ -221,6 +221,7 @@
                             ↑ Apply
                         </button>
                     </div>
+                    <span id="queueCheckStatus" style="font-size:12px;color:var(--text-muted)"></span>
                     <div>
                         <label class="flex items-center gap-2 text-sm">
                             <input type="checkbox" id="autoRefreshQueue" checked onchange="toggleAutoRefresh()">
@@ -477,6 +478,18 @@
                     </div>
                 </div>
                 
+                <!-- Background queue check -->
+                <div style="margin-top:20px">
+                    <label style="font-size:14px;font-weight:500;color:var(--text-heading);display:block;margin-bottom:6px">
+                        Queue Check Interval (minutes)
+                    </label>
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <input type="number" id="queueCheckInterval" min="0" max="1440" step="1" value="15"
+                            class="w-20 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center" style="font-size:14px">
+                        <span style="font-size:13px;color:var(--text-muted)">How often the queue is checked in the background: deleted files and duplicates removed, changed files re-probed, quarantined files re-tried, queued items kept in step with profile/upscale settings. It also runs after every encode. 0 = only after encodes.</span>
+                    </div>
+                </div>
+
                 <!-- Preset Buttons -->
                 <div class="mt-8 pt-6 border-t border-gray-700">
                     <h3 style="font-size:15px;font-weight:600;color:var(--text-heading);margin-bottom:14px">Quick Presets</h3>

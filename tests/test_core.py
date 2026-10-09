@@ -3323,15 +3323,21 @@ class TestStaleUpscalePlan:
         assert '"V:0"' in inspect.getsource(v2x.video_packet_count)
 
 
-class TestQueueMaintenance:
-    """Between-encodes upkeep: vanished files, stale specs, remembered sort."""
 
-    def _setup(self, fresh_db, monkeypatch):
+
+class TestQueueMaintenance:
+    """Background queue upkeep: vanished files, duplicates, stale specs,
+    settings drift, quarantine re-tries, remembered sort."""
+
+    PROFILE = {"codec": "av1", "resolution": "", "audio_codec": "copy",
+               "upscale_enabled": 0}
+
+    def _setup(self, fresh_db, monkeypatch, profile=None):
         from app import queue_maintenance as qm
         monkeypatch.setattr(qm, 'db', fresh_db)
-        TestFastestFirstPrioritize._make_default_profile(None, fresh_db) \
-            if 'TestFastestFirstPrioritize' in globals() else None
-        return qm
+        prof = dict(self.PROFILE, **(profile or {}))
+        monkeypatch.setattr(fresh_db, 'get_profile', lambda pid: prof)
+        return qm, prof
 
     class _FakeScanner:
         def __init__(self, specs):
@@ -3348,107 +3354,156 @@ class TestQueueMaintenance:
         def _estimate_savings(self, size, *a, **k):
             return size // 2
 
-    def test_missing_file_removed(self, fresh_db, monkeypatch, tmp_path):
-        qm = self._setup(fresh_db, monkeypatch)
-        gone = fresh_db.add_to_queue(file_path=str(tmp_path / "gone.mkv"), profile_id=1)
-        real = tmp_path / "here.mkv"
-        real.write_bytes(b"x" * 10)
-        kept = fresh_db.add_to_queue(file_path=str(real), profile_id=1, file_size_bytes=10)
-        counts = qm.revalidate_pending(scanner=self._FakeScanner({}))
-        assert counts['removed_missing'] == 1
+    def _file(self, tmp_path, name, size=10):
+        f = tmp_path / name
+        f.write_bytes(b"x" * size)
+        return str(f)
+
+    def _add(self, db, path, **kw):
+        kw.setdefault('profile_id', 1)
+        kw.setdefault('file_size_bytes', 10)
+        kw.setdefault('current_specs', {'codec': 'h264', 'height': 1080})
+        kw.setdefault('target_specs', {'codec': 'av1', 'resolution': '', 'audio_codec': 'copy'})
+        return db.add_to_queue(file_path=path, **kw)
+
+    def test_missing_file_removed_any_waiting_status(self, fresh_db, monkeypatch, tmp_path):
+        qm, _ = self._setup(fresh_db, monkeypatch)
+        gone = self._add(fresh_db, str(tmp_path / "gone.mkv"))
+        failed = self._add(fresh_db, str(tmp_path / "gone2.mkv"), status='failed')
+        kept = self._add(fresh_db, self._file(tmp_path, "here.mkv"))
+        counts = qm.revalidate_queue(scanner=self._FakeScanner({}))
+        assert counts['removed_missing'] == 2
         assert fresh_db.get_queue_item(gone) is None
+        assert fresh_db.get_queue_item(failed) is None
         assert fresh_db.get_queue_item(kept) is not None
 
     def test_offline_drive_keeps_rows(self, fresh_db, monkeypatch, tmp_path):
         """Folder gone too (unplugged drive) — not proof the file was deleted."""
-        qm = self._setup(fresh_db, monkeypatch)
-        item = fresh_db.add_to_queue(file_path=str(tmp_path / "offline" / "a.mkv"),
-                                     profile_id=1)
-        qm.revalidate_pending(scanner=self._FakeScanner({}))
+        qm, _ = self._setup(fresh_db, monkeypatch)
+        item = self._add(fresh_db, str(tmp_path / "offline" / "a.mkv"))
+        qm.revalidate_queue(scanner=self._FakeScanner({}))
         assert fresh_db.get_queue_item(item) is not None
 
-    def test_plan_follows_profile_engine(self, fresh_db, monkeypatch, tmp_path):
-        import json
-        qm = self._setup(fresh_db, monkeypatch)
-        f = tmp_path / "c.mkv"
-        f.write_bytes(b"x" * 10)
-        profile = {"upscale_enabled": 1, "upscale_key": "rtxvsr", "upscale_model": "ULTRA",
-                   "upscale_factor": 2, "upscale_target_height": 1080}
-        monkeypatch.setattr(fresh_db, 'get_profile', lambda pid: profile)
-        old = {"enabled": True, "upscaler_key": "realesrgan", "model": "realesrgan-x4plus",
-               "factor": 2, "source_height": 480, "target_height": 1080}
-        item = fresh_db.add_to_queue(file_path=str(f), profile_id=1, file_size_bytes=10,
-                                     current_specs={'codec': 'h264', 'height': 480},
-                                     upscale_plan=json.dumps(old))
-        counts = qm.revalidate_pending(scanner=self._FakeScanner({}))
-        plan = json.loads(fresh_db.get_queue_item(item)['upscale_plan'])
-        assert counts['plans_synced'] == 1
-        assert (plan['upscaler_key'], plan['model'], plan['source_height']) == ('rtxvsr', 'ULTRA', 480)
-        # Upscaling turned off on the profile -> plan dropped
-        profile['upscale_enabled'] = 0
-        qm.revalidate_pending(scanner=self._FakeScanner({}))
-        assert not fresh_db.get_queue_item(item)['upscale_plan']
+    def test_duplicate_spelling_removed(self, fresh_db, monkeypatch, tmp_path):
+        qm, _ = self._setup(fresh_db, monkeypatch)
+        path = self._file(tmp_path, "dup.mkv")
+        first = self._add(fresh_db, path, priority=1)
+        other = self._add(fresh_db, str(tmp_path / "." / "dup.mkv"), priority=2)
+        counts = qm.revalidate_queue(scanner=self._FakeScanner({}))
+        assert counts['duplicates_removed'] == 1
+        assert fresh_db.get_queue_item(first) is not None
+        assert fresh_db.get_queue_item(other) is None
 
     def test_unchanged_file_not_reprobed(self, fresh_db, monkeypatch, tmp_path):
-        qm = self._setup(fresh_db, monkeypatch)
-        f = tmp_path / "a.mkv"
-        f.write_bytes(b"x" * 10)
-        fresh_db.add_to_queue(file_path=str(f), profile_id=1, file_size_bytes=10,
-                              current_specs={'codec': 'h264', 'height': 480})
+        qm, _ = self._setup(fresh_db, monkeypatch)
+        self._add(fresh_db, self._file(tmp_path, "a.mkv"))
         sc = self._FakeScanner({'codec': 'h264'})
-        qm.revalidate_pending(scanner=sc)
+        counts = qm.revalidate_queue(scanner=sc)
         assert sc.calls == 0
+        assert not any(counts.values())
 
     def test_cover_art_specs_reprobed_and_upscale_dropped(self, fresh_db, monkeypatch, tmp_path):
         """The DS14 case: queued as 960x540 png, really 1080p."""
         import json
-        qm = self._setup(fresh_db, monkeypatch)
-        f = tmp_path / "DS14.mkv"
-        f.write_bytes(b"x" * 10)
-        plan = {"enabled": True, "factor": 2, "source_height": 540, "target_height": 1080}
-        item = fresh_db.add_to_queue(
-            file_path=str(f), profile_id=1, file_size_bytes=10,
-            current_specs={'codec': 'png', 'height': 540}, target_specs={'codec': 'av1'},
-            upscale_plan=json.dumps(plan))
+        qm, _ = self._setup(fresh_db, monkeypatch, {
+            "upscale_enabled": 1, "upscale_key": "realesrgan", "upscale_model": "realesrgan-x4plus",
+            "upscale_factor": 2, "upscale_trigger_below": 720, "upscale_target_height": 1080})
+        plan = {"enabled": True, "upscaler_key": "realesrgan", "model": "realesrgan-x4plus",
+                "factor": 2, "source_height": 540, "target_height": 1080}
+        item = self._add(fresh_db, self._file(tmp_path, "DS14.mkv"),
+                         current_specs={'codec': 'png', 'height': 540},
+                         upscale_plan=json.dumps(plan))
         sc = self._FakeScanner({'codec': 'h264', 'height': 1080, 'duration': 632.4})
-        counts = qm.revalidate_pending(scanner=sc)
+        counts = qm.revalidate_queue(scanner=sc)
         row = fresh_db.get_queue_item(item)
         assert counts['updated'] == 1
         assert not row['upscale_plan']
         assert row['duration_seconds'] == 632.4
 
     def test_changed_file_already_optimized_removed(self, fresh_db, monkeypatch, tmp_path):
-        qm = self._setup(fresh_db, monkeypatch)
-        f = tmp_path / "b.mkv"
-        f.write_bytes(b"x" * 20)  # size differs from the queued 10
-        item = fresh_db.add_to_queue(file_path=str(f), profile_id=1, file_size_bytes=10,
-                                     current_specs={'codec': 'h264'},
-                                     target_specs={'codec': 'av1'})
-        counts = qm.revalidate_pending(scanner=self._FakeScanner({'codec': 'av1'}))
+        qm, _ = self._setup(fresh_db, monkeypatch)
+        item = self._add(fresh_db, self._file(tmp_path, "b.mkv", size=20))
+        counts = qm.revalidate_queue(scanner=self._FakeScanner({'codec': 'av1'}))
         assert counts['removed_optimized'] == 1
         assert fresh_db.get_queue_item(item) is None
 
-    def test_upscale_plan_kept_for_low_res(self):
+    def test_profile_codec_change_follows(self, fresh_db, monkeypatch, tmp_path):
         import json
-        from app.queue_maintenance import revised_upscale_plan
-        plan = json.dumps({"enabled": True, "target_height": 1080, "source_height": 540})
-        out = json.loads(revised_upscale_plan(plan, {'height': 480}))
-        assert out['enabled'] and out['source_height'] == 480
+        qm, prof = self._setup(fresh_db, monkeypatch)
+        item = self._add(fresh_db, self._file(tmp_path, "c.mkv"))
+        prof['codec'] = 'h265'
+        counts = qm.revalidate_queue(scanner=self._FakeScanner({}))
+        assert counts['targets_synced'] == 1
+        ts = fresh_db.get_queue_item(item)['target_specs']
+        assert (json.loads(ts) if isinstance(ts, str) else ts)['codec'] == 'h265'
+        # Profile now targets the codec the file already has -> nothing to do
+        prof['codec'] = 'h264'
+        counts = qm.revalidate_queue(scanner=self._FakeScanner({}))
+        assert counts['removed_optimized'] == 1
 
-    def test_auto_sort_remembered_and_reapplied(self, fresh_db, monkeypatch, tmp_path):
-        qm = self._setup(fresh_db, monkeypatch)
+    def test_plan_follows_engine_trigger_and_toggle(self, fresh_db, monkeypatch, tmp_path):
+        import json
+        qm, prof = self._setup(fresh_db, monkeypatch, {
+            "upscale_enabled": 1, "upscale_key": "rtxvsr", "upscale_model": "ULTRA",
+            "upscale_factor": 2, "upscale_trigger_below": 720, "upscale_target_height": 1080})
+        old = {"enabled": True, "upscaler_key": "realesrgan", "model": "realesrgan-x4plus",
+               "factor": 2, "source_height": 480, "target_height": 1080}
+        low = self._add(fresh_db, self._file(tmp_path, "low.mkv"),
+                        current_specs={'codec': 'h264', 'height': 480},
+                        upscale_plan=json.dumps(old))
+        mid = self._add(fresh_db, self._file(tmp_path, "mid.mkv"),
+                        current_specs={'codec': 'h264', 'height': 720})
+        counts = qm.revalidate_queue(scanner=self._FakeScanner({}))
+        plan = json.loads(fresh_db.get_queue_item(low)['upscale_plan'])
+        assert counts['plans_synced'] == 1
+        assert (plan['upscaler_key'], plan['model']) == ('rtxvsr', 'ULTRA')
+        assert not fresh_db.get_queue_item(mid)['upscale_plan']
+        # Trigger raised to 800p: the 720p item now qualifies
+        prof['upscale_trigger_below'] = 800
+        qm.revalidate_queue(scanner=self._FakeScanner({}))
+        assert json.loads(fresh_db.get_queue_item(mid)['upscale_plan'])['source_height'] == 720
+        # Upscaling turned off -> plans dropped
+        prof['upscale_enabled'] = 0
+        qm.revalidate_queue(scanner=self._FakeScanner({}))
+        assert not fresh_db.get_queue_item(low)['upscale_plan']
+        assert not fresh_db.get_queue_item(mid)['upscale_plan']
+
+    def test_quarantined_file_rechecked(self, fresh_db, monkeypatch, tmp_path):
+        qm, _ = self._setup(fresh_db, monkeypatch)
+        item = self._add(fresh_db, self._file(tmp_path, "q.mkv"), status='quarantined')
+
+        def _recheck(it):
+            fresh_db.update_queue_item(it['id'], status='pending')
+            return 'pending'
+        monkeypatch.setattr(qm, 'recheck_quarantined_item', _recheck)
+        counts = qm.revalidate_queue(scanner=self._FakeScanner({}))
+        assert counts['unquarantined'] == 1
+        assert fresh_db.get_queue_item(item)['status'] == 'pending'
+
+    def test_after_encode_records_status_and_reapplies_sort(self, fresh_db, monkeypatch):
+        qm, _ = self._setup(fresh_db, monkeypatch)
         a = fresh_db.add_to_queue(file_path="/x/a.mkv", profile_id=1, file_size_bytes=5)
         qm.set_auto_sort('file_size', 'desc')
         assert qm.get_auto_sort() == ('file_size', 'desc')
         qm.apply_sort('file_size', 'desc')
-        # A bigger file arrives after the sort; the post-encode pass re-ranks it
+        # A bigger file arrives after the sort; the next pass re-ranks it
         b = fresh_db.add_to_queue(file_path="/x/b.mkv", profile_id=1, file_size_bytes=50)
-        monkeypatch.setattr(qm, 'revalidate_pending', lambda scanner=None: {})
+        monkeypatch.setattr(qm, 'revalidate_queue', lambda scanner=None: {'updated': 2})
         qm.after_encode()
         assert fresh_db.get_queue_item(b)['priority'] < fresh_db.get_queue_item(a)['priority']
+        status = qm.last_check()
+        assert status['counts'] == {'updated': 2} and status['at'] > 0
+
+    def test_interval_setting(self, fresh_db, monkeypatch):
+        qm, _ = self._setup(fresh_db, monkeypatch)
+        assert qm.interval_minutes() == 15
+        fresh_db.set_setting(qm.INTERVAL_SETTING, '0')
+        assert qm.interval_minutes() == 0
+        fresh_db.set_setting(qm.INTERVAL_SETTING, 'junk')
+        assert qm.interval_minutes() == 15
 
     def test_default_and_manual_reorder_clear_auto_sort(self, fresh_db, monkeypatch):
-        qm = self._setup(fresh_db, monkeypatch)
+        qm, _ = self._setup(fresh_db, monkeypatch)
         qm.set_auto_sort('slowest_first', 'desc')
         qm.set_auto_sort('default')
         assert qm.get_auto_sort() is None
@@ -3457,3 +3512,19 @@ class TestQueueMaintenance:
         monkeypatch.setattr(queue_routes, 'db', fresh_db)
         queue_routes.reorder_queue({'items': [{'id': 1, 'priority': 1}]}, current_user={})
         assert qm.get_auto_sort() is None
+
+
+class TestUpscalePlanRule:
+    def test_shared_rule(self):
+        import json
+        from app.scanner import upscale_plan_for, upscale_source_for
+        root = {"upscale_enabled": 1, "upscale_key": "rtxvsr", "upscale_model": "ULTRA",
+                "upscale_trigger_below": 720, "upscale_target_height": 1080}
+        prof = {"upscale_enabled": 1, "upscale_key": "waifu2x"}
+        assert upscale_source_for(root, prof) is root
+        assert upscale_source_for({"upscale_enabled": 0}, prof) is prof
+        assert upscale_source_for(None, {}) is None
+        assert json.loads(upscale_plan_for(root, 480))['upscaler_key'] == 'rtxvsr'
+        assert upscale_plan_for(root, 720) is None      # not below trigger
+        assert upscale_plan_for(root, 0) is None        # unknown height
+        assert upscale_plan_for(None, 480) is None
