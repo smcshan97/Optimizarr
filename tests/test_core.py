@@ -1987,7 +1987,9 @@ class TestFastestFirstFallback:
         """Fastest-first ranks a huge no-duration file AFTER a small clip."""
         import asyncio
         from app.api import queue_routes
+        from app import queue_maintenance
         monkeypatch.setattr(queue_routes, 'db', fresh_db)
+        monkeypatch.setattr(queue_maintenance, 'db', fresh_db)
         self._make_default_profile(fresh_db)
 
         big = fresh_db.add_to_queue(file_path="/x/vr_giant.mkv", profile_id=1,
@@ -2007,7 +2009,9 @@ class TestFastestFirstFallback:
         """A short known-duration encode outranks a big unknown-duration file."""
         import asyncio
         from app.api import queue_routes
+        from app import queue_maintenance
         monkeypatch.setattr(queue_routes, 'db', fresh_db)
+        monkeypatch.setattr(queue_maintenance, 'db', fresh_db)
         self._make_default_profile(fresh_db)
         # Learned speed: av1 ~1x realtime
         fresh_db.add_history(file_path="/x/h.mkv", encoding_time_seconds=600,
@@ -3317,3 +3321,109 @@ class TestStaleUpscalePlan:
         # Capital V = video streams that aren't attached pictures
         assert '"V:0"' in inspect.getsource(up._get_video_info)
         assert '"V:0"' in inspect.getsource(v2x.video_packet_count)
+
+
+class TestQueueMaintenance:
+    """Between-encodes upkeep: vanished files, stale specs, remembered sort."""
+
+    def _setup(self, fresh_db, monkeypatch):
+        from app import queue_maintenance as qm
+        monkeypatch.setattr(qm, 'db', fresh_db)
+        TestFastestFirstPrioritize._make_default_profile(None, fresh_db) \
+            if 'TestFastestFirstPrioritize' in globals() else None
+        return qm
+
+    class _FakeScanner:
+        def __init__(self, specs):
+            self.specs = specs
+            self.calls = 0
+
+        def analyze_file(self, path):
+            self.calls += 1
+            return dict(self.specs)
+
+        def _needs_encoding(self, cur, tgt):
+            return cur.get('codec') != tgt.get('codec')
+
+        def _estimate_savings(self, size, *a, **k):
+            return size // 2
+
+    def test_missing_file_removed(self, fresh_db, monkeypatch, tmp_path):
+        qm = self._setup(fresh_db, monkeypatch)
+        gone = fresh_db.add_to_queue(file_path=str(tmp_path / "gone.mkv"), profile_id=1)
+        real = tmp_path / "here.mkv"
+        real.write_bytes(b"x" * 10)
+        kept = fresh_db.add_to_queue(file_path=str(real), profile_id=1, file_size_bytes=10)
+        counts = qm.revalidate_pending(scanner=self._FakeScanner({}))
+        assert counts['removed_missing'] == 1
+        assert fresh_db.get_queue_item(gone) is None
+        assert fresh_db.get_queue_item(kept) is not None
+
+    def test_unchanged_file_not_reprobed(self, fresh_db, monkeypatch, tmp_path):
+        qm = self._setup(fresh_db, monkeypatch)
+        f = tmp_path / "a.mkv"
+        f.write_bytes(b"x" * 10)
+        fresh_db.add_to_queue(file_path=str(f), profile_id=1, file_size_bytes=10,
+                              current_specs={'codec': 'h264', 'height': 480})
+        sc = self._FakeScanner({'codec': 'h264'})
+        qm.revalidate_pending(scanner=sc)
+        assert sc.calls == 0
+
+    def test_cover_art_specs_reprobed_and_upscale_dropped(self, fresh_db, monkeypatch, tmp_path):
+        """The DS14 case: queued as 960x540 png, really 1080p."""
+        import json
+        qm = self._setup(fresh_db, monkeypatch)
+        f = tmp_path / "DS14.mkv"
+        f.write_bytes(b"x" * 10)
+        plan = {"enabled": True, "factor": 2, "source_height": 540, "target_height": 1080}
+        item = fresh_db.add_to_queue(
+            file_path=str(f), profile_id=1, file_size_bytes=10,
+            current_specs={'codec': 'png', 'height': 540}, target_specs={'codec': 'av1'},
+            upscale_plan=json.dumps(plan))
+        sc = self._FakeScanner({'codec': 'h264', 'height': 1080, 'duration': 632.4})
+        counts = qm.revalidate_pending(scanner=sc)
+        row = fresh_db.get_queue_item(item)
+        assert counts['updated'] == 1
+        assert not row['upscale_plan']
+        assert row['duration_seconds'] == 632.4
+
+    def test_changed_file_already_optimized_removed(self, fresh_db, monkeypatch, tmp_path):
+        qm = self._setup(fresh_db, monkeypatch)
+        f = tmp_path / "b.mkv"
+        f.write_bytes(b"x" * 20)  # size differs from the queued 10
+        item = fresh_db.add_to_queue(file_path=str(f), profile_id=1, file_size_bytes=10,
+                                     current_specs={'codec': 'h264'},
+                                     target_specs={'codec': 'av1'})
+        counts = qm.revalidate_pending(scanner=self._FakeScanner({'codec': 'av1'}))
+        assert counts['removed_optimized'] == 1
+        assert fresh_db.get_queue_item(item) is None
+
+    def test_upscale_plan_kept_for_low_res(self):
+        import json
+        from app.queue_maintenance import revised_upscale_plan
+        plan = json.dumps({"enabled": True, "target_height": 1080, "source_height": 540})
+        out = json.loads(revised_upscale_plan(plan, {'height': 480}))
+        assert out['enabled'] and out['source_height'] == 480
+
+    def test_auto_sort_remembered_and_reapplied(self, fresh_db, monkeypatch, tmp_path):
+        qm = self._setup(fresh_db, monkeypatch)
+        a = fresh_db.add_to_queue(file_path="/x/a.mkv", profile_id=1, file_size_bytes=5)
+        qm.set_auto_sort('file_size', 'desc')
+        assert qm.get_auto_sort() == ('file_size', 'desc')
+        qm.apply_sort('file_size', 'desc')
+        # A bigger file arrives after the sort; the post-encode pass re-ranks it
+        b = fresh_db.add_to_queue(file_path="/x/b.mkv", profile_id=1, file_size_bytes=50)
+        monkeypatch.setattr(qm, 'revalidate_pending', lambda scanner=None: {})
+        qm.after_encode()
+        assert fresh_db.get_queue_item(b)['priority'] < fresh_db.get_queue_item(a)['priority']
+
+    def test_default_and_manual_reorder_clear_auto_sort(self, fresh_db, monkeypatch):
+        qm = self._setup(fresh_db, monkeypatch)
+        qm.set_auto_sort('slowest_first', 'desc')
+        qm.set_auto_sort('default')
+        assert qm.get_auto_sort() is None
+        qm.set_auto_sort('fastest_first', 'asc')
+        from app.api import queue_routes
+        monkeypatch.setattr(queue_routes, 'db', fresh_db)
+        queue_routes.reorder_queue({'items': [{'id': 1, 'priority': 1}]}, current_user={})
+        assert qm.get_auto_sort() is None

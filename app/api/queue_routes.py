@@ -140,24 +140,6 @@ def _attach_eta(envelope: dict):
     envelope['pending_eta_unknown'] = unknown
 
 
-def _plan_enabled(raw) -> bool:
-    """True when an upscale/stereo plan (JSON string or dict) has enabled=true."""
-    if not raw:
-        return False
-    if isinstance(raw, str):
-        try:
-            raw = _json.loads(raw)
-        except (ValueError, TypeError):
-            return False
-    return bool(isinstance(raw, dict) and raw.get('enabled'))
-
-
-def _item_preprocessed(item: dict) -> bool:
-    """True when a queue item has an AI upscale or stereo phase queued —
-    its encode time is learned/estimated from the preprocessed ratio group."""
-    return _plan_enabled(item.get('upscale_plan')) or _plan_enabled(item.get('stereo_plan'))
-
-
 def compute_pending_eta(speed_stats: Optional[dict] = None) -> tuple:
     """Total estimated encode seconds across ALL pending items.
 
@@ -391,58 +373,20 @@ def prioritize_queue(
     back to a file-size proxy calibrated from items that DO have durations, so
     a 25-hour VR file still sorts after a 15-minute clip without a re-scan.
     Fastest-first suits short encoding windows; slowest-first suits overnight.
+
+    Any mode but 'default' is remembered and re-applied after each encode.
     """
+    from app import queue_maintenance as qm
     sort_by = data.get("sort_by", "default")
     order = data.get("order", "desc")
-    reverse = (order == "desc")
 
-    items = db.get_queue_items(status="pending")
-    if not items:
-        return {"message": "No pending items to prioritize", "count": 0}
-
-    # Sort by chosen criterion
-    if sort_by == "file_size":
-        items.sort(key=lambda i: i.get("file_size_bytes", 0), reverse=reverse)
-    elif sort_by == "estimated_savings":
-        items.sort(key=lambda i: i.get("estimated_savings_bytes", 0), reverse=reverse)
-    elif sort_by == "filename":
-        items.sort(key=lambda i: _Path(i.get("file_path", "")).name.lower(), reverse=reverse)
-    elif sort_by in ("fastest_first", "slowest_first"):
-        from app.scanner import estimate_item_seconds
-        speed_stats = db.get_encode_speed_stats()
-        slowest = (sort_by == "slowest_first")
-
-        # Calibrate seconds-per-byte from items that HAVE a duration, then use
-        # it to estimate a cost for items that don't — so unknowns order by
-        # size instead of all piling at the end. Only plain encodes calibrate
-        # it: an upscale's cost has nothing to do with its source file size,
-        # and letting one in would skew every unknown item's estimate.
-        spb_samples = []
-        for it in items:
-            size = it.get("file_size_bytes") or 0
-            if size > 0 and not _item_preprocessed(it):
-                est = estimate_item_seconds(it, speed_stats)
-                if est:
-                    spb_samples.append(est / size)
-        avg_spb = (sum(spb_samples) / len(spb_samples)) if spb_samples else None
-
-        def _cost(item):
-            est = estimate_item_seconds(item, speed_stats)
-            if est is not None:
-                return est
-            size = item.get("file_size_bytes") or 0
-            # Calibrated proxy when we have samples; else raw size keeps a
-            # consistent big-after-small ordering among unknowns.
-            return size * avg_spb if avg_spb is not None else size * 1e-6
-
-        items.sort(key=_cost, reverse=slowest)
-    # default: leave current order but we still write priorities below
-
-    # Assign rank-based priorities: 1 = first to encode, 2 = second, etc.
-    # Matches DB ORDER BY priority ASC. One transaction for the whole queue.
-    total = db.set_queue_priorities(
-        (item["id"], rank + 1) for rank, item in enumerate(items)
-    )
+    # Remember the choice: it's re-applied after every encode so new items
+    # and maturing speed estimates keep the order right. Default clears it.
+    qm.set_auto_sort(sort_by, order)
+    total = qm.apply_sort(sort_by, order)
+    if not total:
+        return {"message": "No pending items to prioritize", "count": 0,
+                "sort_by": sort_by, "order": order}
 
     return {
         "message": f"Prioritized {total} pending items by {sort_by} ({order})",
@@ -450,6 +394,14 @@ def prioritize_queue(
         "sort_by": sort_by,
         "order": order,
     }
+
+
+@router.get("/queue/auto-sort")
+def get_queue_auto_sort(current_user: dict = Depends(get_current_user)):
+    """The "Prioritize by" mode re-applied after each encode (null = none)."""
+    from app.queue_maintenance import get_auto_sort
+    mode = get_auto_sort()
+    return {"sort_by": mode[0] if mode else None, "order": mode[1] if mode else None}
 
 
 @router.post("/queue/reprobe")
@@ -748,6 +700,10 @@ def reorder_queue(
     items = data.get('items', [])
     if not items:
         raise HTTPException(status_code=400, detail="No items provided")
+
+    # A hand-arranged order must not be undone by the next auto re-sort
+    from app.queue_maintenance import set_auto_sort
+    set_auto_sort(None)
 
     count = db.set_queue_priorities(
         (e['id'], e['priority']) for e in items

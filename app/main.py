@@ -93,6 +93,10 @@ async def lifespan(app: FastAPI):
     from app.upscaler import start_update_checker
     start_update_checker()
 
+    # Periodic queue upkeep (vanished files, stale specs, remembered sort)
+    from app.queue_maintenance import start_background_checker
+    start_background_checker()
+
     # Background: backfill missing video durations so fastest/slowest-first
     # learns real encode-time estimates (gentle, paced — see scanner).
     from app.scanner import start_duration_backfill

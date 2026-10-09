@@ -84,6 +84,7 @@ class EncoderPool:
                         finally:
                             if job in self.active_jobs:
                                 self.active_jobs.remove(job)
+                        _after_job()
                     else:
                         # Profile gone — fail the item so we don't spin on it
                         db.update_queue_item(item['id'], status='failed',
@@ -163,6 +164,7 @@ class EncoderPool:
                     self.active_jobs.remove(job)
                 except ValueError:
                     pass
+            _after_job()
 
     def _load_max_concurrent(self) -> int:
         """Read the configured max concurrent jobs (schedule table), 1..8."""
@@ -270,6 +272,16 @@ class EncoderPool:
         # Iterate a copy — process_queue() mutates active_jobs concurrently
         for job in list(self.active_jobs):
             job.stop(mark_cancelled=mark_cancelled)
+
+
+def _after_job():
+    """Between-encodes queue upkeep: drop vanished files, refresh stale rows,
+    re-apply a remembered smart sort. See app.queue_maintenance."""
+    try:
+        from app.queue_maintenance import after_encode
+        after_encode()
+    except Exception as e:
+        optimizarr_logger.app_logger.warning(f"Queue check skipped: {e}")
 
 
 def _encoding_job_cls():

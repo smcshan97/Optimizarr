@@ -93,7 +93,7 @@ function switchTab(tabName) {
     }
 
     // Load tab data
-    if (tabName === 'queue') loadQueue();
+    if (tabName === 'queue') { loadQueue(); loadQueueAutoSort(); }
     if (tabName === 'profiles') loadProfiles();
     if (tabName === 'scanroots') loadScanRoots();
     if (tabName === 'settings') { loadSettings(); loadConnections(); }

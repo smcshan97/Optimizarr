@@ -174,6 +174,17 @@ async function importConfigJson(event) {
     event.target.value = '';
 }
 
+// Show the remembered "Prioritize by" mode (re-applied after each encode).
+async function loadQueueAutoSort() {
+    const sel = document.getElementById('queueSortBy');
+    if (!sel) return;
+    const res = await apiRequest('/queue/auto-sort');
+    sel.value = (res && res.sort_by) || 'default';
+    sel.title = res && res.sort_by
+        ? 'Re-applied automatically after each encode. Choose Default (or drag a row) to stop.'
+        : '';
+}
+
 async function applyQueuePriority() {
     const sortBy = document.getElementById('queueSortBy').value;
     const sortMap = {
@@ -197,7 +208,8 @@ async function applyQueuePriority() {
             body: JSON.stringify(params)
         });
         if (result) {
-            showMessage(`✓ ${result.message}`, 'success');
+            const auto = params.sort_by !== 'default' ? ' — re-applied after each encode' : '';
+            showMessage(`✓ ${result.message}${auto}`, 'success');
             loadQueue();
         }
     } finally {
