@@ -3359,6 +3359,36 @@ class TestQueueMaintenance:
         assert fresh_db.get_queue_item(gone) is None
         assert fresh_db.get_queue_item(kept) is not None
 
+    def test_offline_drive_keeps_rows(self, fresh_db, monkeypatch, tmp_path):
+        """Folder gone too (unplugged drive) — not proof the file was deleted."""
+        qm = self._setup(fresh_db, monkeypatch)
+        item = fresh_db.add_to_queue(file_path=str(tmp_path / "offline" / "a.mkv"),
+                                     profile_id=1)
+        qm.revalidate_pending(scanner=self._FakeScanner({}))
+        assert fresh_db.get_queue_item(item) is not None
+
+    def test_plan_follows_profile_engine(self, fresh_db, monkeypatch, tmp_path):
+        import json
+        qm = self._setup(fresh_db, monkeypatch)
+        f = tmp_path / "c.mkv"
+        f.write_bytes(b"x" * 10)
+        profile = {"upscale_enabled": 1, "upscale_key": "rtxvsr", "upscale_model": "ULTRA",
+                   "upscale_factor": 2, "upscale_target_height": 1080}
+        monkeypatch.setattr(fresh_db, 'get_profile', lambda pid: profile)
+        old = {"enabled": True, "upscaler_key": "realesrgan", "model": "realesrgan-x4plus",
+               "factor": 2, "source_height": 480, "target_height": 1080}
+        item = fresh_db.add_to_queue(file_path=str(f), profile_id=1, file_size_bytes=10,
+                                     current_specs={'codec': 'h264', 'height': 480},
+                                     upscale_plan=json.dumps(old))
+        counts = qm.revalidate_pending(scanner=self._FakeScanner({}))
+        plan = json.loads(fresh_db.get_queue_item(item)['upscale_plan'])
+        assert counts['plans_synced'] == 1
+        assert (plan['upscaler_key'], plan['model'], plan['source_height']) == ('rtxvsr', 'ULTRA', 480)
+        # Upscaling turned off on the profile -> plan dropped
+        profile['upscale_enabled'] = 0
+        qm.revalidate_pending(scanner=self._FakeScanner({}))
+        assert not fresh_db.get_queue_item(item)['upscale_plan']
+
     def test_unchanged_file_not_reprobed(self, fresh_db, monkeypatch, tmp_path):
         qm = self._setup(fresh_db, monkeypatch)
         f = tmp_path / "a.mkv"

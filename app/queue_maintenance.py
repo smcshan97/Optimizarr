@@ -9,6 +9,8 @@ older scans mis-read embedded cover art as the video (a 1080p file queued as
   * rows whose file changed size, or whose specs look misread, are
     re-probed — specs, duration, upscale plan and savings are recomputed,
     and rows that no longer need encoding are removed;
+  * queued upscale plans follow their scan root / profile's current
+    upscaler settings (or are dropped when upscaling was turned off);
   * a remembered "Prioritize by" choice is re-applied, so a smart sort
     (fastest/slowest first) stays right as new items arrive and the speed
     estimates it's built on keep learning.
@@ -124,17 +126,72 @@ def _recheck_item(item: Dict, scanner) -> str:
     return "updated"
 
 
+_PLAN_KEYS = ("upscaler_key", "model", "factor", "target_height")
+
+
+def _upscale_source(item: Dict, cache: Dict) -> Optional[Dict]:
+    """Where the item's upscale settings come from now — the scanner's rule:
+    its scan root when that has upscaling on, else its profile, else None."""
+    if "roots" not in cache:
+        cache["roots"] = {r["id"]: r for r in db.get_scan_roots()}
+        cache["profiles"] = {}
+    root = cache["roots"].get(item.get("root_id"))
+    if root and root.get("upscale_enabled"):
+        return root
+    pid = item.get("profile_id")
+    if pid not in cache["profiles"]:
+        cache["profiles"][pid] = db.get_profile(pid) or {}
+    profile = cache["profiles"][pid]
+    return profile if profile.get("upscale_enabled") else None
+
+
+def _sync_plan_settings(item: Dict, cache: Dict) -> bool:
+    """Bring a queued upscale plan in line with its current settings.
+
+    Plans are snapshots taken at scan time, so switching a profile from
+    Real-ESRGAN to RTX VSR (or turning upscaling off) used to leave every
+    already-queued item on the old engine. Never ADDS a plan — eligibility
+    of plan-less items is a scan-time decision. Returns True if changed.
+    """
+    plan = _as_dict(item.get("upscale_plan"))
+    if not plan.get("enabled"):
+        return False
+    source = _upscale_source(item, cache)
+    if source is None:
+        new_raw = None
+    else:
+        current = {
+            "upscaler_key": source.get("upscale_key") or plan.get("upscaler_key"),
+            "model": source.get("upscale_model") or plan.get("model"),
+            "factor": source.get("upscale_factor") or plan.get("factor"),
+            "target_height": source.get("upscale_target_height") or plan.get("target_height"),
+        }
+        if all(plan.get(k) == current[k] for k in _PLAN_KEYS):
+            return False
+        plan.update(current)
+        new_raw = json.dumps(plan)
+    db.update_queue_item(item["id"], upscale_plan=new_raw)
+    item["upscale_plan"] = new_raw
+    return True
+
+
 def revalidate_pending(scanner=None) -> Dict[str, int]:
     """Drop vanished files and refresh stale rows among pending items."""
     if scanner is None:
         from app.scanner import scanner
-    counts = {"removed_missing": 0, "updated": 0, "removed_optimized": 0, "failed": 0}
+    counts = {"removed_missing": 0, "updated": 0, "removed_optimized": 0,
+              "failed": 0, "plans_synced": 0}
     reprobes = 0
+    settings_cache: Dict = {}
     for item in db.get_queue_items(status="pending"):
         path = item.get("file_path") or ""
         try:
             size = os.stat(path).st_size
         except FileNotFoundError:
+            # Only when its folder is still there: an unplugged drive or a
+            # dropped network share makes EVERY file look deleted.
+            if not os.path.isdir(os.path.dirname(path)):
+                continue
             db.delete_queue_item(item["id"])
             counts["removed_missing"] += 1
             optimizarr_logger.app_logger.info(
@@ -142,6 +199,8 @@ def revalidate_pending(scanner=None) -> Dict[str, int]:
             continue
         except OSError:
             continue  # drive offline / permission blip — leave the row alone
+        if _sync_plan_settings(item, settings_cache):
+            counts["plans_synced"] += 1
         if reprobes >= MAX_REPROBES_PER_PASS or not needs_reprobe(item, size):
             continue
         reprobes += 1
@@ -234,9 +293,10 @@ def after_encode():
         if any(counts.values()):
             optimizarr_logger.app_logger.info(
                 "Queue check: %d missing removed, %d refreshed, %d already "
-                "optimized removed, %d re-probe failures",
+                "optimized removed, %d upscale plans synced to settings, "
+                "%d re-probe failures",
                 counts["removed_missing"], counts["updated"],
-                counts["removed_optimized"], counts["failed"])
+                counts["removed_optimized"], counts["plans_synced"], counts["failed"])
         mode = get_auto_sort()
         if mode:
             apply_sort(*mode)
