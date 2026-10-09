@@ -132,6 +132,18 @@ def _desired_target(item: Dict, cache: Dict) -> Dict:
     return target
 
 
+def _storage_reachable(item: Dict, path: str, cache: Dict) -> bool:
+    """True when the drive/share holding ``path`` is online: its scan root
+    folder exists, or (no scan root) its drive letter / UNC share does."""
+    if "roots" not in cache:
+        _settings_for(item, cache)
+    root = cache["roots"].get(item.get("root_id"))
+    if root and root.get("path"):
+        return os.path.isdir(root["path"])
+    anchor = Path(path).anchor
+    return bool(anchor) and os.path.isdir(anchor)
+
+
 def _file_identity(path: str, st) -> tuple:
     """Same file under two spellings (drive letter vs UNC, case, ..) has the
     same volume + file index. Falls back to the normalised path where the
@@ -249,9 +261,10 @@ def revalidate_queue(scanner=None) -> Dict[str, int]:
         try:
             st = os.stat(path)
         except FileNotFoundError:
-            # Only when its folder is still there: an unplugged drive or a
-            # dropped network share makes EVERY file look deleted.
-            if os.path.isdir(os.path.dirname(path)):
+            # Only when the storage is reachable: an unplugged drive or a
+            # dropped network share makes EVERY file look deleted. A whole
+            # sub-folder moved or deleted on a live drive is a real removal.
+            if _storage_reachable(item, path, cache):
                 db.delete_queue_item(item["id"])
                 counts["removed_missing"] += 1
                 optimizarr_logger.app_logger.info(

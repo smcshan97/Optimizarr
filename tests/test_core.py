@@ -3378,11 +3378,22 @@ class TestQueueMaintenance:
         assert fresh_db.get_queue_item(kept) is not None
 
     def test_offline_drive_keeps_rows(self, fresh_db, monkeypatch, tmp_path):
-        """Folder gone too (unplugged drive) — not proof the file was deleted."""
+        """Scan root unreachable (unplugged drive) — not proof of deletion."""
         qm, _ = self._setup(fresh_db, monkeypatch)
-        item = self._add(fresh_db, str(tmp_path / "offline" / "a.mkv"))
+        root = fresh_db.create_scan_root(str(tmp_path / "offline"), 1)
+        item = self._add(fresh_db, str(tmp_path / "offline" / "show" / "a.mkv"), root_id=root)
         qm.revalidate_queue(scanner=self._FakeScanner({}))
         assert fresh_db.get_queue_item(item) is not None
+
+    def test_deleted_subfolder_on_live_drive_removed(self, fresh_db, monkeypatch, tmp_path):
+        """A whole folder moved/deleted while its scan root is online."""
+        qm, _ = self._setup(fresh_db, monkeypatch)
+        (tmp_path / "lib").mkdir()
+        root = fresh_db.create_scan_root(str(tmp_path / "lib"), 1)
+        item = self._add(fresh_db, str(tmp_path / "lib" / "gone folder" / "a.mkv"), root_id=root)
+        counts = qm.revalidate_queue(scanner=self._FakeScanner({}))
+        assert counts['removed_missing'] == 1
+        assert fresh_db.get_queue_item(item) is None
 
     def test_duplicate_spelling_removed(self, fresh_db, monkeypatch, tmp_path):
         qm, _ = self._setup(fresh_db, monkeypatch)
