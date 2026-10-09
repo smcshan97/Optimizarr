@@ -99,9 +99,11 @@ UPSCALERS = {
         "icon": "🆙",
         "binary_linux": "upscayl-bin",
         "binary_win": "upscayl-bin.exe",
-        # All 4x models; -s resizes the output to the requested factor
-        "models": ["upscayl-lite-4x", "upscayl-standard-4x", "high-fidelity-4x",
-                   "remacri-4x", "ultramix-balanced-4x", "ultrasharp-4x", "digital-art-4x"],
+        # 4x model; -s resizes the output to the requested factor. Only Lite:
+        # benchmarked 540p->1080p against true 1080p (RTX 2060 Super), the
+        # bigger models were 4-10x slower and scored lower — Standard VMAF
+        # 85 vs Lite 96 on live action; digital-art lost on 2D and 3D anime.
+        "models": ["upscayl-lite-4x"],
         "default_model": "upscayl-lite-4x",
         "model_scales": {},
         "scale_options": [2, 3, 4],

@@ -6,8 +6,7 @@ const _UPSCALER_MODELS = {
     realesrgan: ['realesrgan-x4plus', 'realesrgan-x4plus-anime', 'realesr-animevideov3'],
     realcugan:  ['models-se', 'models-pro', 'models-nose'],
     waifu2x:    ['models-cunet', 'models-upconv_7_anime_style_art_rgb'],
-    upscayl:    ['upscayl-lite-4x', 'upscayl-standard-4x', 'high-fidelity-4x', 'remacri-4x',
-                 'ultramix-balanced-4x', 'ultrasharp-4x', 'digital-art-4x'],
+    upscayl:    ['upscayl-lite-4x'],
     // RTX VSR "models" are quality levels; HIGHBITRATE_* suit clean sources
     rtxvsr:     ['ULTRA', 'HIGH', 'MEDIUM', 'LOW', 'HIGHBITRATE_ULTRA', 'HIGHBITRATE_HIGH'],
 };
