@@ -492,6 +492,38 @@ class EncodingJob:
                         current_memory_mb=process_resources['memory_mb']
                     )
 
+    def _refresh_stale_specs(self, source_path: str):
+        """Re-probe the source when the queued specs can't be trusted.
+
+        Bit depth/HDR, the low-bitrate skip and the truncation check all read
+        current_specs. Specs taken from embedded cover art (an older scan bug)
+        or from a file that has since been replaced would encode an HDR
+        source as 8-bit SDR or judge a good output truncated. The background
+        queue check fixes these too, but a job can start before it gets there.
+        """
+        from app.queue_maintenance import needs_reprobe
+        try:
+            size = os.path.getsize(source_path)
+            if not needs_reprobe(self.queue_item, size):
+                return
+            from app.scanner import scanner
+            specs = scanner.analyze_file(source_path)
+        except Exception:
+            return
+        if not specs or specs.get('codec', 'unknown') == 'unknown':
+            return
+        import json as _json
+        optimizarr_logger.app_logger.info(
+            "Queued specs for %s were stale — re-probed (%s %s)",
+            Path(source_path).name, specs.get('codec'), specs.get('resolution'))
+        self.queue_item['current_specs'] = specs
+        self.queue_item['file_size_bytes'] = size
+        self.queue_item['duration_seconds'] = specs.get('duration', 0)
+        self._source_info = None
+        db.update_queue_item(self.queue_item_id, current_specs=_json.dumps(specs),
+                             file_size_bytes=size,
+                             duration_seconds=specs.get('duration', 0))
+
     def _source_already_at_target(self, input_path: str, upscale_plan: Dict) -> bool:
         """True when the file on disk no longer needs the planned upscale.
 
@@ -666,6 +698,8 @@ class EncodingJob:
                 retry_after=None,
             )
             return False
+
+        self._refresh_stale_specs(source_path)
 
         # ── Pre-flight: is the source worth re-encoding at all? ────────────
         # Low bits-per-pixel sources mostly come out the same size or bigger

@@ -709,7 +709,7 @@ def probe_declared_video_duration(file_path: str) -> Optional[float]:
     """
     try:
         result = subprocess.run(
-            ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+            ['ffprobe', '-v', 'error', '-select_streams', 'V:0',
              '-show_entries', 'stream=duration', '-of', 'csv=p=0', file_path],
             capture_output=True, text=True, timeout=30,
             encoding='utf-8', errors='replace',
@@ -737,7 +737,7 @@ def probe_last_video_pts(file_path: str, start_seconds: float = 0.0,
     start = max(0.0, start_seconds)
     try:
         result = subprocess.run(
-            ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+            ['ffprobe', '-v', 'error', '-select_streams', 'V:0',
              '-show_entries', 'packet=pts_time', '-of', 'csv=p=0',
              '-read_intervals', f'{start:.3f}%+#100000000', file_path],
             capture_output=True, text=True, timeout=timeout,

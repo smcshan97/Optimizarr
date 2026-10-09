@@ -3598,3 +3598,38 @@ class TestVideo2xSourceCodecs:
         assert not supports_source("AV1")
         assert supports_source("h264")
         assert supports_source("")
+
+
+class TestCoverArtNeverPicked:
+    """Every probe/extract that reads a SOURCE's video must skip attached
+    pictures (capital V) — a cover image as stream 0 was read as the video."""
+
+    def test_source_video_selectors(self):
+        import inspect
+        import app.scanner as sc
+        import app.target_quality as tq
+        import app.rtx_vsr as vsr
+        import app.upscaler as up
+        assert "'V:0'" in inspect.getsource(sc.probe_declared_video_duration)
+        assert "'V:0'" in inspect.getsource(sc.probe_last_video_pts)
+        assert '"0:V:0"' in inspect.getsource(tq.cut_samples)
+        assert '"0:V:0"' in inspect.getsource(vsr.run_vsr).split("encode_cmd")[0]
+        assert '"0:V:0"' in inspect.getsource(up.run_upscale_pipeline).split("extract_cmd")[1][:400]
+
+    def test_encoder_reprobes_cover_art_specs(self, monkeypatch, tmp_path):
+        import app.encoder as enc
+        import app.scanner as sc
+        f = tmp_path / "a.mkv"
+        f.write_bytes(b"x" * 10)
+        job = enc.EncodingJob.__new__(enc.EncodingJob)
+        job.queue_item_id = 1
+        job.queue_item = {'current_specs': {'codec': 'png', 'height': 540}, 'file_size_bytes': 10}
+        job._source_info = {'bit_depth': 8}
+        monkeypatch.setattr(sc.scanner, 'analyze_file',
+                            lambda p: {'codec': 'hevc', 'height': 2160, 'bit_depth': 10,
+                                       'hdr': True, 'duration': 60.0})
+        updates = {}
+        monkeypatch.setattr(enc.db, 'update_queue_item', lambda i, **kw: updates.update(kw))
+        job._refresh_stale_specs(str(f))
+        assert job.queue_item['current_specs']['bit_depth'] == 10
+        assert job._source_info is None and updates['duration_seconds'] == 60.0

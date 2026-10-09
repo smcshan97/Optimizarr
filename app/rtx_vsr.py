@@ -114,7 +114,7 @@ def run_vsr(input_path: str, output_path: str, *, in_w: int, in_h: int,
         quality = "ULTRA"
     fps_str = f"{fps:.6g}"
     decode_cmd = [
-        "ffmpeg", "-v", "error", "-i", input_path, "-map", "0:v:0",
+        "ffmpeg", "-v", "error", "-i", input_path, "-map", "0:V:0",
         # Constant rate (frames are re-timed at one rate on the way out) via
         # the fps filter — see the note on frame extraction in app.upscaler.
         "-fps_mode", "passthrough",

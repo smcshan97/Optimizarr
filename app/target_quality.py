@@ -63,7 +63,7 @@ def cut_samples(source: str, work: Path, duration: float,
     for i, start in enumerate(sample_starts(duration)):
         out = work / f"sample_{i}.mkv"
         cmd = ["ffmpeg", "-v", "error", "-y", "-ss", str(start), "-i", source,
-               "-t", str(SAMPLE_SECONDS), "-map", "0:v:0", "-c", "copy", str(out)]
+               "-t", str(SAMPLE_SECONDS), "-map", "0:V:0", "-c", "copy", str(out)]
         if _run(cmd, register, timeout=300) == 0 and out.exists() and out.stat().st_size:
             paths.append(out)
     return paths

@@ -1121,7 +1121,7 @@ def run_upscale_pipeline(
             optimizarr_logger.app_logger.info("Extracting frames from %s…", input_p.name)
             extract_cmd = [
                 "ffmpeg", "-i", input_path,
-                "-map", "0:v:0",
+                "-map", "0:V:0",  # V: never the cover art
                 # Constant frame rate: the frames are reassembled at a single
                 # rate, so a VFR source extracted frame-for-frame (the old
                 # -vsync 0) drifted out of sync with its audio. The fps FILTER
