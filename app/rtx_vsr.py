@@ -56,14 +56,18 @@ def installed_info() -> Optional[Dict]:
     return None
 
 
+# Output 100x60 on purpose: not a multiple of 16, so NVIDIA pads the rows —
+# the case real videos hit (854x480 -> 1708x960) and a 128x72 test never did.
 _SMOKE = r"""
-import json, cupy as cp, numpy as np, nvvfx
+import json, sys, cupy as cp, numpy as np, nvvfx
 from nvvfx import VideoSuperRes
+sys.path.insert(0, sys.argv[1])
+from vsr_worker import to_host
 v = VideoSuperRes(quality=VideoSuperRes.QualityLevel.HIGH)
-v.output_width, v.output_height = 128, 72
+v.output_width, v.output_height = 100, 60
 v.load()
-out = cp.asnumpy(cp.from_dlpack(v.run(cp.asarray(np.zeros((3, 36, 64), np.float32))).image))
-assert out.shape == (3, 72, 128)
+out = to_host(v.run(cp.asarray(np.zeros((3, 30, 50), np.float32))).image, cp)
+assert out.shape == (3, 60, 100)
 import importlib.metadata as m
 print(json.dumps({"nvidia-vfx": m.version("nvidia-vfx"), "cupy": cp.__version__,
                   "gpu": cp.cuda.runtime.getDeviceProperties(0)["name"].decode()}))
@@ -93,7 +97,7 @@ def install(state: Dict) -> None:
     run([py, "-m", "pip", "install", "--upgrade", "pip"], "Updating pip…", 10, 600)
     run([py, "-m", "pip", "install", "--upgrade", "--extra-index-url", NVIDIA_INDEX, *PACKAGES],
         "Downloading NVIDIA VFX runtime (~550 MB)…", 20, 3600)
-    out = run([py, "-c", _SMOKE], "Testing on the GPU…", 90, 300)
+    out = run([py, "-c", _SMOKE, str(Path(__file__).parent)], "Testing on the GPU…", 90, 300)
     info = json.loads(out.strip().splitlines()[-1])
     _marker().write_text(json.dumps(info), encoding="utf-8")
     state.update(version=f"nvidia-vfx {info['nvidia-vfx']} on {info['gpu']}")

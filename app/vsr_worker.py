@@ -22,6 +22,26 @@ import sys
 import numpy as np
 
 
+def to_host(image, cp):
+    """VSR output (CUDA array interface) -> numpy (3, h, w) float32.
+
+    NVIDIA pads each output row to a multiple of 16 pixels (1708 wide ->
+    6848-byte rows), so the array isn't contiguous and cp.asnumpy would
+    compile a strided-copy kernel — which needs CUDA headers the runtime
+    doesn't ship ("Failed to find CUDA headers"). Copy the padded buffer
+    as-is (a plain memcpy) and drop the padding on the CPU instead.
+    """
+    a = cp.from_dlpack(image)
+    if a.flags.c_contiguous:
+        return cp.asnumpy(a)
+    c, h, w = a.shape
+    sc, sh, sw = a.strides
+    if sw == a.itemsize and sh % a.itemsize == 0 and sc == h * sh:
+        padded = cp.ndarray((c, h, sh // a.itemsize), a.dtype, memptr=a.data)
+        return cp.asnumpy(padded)[:, :, :w]
+    return cp.asnumpy(a)
+
+
 def main(job_path: str) -> int:
     with open(job_path, encoding="utf-8") as f:
         job = json.load(f)
@@ -58,7 +78,7 @@ def main(job_path: str) -> int:
             gbr = np.frombuffer(buf, dtype=np.float32).reshape(3, in_h, in_w)
             rgb = np.ascontiguousarray(gbr[[2, 0, 1]])
             result = vsr.run(cp.asarray(rgb))
-            out = cp.asnumpy(cp.from_dlpack(result.image))  # (3, out_h, out_w) RGB
+            out = to_host(result.image, cp)  # (3, out_h, out_w) RGB
             # back to G, B, R plane order for gbrpf32le
             enc.stdin.write(out[1].tobytes())
             enc.stdin.write(out[2].tobytes())
