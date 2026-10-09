@@ -91,6 +91,32 @@ UPSCALERS = {
         "best_for": "Anime, Illustrations",
         "url": "https://github.com/nihui/waifu2x-ncnn-vulkan/releases",
     },
+    "upscayl": {
+        "name": "Upscayl",
+        "description": ("Upscayl's ncnn engine and model set. Upscayl Lite is built for "
+                        "speed — about 12x faster than Real-ESRGAN x4plus on a 540p frame, "
+                        "with close to the same detail. Resizes to the target factor itself."),
+        "icon": "🆙",
+        "binary_linux": "upscayl-bin",
+        "binary_win": "upscayl-bin.exe",
+        # All 4x models; -s resizes the output to the requested factor
+        "models": ["upscayl-lite-4x", "upscayl-standard-4x", "high-fidelity-4x",
+                   "remacri-4x", "ultramix-balanced-4x", "ultrasharp-4x", "digital-art-4x"],
+        "default_model": "upscayl-lite-4x",
+        "model_scales": {},
+        "scale_options": [2, 3, 4],
+        "default_scale": 2,
+        "outputs_at_factor": True,
+        "github_owner": "upscayl",
+        "github_repo": "upscayl-ncnn",
+        "asset_pattern_win": r"^upscayl-bin-.*-windows\.zip$",
+        "asset_pattern_linux": r"^upscayl-bin-.*-linux\.zip$",
+        # The release ships only the binary; models live in the app repo
+        "models_url": "https://raw.githubusercontent.com/upscayl/upscayl/main/resources/models/",
+        "models_api": "https://api.github.com/repos/upscayl/upscayl/contents/resources/models",
+        "best_for": "Fast live-action upscaling; sharper models when time allows",
+        "url": "https://github.com/upscayl/upscayl",
+    },
     "rtxvsr": {
         "name": "NVIDIA RTX Video Super Resolution",
         "description": ("NVIDIA's RTX VSR model via the official VFX SDK — trained on "
@@ -490,6 +516,10 @@ def _download_worker(key: str):
         if not is_win:
             binary_path.chmod(0o755)
 
+        # 4b. Models shipped separately from the binary (Upscayl)
+        if upscaler.get("models_url"):
+            _download_models(key, binary_path.parent / "models", state)
+
         # 5. Clean up archive
         try:
             if archive_path.exists():
@@ -508,6 +538,53 @@ def _download_worker(key: str):
         state["error"] = str(e)
         state["message"] = f"Download failed: {e}"
         optimizarr_logger.app_logger.error("Upscaler download failed: %s — %s", key, e)
+
+
+def _model_sizes(spec: Dict) -> Dict[str, int]:
+    """{file name: byte size} from the GitHub contents API, or {} if it
+    can't be reached (rate limit) — downloads then go unverified."""
+    if not spec.get("models_api"):
+        return {}
+    try:
+        r = requests.get(spec["models_api"], timeout=30,
+                         headers={"Accept": "application/vnd.github+json"})
+        r.raise_for_status()
+        return {e["name"]: int(e.get("size") or 0) for e in r.json()}
+    except Exception:
+        return {}
+
+
+def _download_models(key: str, models_dir: Path, state: Dict):
+    """Fetch a spec's .param/.bin model pairs into ``models_dir``.
+
+    Sizes are checked against the repo listing — not Content-Length, which
+    raw.githubusercontent.com reports for the gzipped transfer. Files
+    already present at full size are skipped, so re-running an install
+    (or an update) only fetches what's missing.
+    """
+    spec = _spec(key)
+    models_dir.mkdir(parents=True, exist_ok=True)
+    sizes = _model_sizes(spec)
+    names = [f"{m}.{ext}" for m in spec["models"] for ext in ("param", "bin")]
+    for i, name in enumerate(names, 1):
+        dest = models_dir / name
+        expected = sizes.get(name, 0)
+        state["message"] = f"Downloading model {name} ({i}/{len(names)})…"
+        state["progress"] = 90 + int(9 * i / len(names))
+        if dest.exists() and dest.stat().st_size and (
+                not expected or dest.stat().st_size == expected):
+            continue
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        with requests.get(spec["models_url"] + name, stream=True, timeout=120) as r:
+            r.raise_for_status()
+            with open(tmp, "wb") as f:
+                for chunk in r.iter_content(chunk_size=65536):
+                    if chunk:
+                        f.write(chunk)
+        if expected and tmp.stat().st_size != expected:
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError(f"Model {name} download was truncated")
+        tmp.replace(dest)
 
 
 def _format_size(size_bytes: int) -> str:
@@ -893,6 +970,8 @@ def run_upscale_pipeline(
     out_w = src_w * factor
     out_h = src_h * factor
     model_scale = model_scale_for(upscaler_key, model, factor)
+    if UPSCALERS.get(upscaler_key, {}).get("outputs_at_factor"):
+        model_scale = factor  # the binary resizes to the target itself
     if model_scale != factor:
         optimizarr_logger.app_logger.info(
             "Model %s runs at x%d; downscaling its output to x%d",
@@ -1092,12 +1171,19 @@ def run_upscale_pipeline(
                     "Resuming upscale: %d/%d frames already done",
                     len(existing_out), total_frames)
 
+        if UPSCALERS[upscaler_key].get("outputs_at_factor"):
+            # Upscayl: -z is the model's native scale, -s the output scale —
+            # it resizes to the target itself, so no lanczos pass later.
+            scale_args = ["-z", "4", "-s", str(factor),
+                          "-m", str(Path(binary_path).parent / "models")]
+        else:
+            scale_args = ["-s", str(model_scale)]
         upscale_cmd = [
             binary_path,
             "-i", str(frames_in),
             "-o", str(frames_out),
             "-n", model,
-            "-s", str(model_scale),
+            *scale_args,
             "-f", "png",
             # load:proc:save threads. Default 1:2:2 starves the GPU on small
             # video frames — single-threaded PNG decode can't feed it. 4:4:4

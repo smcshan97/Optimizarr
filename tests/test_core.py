@@ -3528,3 +3528,64 @@ class TestUpscalePlanRule:
         assert upscale_plan_for(root, 720) is None      # not below trigger
         assert upscale_plan_for(root, 0) is None        # unknown height
         assert upscale_plan_for(None, 480) is None
+
+
+class TestUpscaylModels:
+    """Upscayl's release ships only the binary; models come from its app repo."""
+
+    class _Resp:
+        def __init__(self, body=b"", json_body=None):
+            self.body, self._json = body, json_body
+            self.headers = {}
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._json
+
+        def iter_content(self, chunk_size=65536):
+            yield self.body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _patch(self, monkeypatch, sizes, bodies, calls):
+        import app.upscaler as up
+
+        def fake_get(url, **kw):
+            calls.append(url)
+            if url == up.UPSCALERS["upscayl"]["models_api"]:
+                return self._Resp(json_body=[{"name": n, "size": s} for n, s in sizes.items()])
+            return self._Resp(bodies[url.rsplit("/", 1)[1]])
+        monkeypatch.setattr(up.requests, "get", fake_get)
+        monkeypatch.setitem(up.UPSCALERS["upscayl"], "models", ["m1"])
+        return up
+
+    def test_downloads_and_skips_complete_files(self, monkeypatch, tmp_path):
+        calls = []
+        up = self._patch(monkeypatch, {"m1.param": 3, "m1.bin": 5},
+                         {"m1.param": b"abc", "m1.bin": b"12345"}, calls)
+        up._download_models("upscayl", tmp_path, {})
+        assert (tmp_path / "m1.bin").read_bytes() == b"12345"
+        calls.clear()
+        up._download_models("upscayl", tmp_path, {})
+        assert not any(c.endswith((".param", ".bin")) for c in calls)
+
+    def test_truncated_model_rejected(self, monkeypatch, tmp_path):
+        import pytest
+        up = self._patch(monkeypatch, {"m1.param": 3, "m1.bin": 99},
+                         {"m1.param": b"abc", "m1.bin": b"short"}, [])
+        with pytest.raises(RuntimeError, match="truncated"):
+            up._download_models("upscayl", tmp_path, {})
+        assert not (tmp_path / "m1.bin").exists()
+
+    def test_ui_lists_every_model(self):
+        from pathlib import Path
+        import app.upscaler as up
+        js = (Path(__file__).parent.parent / "web/static/js/app/upscale-stereo.js").read_text(encoding="utf-8")
+        for m in up.UPSCALERS["upscayl"]["models"]:
+            assert f"'{m}'" in js
