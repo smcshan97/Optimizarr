@@ -3589,3 +3589,12 @@ class TestUpscaylModels:
         js = (Path(__file__).parent.parent / "web/static/js/app/upscale-stereo.js").read_text(encoding="utf-8")
         for m in up.UPSCALERS["upscayl"]["models"]:
             assert f"'{m}'" in js
+
+
+class TestVideo2xSourceCodecs:
+    def test_av1_goes_to_frame_pipeline(self):
+        from app.video2x import supports_source
+        assert not supports_source("av1")
+        assert not supports_source("AV1")
+        assert supports_source("h264")
+        assert supports_source("")

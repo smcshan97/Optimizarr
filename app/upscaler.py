@@ -833,7 +833,7 @@ def _get_video_info(input_path: str) -> Dict:
             fps = avg
         from app.scanner import video_color_info
         info = {"width": width, "height": height, "fps": fps, "duration": duration,
-                "vfr": vfr}
+                "vfr": vfr, "codec": stream.get("codec_name", "")}
         info.update(video_color_info(stream))
         return info
     except Exception as e:
@@ -1007,7 +1007,12 @@ def run_upscale_pipeline(
             engine_pref = _db.get_setting("upscale_engine", "auto")
         except Exception:
             engine_pref = "auto"
-        if engine_pref != "frames":
+        from app.video2x import supports_source
+        if engine_pref != "frames" and not supports_source(info.get("codec")):
+            optimizarr_logger.app_logger.info(
+                "Video2X can't read %s sources — using the frame pipeline",
+                info.get("codec"))
+        elif engine_pref != "frames":
             v2x_binary = _find_binary("video2x")
     use_rtxvsr = upscaler_key == "rtxvsr"
     if use_rtxvsr:

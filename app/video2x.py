@@ -44,6 +44,18 @@ INTERMEDIATE_ARGS = ["-c", "libx264", "--pix-fmt", "yuv420p",
                      "-e", "crf=12", "-e", "preset=veryfast"]
 
 
+# Source codecs Video2X 6.4.0 can't process: its AV1 decode path hands the
+# encoder frames with no timestamps, so the muxer rejects the first packet
+# ("Timestamps are unset… Error muxing packet: Invalid argument") — verified
+# on AV1 in both MKV and MP4; the same clip as H.264 upscales fine. Those
+# sources go straight to the frame pipeline instead of failing first.
+UNSUPPORTED_SOURCE_CODECS = {"av1"}
+
+
+def supports_source(codec: str) -> bool:
+    return (codec or "").lower() not in UNSUPPORTED_SOURCE_CODECS
+
+
 def video2x_model(upscaler_key: str, model: str) -> Optional[Tuple[str, str, str]]:
     """(processor, model option, Video2X model name), or None if unsupported."""
     name = _MODEL_MAP.get(upscaler_key, {}).get(model)
