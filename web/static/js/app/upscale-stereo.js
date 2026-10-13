@@ -7,6 +7,8 @@ const _UPSCALER_MODELS = {
     realcugan:  ['models-se', 'models-pro', 'models-nose'],
     waifu2x:    ['models-cunet', 'models-upconv_7_anime_style_art_rgb'],
     upscayl:    ['upscayl-lite-4x'],
+    // Auto: engine and model are picked per file by the content classifier
+    auto:       ['auto'],
     // RTX VSR "models" are quality levels; HIGHBITRATE_* suit clean sources
     rtxvsr:     ['ULTRA', 'HIGH', 'MEDIUM', 'LOW', 'HIGHBITRATE_ULTRA', 'HIGHBITRATE_HIGH'],
 };

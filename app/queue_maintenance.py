@@ -18,6 +18,8 @@ plan). After every encode, and on a timer (queue_check_interval_minutes):
   * finished rows (completed / kept original) whose file doesn't meet its
     profile are re-queued — once per profile change, so a conversion kept
     as the original for growing too much isn't retried every pass;
+  * pending rows are tagged 2D / 3D / live action by the content
+    classifier (a few per pass, in queue order) when it's installed;
   * a remembered "Prioritize by" choice is re-applied, so a smart sort
     (fastest/slowest first) stays right as new items arrive and the speed
     estimates it's built on keep learning.
@@ -54,6 +56,9 @@ MAX_REPROBES_PER_PASS = 50
 # once per profile change (queue.conformance_checked), so a large history is
 # worked through over a few passes and then costs nothing.
 MAX_FINISHED_CHECKS_PER_PASS = 25
+
+# Files classified per pass (~4 s each on CPU, below-normal priority).
+CLASSIFY_PER_PASS = 12
 _FINISHED = ("completed", "kept_original")
 
 _PLAN_KEYS = ("enabled", "upscaler_key", "model", "factor", "source_height",
@@ -302,13 +307,42 @@ def recheck_finished(scanner, cache: Dict, budget: int = MAX_FINISHED_CHECKS_PER
     return requeued
 
 
+def classify_pending(budget: int = CLASSIFY_PER_PASS) -> int:
+    """Tag unclassified pending rows (queue order). Returns how many."""
+    from app import content_classifier as cc
+    if not cc.enabled():
+        return 0
+    todo = []
+    for item in db.get_queue_items(status="pending"):
+        rec = _as_dict(item.get("content_probs"))
+        if rec.get("source") == "user" or rec.get("version") == cc.MODEL_VERSION:
+            continue
+        if os.path.exists(item.get("file_path") or ""):
+            todo.append(item)
+        if len(todo) >= budget:
+            break
+    if not todo:
+        return 0
+    results = cc.classify([i["file_path"] for i in todo])
+    done = 0
+    for item in todo:
+        res = results.get(item["file_path"], {})
+        if "probs" not in res:
+            continue
+        ctype, _ = cc.decide(res["probs"])
+        db.update_queue_item(item["id"], content_type=ctype, content_probs=cc.record(res["probs"]))
+        done += 1
+    return done
+
+
 def revalidate_queue(scanner=None) -> Dict[str, int]:
     """One pass over the waiting queue. Returns what changed."""
     if scanner is None:
         from app.scanner import scanner
     counts = {k: 0 for k in ("removed_missing", "duplicates_removed", "updated",
                              "removed_optimized", "plans_synced", "targets_synced",
-                             "unquarantined", "requeued_nonconforming", "failed")}
+                             "unquarantined", "requeued_nonconforming", "classified",
+                             "failed")}
     budget = [MAX_REPROBES_PER_PASS]
     cache: Dict = {}
     items = db.get_queue_items()
@@ -373,6 +407,10 @@ def revalidate_queue(scanner=None) -> Dict[str, int]:
         counts["requeued_nonconforming"] = recheck_finished(scanner, cache)
     except Exception as e:
         optimizarr_logger.app_logger.warning("Queue check: finished-file sweep failed: %s", e)
+    try:
+        counts["classified"] = classify_pending()
+    except Exception as e:
+        optimizarr_logger.app_logger.warning("Queue check: content classification failed: %s", e)
     return counts
 
 

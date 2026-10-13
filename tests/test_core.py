@@ -3992,3 +3992,99 @@ class TestConnectionSave:
         req = tmp_path / "requirements.txt"
         req.write_text("# comment\nrequests>=2\nsurely-not-a-real-pkg==1.0  # x\n", encoding="utf-8")
         assert missing_requirements(req) == ["surely-not-a-real-pkg==1.0"]
+
+
+class TestContentClassifier:
+    def test_decide(self):
+        from app.content_classifier import decide
+        assert decide({'2d': 0.6, '3d': 0.2, 'live': 0.2}, 0.6) == ('2d', 0.8)
+        assert decide({'2d': 0.2, '3d': 0.5, 'live': 0.3}, 0.6)[0] == '3d'
+        assert decide({'2d': 0.1, '3d': 0.1, 'live': 0.8}, 0.6) == ('live', 0.8)
+        assert decide({'2d': 0.2, '3d': 0.25, 'live': 0.55}, 0.6)[0] == 'uncertain'
+
+    def test_calibration_recommends_lowest_reliable_threshold(self):
+        from app.content_classifier import calibration
+        sure = [('live', {'2d': .05, '3d': .05, 'live': .9})] * 20 + \
+               [('2d', {'2d': .8, '3d': .1, 'live': .1})] * 15
+        shaky = [('live', {'2d': .3, '3d': .27, 'live': .43})] * 3   # model wrong, unsure
+        c = calibration(sure + shaky)
+        assert c['labeled'] == 38
+        row50 = next(r for r in c['table'] if r['threshold'] == 0.5)
+        assert row50['accuracy'] < 0.97                               # the shaky ones count
+        assert c['recommended'] == 0.6                                # they drop out at 0.60
+        assert c['confusion']['live']['2d'] == 3                      # 2d .30 > 3d .27
+
+    def test_auto_choice_and_fallback(self, monkeypatch):
+        import app.content_classifier as cc
+        installed = {'realcugan', 'rtxvsr', 'upscayl'}
+        monkeypatch.setattr(cc, '_installed', lambda k: k in installed)
+        monkeypatch.setattr(cc, '_setting', lambda k, d: d)
+        assert cc.auto_choice('3d') == ('realcugan', 'models-pro')
+        assert cc.auto_choice('live') == ('rtxvsr', 'ULTRA')
+        assert cc.auto_choice('uncertain') == ('rtxvsr', 'ULTRA')
+        installed.discard('rtxvsr')                                   # no RTX GPU
+        assert cc.auto_choice('live') == ('upscayl', 'upscayl-lite-4x')
+
+    def test_classify_pending_tags_rows(self, fresh_db, monkeypatch, tmp_path):
+        import app.content_classifier as cc
+        from app import queue_maintenance as qm
+        monkeypatch.setattr(qm, 'db', fresh_db)
+        monkeypatch.setattr(cc, 'enabled', lambda: True)
+        monkeypatch.setattr(cc, 'threshold', lambda: 0.6)
+        f1, f2 = tmp_path / 'a.mkv', tmp_path / 'b.mkv'
+        f1.write_bytes(b'x'); f2.write_bytes(b'x')
+        a = fresh_db.add_to_queue(file_path=str(f1), profile_id=1)
+        b = fresh_db.add_to_queue(file_path=str(f2), profile_id=1)
+        monkeypatch.setattr(cc, 'classify', lambda paths, timeout=1800: {
+            str(f1): {'probs': {'2d': .7, '3d': .1, 'live': .2}},
+            str(f2): {'error': 'no frames'}})
+        assert qm.classify_pending() == 1
+        assert fresh_db.get_queue_item(a)['content_type'] == '2d'
+        assert fresh_db.get_queue_item(b)['content_type'] is None
+        # already classified with this model version -> skipped next pass
+        monkeypatch.setattr(cc, 'classify', lambda paths, timeout=1800: {p: {'error': 'x'} for p in paths})
+        assert qm.classify_pending() == 0
+
+    def test_quiz_answer_overrides_and_is_kept(self, fresh_db, monkeypatch):
+        import json
+        import app.content_classifier as cc
+        from app.api import classifier_routes as cr
+        from app import queue_maintenance as qm
+        monkeypatch.setattr(cr, 'db', fresh_db)
+        monkeypatch.setattr(qm, 'db', fresh_db)
+        monkeypatch.setattr(cc, 'threshold', lambda: 0.6)
+        probs = {'2d': .2, '3d': .45, 'live': .35}
+        q = fresh_db.add_to_queue(file_path='/x/vr.mkv', profile_id=1)
+        fresh_db.update_queue_item(q, content_type='3d', content_probs=cc.record(probs))
+        r = cr.quiz_answer({'queue_id': q, 'label': 'live'}, current_user={})
+        assert r['model'] == '3d' and r['agrees'] is False
+        row = fresh_db.get_queue_item(q)
+        assert row['content_type'] == 'live'
+        assert json.loads(row['content_probs'])['source'] == 'user'
+        s = cr.quiz_summary(current_user={})
+        assert s['labeled'] == 1
+        # a user label survives the background pass and threshold changes
+        monkeypatch.setattr(cc, 'enabled', lambda: True)
+        assert qm.classify_pending() == 0
+        cr._redecide_all()
+        assert fresh_db.get_queue_item(q)['content_type'] == 'live'
+
+    def test_live_action_film_grain_setting(self, fresh_db, monkeypatch):
+        import app.encoder as enc
+        monkeypatch.setattr(enc, 'db', fresh_db)
+        fresh_db.set_setting('auto_film_grain_live', '8')
+
+        def cmd_for(ctype, profile_grain=0):
+            job = enc.EncodingJob.__new__(enc.EncodingJob)
+            job.queue_item = {'file_path': '/x/a.mkv', 'content_type': ctype}
+            job.profile = {'name': 'p', 'codec': 'av1', 'quality': 30, 'container': 'mkv',
+                           'film_grain': profile_grain}
+            monkeypatch.setattr(job, 'select_encoder', lambda: 'svt_av1_10bit', raising=False)
+            monkeypatch.setattr(enc.EncodingJob, '_build_audio_args', lambda self: [])
+            monkeypatch.setattr(enc.EncodingJob, '_build_subtitle_args', lambda self: [])
+            c = job.build_command()
+            return c[c.index('--encopts') + 1] if '--encopts' in c else ''
+        assert 'film-grain=8' in cmd_for('live')
+        assert cmd_for('2d') == ''
+        assert cmd_for('uncertain') == ''
+        assert 'film-grain=3' in cmd_for('live', profile_grain=3)    # profile wins

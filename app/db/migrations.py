@@ -82,6 +82,23 @@ def _m9_queue_xpsnr_and_notice(cursor):
     _add_column(cursor, "queue", "notice", "TEXT")
 
 
+def _m10_content_classification(cursor):
+    # 2d / 3d / live / uncertain, from app.content_classifier (or the user)
+    _add_column(cursor, "queue", "content_type", "TEXT")
+    _add_column(cursor, "queue", "content_probs", "TEXT")
+    # Answers from the Settings quiz: ground truth for calibrating the model
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS content_labels (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            queue_id INTEGER,
+            file_path TEXT NOT NULL,
+            label TEXT NOT NULL,
+            probs TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )""")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_content_labels_path ON content_labels(file_path)")
+
+
 MIGRATIONS = [
     (1, "users.token_version", _m1_token_version),
     (2, "drop unused sessions/api_keys tables", _m2_drop_unused_auth_tables),
@@ -92,6 +109,7 @@ MIGRATIONS = [
     (7, "profiles.max_bitrate_kbps", _m7_profile_max_bitrate),
     (8, "queue.conformance_checked", _m8_queue_conformance_checked),
     (9, "queue.tq_xpsnr + queue.notice", _m9_queue_xpsnr_and_notice),
+    (10, "content classification + quiz labels", _m10_content_classification),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]

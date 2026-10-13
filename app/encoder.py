@@ -234,6 +234,13 @@ class EncodingJob:
         # All --encopts go in ONE flag: HandBrake keeps only the last one.
         encopts = []
         grain = int(self.profile.get('film_grain') or 0)
+        if not grain and self.queue_item.get('content_type') == 'live':
+            # Optional grain synthesis for files classified as live action
+            # (Settings -> Content Detection; off by default)
+            try:
+                grain = int(db.get_setting('auto_film_grain_live', '0') or 0)
+            except (TypeError, ValueError):
+                grain = 0
         if grain > 0:
             if hb_encoder.startswith('svt_av1'):
                 encopts.append(f'film-grain={min(grain, 50)}:film-grain-denoise=0')
@@ -976,6 +983,18 @@ class EncodingJob:
             upscaler_key = upscale_plan.get('upscaler_key', 'realesrgan')
             model        = upscale_plan.get('model', 'realesrgan-x4plus')
             factor       = upscale_plan.get('factor', 2)
+            if upscaler_key == 'auto':
+                # "Auto per file": animated -> Real-CUGAN Pro, live -> RTX VSR
+                # (or the engines chosen in Settings -> Content Detection)
+                from app import content_classifier as cc
+                ctype = cc.ensure_classified(self.queue_item)
+                upscaler_key, model = cc.auto_choice(ctype)
+                optimizarr_logger.app_logger.info(
+                    "Auto upscaler: %s is %s -> %s %s", Path(encode_input).name,
+                    ctype or "unclassified", upscaler_key, model)
+                if ctype in (None, 'uncertain'):
+                    self._note(f"Content type {'unknown' if ctype is None else 'uncertain'} "
+                               f"— auto upscaler used the live-action engine ({upscaler_key})")
 
             optimizarr_logger.app_logger.info(
                 "Upscale phase: %s (×%d, model=%s)", encode_input, factor, model

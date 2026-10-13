@@ -112,7 +112,7 @@ function switchTab(tabName) {
     if (tabName === 'queue') { loadQueue(); loadQueueAutoSort(); }
     if (tabName === 'profiles') loadProfiles();
     if (tabName === 'scanroots') loadScanRoots();
-    if (tabName === 'settings') { loadSettings(); loadConnections(); }
+    if (tabName === 'settings') { loadSettings(); loadConnections(); loadClassifier(); }
     if (tabName === 'schedule') loadSchedule();
     if (tabName === 'logs') loadLogs();
     if (tabName === 'statistics') loadStatistics();

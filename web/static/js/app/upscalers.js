@@ -96,7 +96,7 @@ function renderUpscalerCards(info) {
                 <p class="text-xs text-gray-500">Best for: ${up.best_for}</p>
                 ${healthLine}
                 ${actionBtn}
-                ${isEngine && installed ? `
+                ${key === 'video2x' && installed ? `
                 <label class="mt-2 flex items-center gap-2 text-xs text-gray-300">
                     <input type="checkbox" ${info.engine_pref !== 'frames' ? 'checked' : ''}
                         onchange="setUpscaleEngine(this.checked ? 'auto' : 'frames')">

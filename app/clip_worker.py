@@ -1,4 +1,4 @@
-"""CLIP content classifier (PROTOTYPE, not wired in yet) — runs inside the
+"""CLIP content classifier (see app.content_classifier) — runs inside the
 isolated runtime %LOCALAPPDATA%/Optimizarr/clip/venv (onnxruntime, numpy,
 tokenizers) with Xenova/clip-vit-base-patch32 quantized ONNX models
 (vision 89 MB + text 65 MB). Standalone on purpose: must not import app.*.
@@ -15,6 +15,7 @@ Encanto 3d, FernGully and Scooby-Doo 2d, Cats & Dogs live). VR180 fisheye
 frames and photoreal CGI are the weak spots.
 """
 import json
+import os
 import subprocess
 import sys
 import time
@@ -39,9 +40,20 @@ PROMPTS = {
 CREATE = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 
+def _session(path):
+    """CPU session; OPTIMIZARR_CLIP_THREADS caps threads so classification
+    stays gentle next to a running encode."""
+    opts = ort.SessionOptions()
+    threads = int(os.environ.get("OPTIMIZARR_CLIP_THREADS", "0") or 0)
+    if threads > 0:
+        opts.intra_op_num_threads = threads
+        opts.inter_op_num_threads = 1
+    return ort.InferenceSession(path, sess_options=opts, providers=["CPUExecutionProvider"])
+
+
 def text_embeddings(models):
     tok = Tokenizer.from_file(f"{models}/tokenizer.json")
-    sess = ort.InferenceSession(f"{models}/text_model_quantized.onnx", providers=["CPUExecutionProvider"])
+    sess = _session(f"{models}/text_model_quantized.onnx")
     classes, embs = [], []
     for cls, prompts in PROMPTS.items():
         vecs = []
@@ -77,7 +89,7 @@ def frame(path, t):
 
 def main(models, files_json):
     classes, temb = text_embeddings(models)
-    vis = ort.InferenceSession(f"{models}/vision_model_quantized.onnx", providers=["CPUExecutionProvider"])
+    vis = _session(f"{models}/vision_model_quantized.onnx")
     for path in json.load(open(files_json, encoding="utf-8")):
         t0 = time.time()
         d = duration(path)

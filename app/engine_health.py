@@ -93,6 +93,12 @@ def _test_handbrake(clip: Path, work: Path) -> Optional[str]:
     return _check_output(str(out), CLIP_W - 16, CLIP_H - 16)   # auto-crop off; allow rounding
 
 
+def _test_classifier() -> Optional[str]:
+    from app import content_classifier as cc
+    res = cc.smoke_test()
+    return res.get("error")
+
+
 def _test_upscaler(key: str, clip: Path) -> Optional[str]:
     from app import upscaler as up
     model = up.UPSCALERS[key]["default_model"]
@@ -111,6 +117,9 @@ def engines_to_test(only: Optional[List[str]] = None) -> List[str]:
     if shutil.which(handbrake_cli()) or Path(handbrake_cli()).exists():
         keys.append("handbrake")
     keys += [k for k in up.UPSCALERS if up._find_binary(k)]
+    from app import content_classifier as cc
+    if cc.installed_info():
+        keys.append("classifier")
     return [k for k in keys if not only or k in only]
 
 
@@ -136,8 +145,12 @@ def run_self_test(only: Optional[List[str]] = None) -> Dict[str, Dict]:
                 problem = "couldn't create the test clip (is ffmpeg installed?)"
             else:
                 try:
-                    problem = (_test_handbrake(clip, work) if key == "handbrake"
-                               else _test_upscaler(key, clip))
+                    if key == "handbrake":
+                        problem = _test_handbrake(clip, work)
+                    elif key == "classifier":
+                        problem = _test_classifier()
+                    else:
+                        problem = _test_upscaler(key, clip)
                 except Exception as e:
                     problem = f"crashed: {e}"
             was_ok = results.get(key, {}).get("ok", True)
@@ -172,6 +185,15 @@ def engines_in_use() -> List[str]:
     for r in db.get_scan_roots():
         if r.get("upscale_enabled") and r.get("upscale_key"):
             keys.add(r["upscale_key"])
+    if "auto" in keys:
+        # "Auto per file" relies on the classifier and both engines it picks
+        from app import content_classifier as cc
+        keys.discard("auto")
+        keys.add("classifier")
+        keys.update(cc.auto_choice(c)[0] for c in ("2d", "live"))
+    from app import content_classifier as cc
+    if cc.enabled():
+        keys.add("classifier")
     return sorted(keys)
 
 

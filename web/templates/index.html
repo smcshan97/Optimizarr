@@ -546,6 +546,51 @@
                 </div>
             </div>
 
+            <!-- Content Detection Section -->
+            <div class="card" style="margin-top:24px">
+                <div class="flex justify-between items-center mb-2">
+                    <div>
+                        <h2 class="page-title">🧠 Content Detection</h2>
+                        <p class="text-sm text-gray-400 mt-1">
+                            Tags each queued file as 2D animation, 3D animation or live action (CLIP model on 8 frames, CPU, ~4&nbsp;s per file in the background).
+                            Drives the <strong>Auto per file</strong> upscaler. Files the model isn't sure about keep their profile's settings.
+                        </p>
+                    </div>
+                    <button id="classifierQuizBtn" onclick="startClassifierQuiz()" class="btn btn-primary btn-sm" title="Label 50 files yourself to check how well the model agrees with you">
+                        ✅ Check the model (50 questions)
+                    </button>
+                </div>
+                <div id="classifierStatus" class="text-sm text-gray-300 mt-3">Loading…</div>
+                <div id="classifierSettings" class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4 hidden">
+                    <label class="flex items-center gap-2 text-sm">
+                        <input type="checkbox" id="classifierEnabled"> Classify queued files in the background
+                    </label>
+                    <div class="text-sm">
+                        <label class="block mb-1">Confidence needed to act (%)</label>
+                        <input type="number" id="classifierThreshold" min="34" max="99" step="1"
+                            class="w-24 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center">
+                        <span class="text-xs text-gray-400 ml-2">Below this a file is "uncertain". 60% measured 98.5% accurate here.</span>
+                    </div>
+                    <div class="text-sm">
+                        <label class="block mb-1">Auto upscaler — animated (2D/3D)</label>
+                        <select id="classifierAutoAnimated" class="form-select w-full"></select>
+                    </div>
+                    <div class="text-sm">
+                        <label class="block mb-1">Auto upscaler — live action / uncertain</label>
+                        <select id="classifierAutoLive" class="form-select w-full"></select>
+                    </div>
+                    <div class="text-sm">
+                        <label class="block mb-1">Film grain for live action (SVT-AV1, 0 = off)</label>
+                        <input type="number" id="classifierFilmGrain" min="0" max="50" step="1"
+                            class="w-24 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center">
+                        <span class="text-xs text-gray-400 ml-2">Only when the profile sets no grain of its own. Lean web sources have little grain left — test before enabling.</span>
+                    </div>
+                    <div class="flex items-end">
+                        <button onclick="saveClassifierSettings()" class="btn btn-secondary btn-sm">Save</button>
+                    </div>
+                </div>
+            </div>
+
             <!-- External Connections Section -->
             <div class="card" style="margin-top:24px">
                 <div class="flex justify-between items-center mb-2">
@@ -640,6 +685,34 @@
         </div>
 
         <!-- External Connection Modal -->
+        <!-- Content-detection quiz -->
+        <div id="classifierQuizModal" class="modal-backdrop hidden">
+            <div class="modal-panel" style="max-width:1340px">
+                <div class="modal-header">
+                    <h3 class="modal-title">Check the model — <span id="quizProgress">0 / 50</span></h3>
+                    <button onclick="closeClassifierQuiz()" class="modal-close">✕</button>
+                </div>
+                <div class="modal-body">
+                    <div id="quizQuestion">
+                        <p class="text-sm text-gray-400 mb-2">What is this video? Three frames from across the file. (The model's answer is shown only after you pick.)</p>
+                        <div style="min-height:240px;display:flex;align-items:center;justify-content:center;background:#000;border-radius:6px">
+                            <img id="quizStrip" alt="frames" style="max-width:100%;display:none">
+                            <span id="quizLoading" class="text-gray-500 text-sm">Loading frames…</span>
+                        </div>
+                        <p id="quizFile" class="text-xs text-gray-500 mt-1 truncate"></p>
+                        <div class="flex gap-2 mt-3 flex-wrap">
+                            <button class="btn btn-primary" onclick="answerQuiz('2d')">🎨 2D animation <span class="text-xs opacity-60">(1)</span></button>
+                            <button class="btn btn-primary" onclick="answerQuiz('3d')">🧊 3D animation <span class="text-xs opacity-60">(2)</span></button>
+                            <button class="btn btn-primary" onclick="answerQuiz('live')">🎥 Live action <span class="text-xs opacity-60">(3)</span></button>
+                            <button class="btn btn-secondary" onclick="answerQuiz('skip')">Skip / can't tell <span class="text-xs opacity-60">(S)</span></button>
+                        </div>
+                        <p id="quizFeedback" class="text-sm mt-3" style="min-height:1.5em"></p>
+                    </div>
+                    <div id="quizSummary" class="hidden"></div>
+                </div>
+            </div>
+        </div>
+
         <div id="connectionModal" class="modal-backdrop hidden">
             <div class="modal-panel" style="max-width:540px">
                 <div class="modal-header">
@@ -1043,6 +1116,7 @@
                                         <option value="waifu2x">🎌 Waifu2x NCNN — classic anime upscaler</option>
                                         <option value="upscayl">🆙 Upscayl — Lite model is ~12× faster than Real-ESRGAN</option>
                                         <option value="rtxvsr">🟩 NVIDIA RTX VSR — fast, cleans compression artifacts (RTX GPUs)</option>
+                                        <option value="auto">🧠 Auto per file — Real-CUGAN for animation, RTX VSR for live action (needs Content Detection)</option>
                                     </select>
                                 </div>
 
@@ -1288,6 +1362,7 @@
                                         <option value="waifu2x">🎌 Waifu2x NCNN — classic anime upscaler</option>
                                         <option value="upscayl">🆙 Upscayl — Lite model is ~12× faster than Real-ESRGAN</option>
                                         <option value="rtxvsr">🟩 NVIDIA RTX VSR — fast, cleans compression artifacts (RTX GPUs)</option>
+                                        <option value="auto">🧠 Auto per file — Real-CUGAN for animation, RTX VSR for live action (needs Content Detection)</option>
                                     </select>
                                 </div>
 
@@ -1770,5 +1845,6 @@
     <script src="/static/js/app/schedule.js"></script>
     <script src="/static/js/app/connections.js"></script>
     <script src="/static/js/app/upscale-stereo.js"></script>
+    <script src="/static/js/app/content-detection.js"></script>
 </body>
 </html>
