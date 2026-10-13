@@ -15,6 +15,9 @@ plan). After every encode, and on a timer (queue_check_interval_minutes):
   * pending rows follow their profile's current target codec/resolution and
     the current upscale rule (engine/model, trigger and target heights,
     upscaling on/off) — rows that no longer need encoding are removed;
+  * finished rows (completed / kept original) whose file doesn't meet its
+    profile are re-queued — once per profile change, so a conversion kept
+    as the original for growing too much isn't retried every pass;
   * a remembered "Prioritize by" choice is re-applied, so a smart sort
     (fastest/slowest first) stays right as new items arrive and the speed
     estimates it's built on keep learning.
@@ -46,6 +49,12 @@ _IMAGE_CODECS = {"png", "mjpeg", "jpeg", "bmp", "gif", "webp", "tiff"}
 # Re-probes are ~0.1-1 s each; cap per pass so a big backlog of misread rows
 # doesn't stall the next encode. Later passes pick up the rest.
 MAX_REPROBES_PER_PASS = 50
+
+# Finished files probed per pass by the conformance sweep. Each is probed
+# once per profile change (queue.conformance_checked), so a large history is
+# worked through over a few passes and then costs nothing.
+MAX_FINISHED_CHECKS_PER_PASS = 25
+_FINISHED = ("completed", "kept_original")
 
 _PLAN_KEYS = ("enabled", "upscaler_key", "model", "factor", "source_height",
               "target_height")
@@ -228,13 +237,78 @@ def recheck_quarantined_item(item: Dict) -> str:
     return "quarantined"
 
 
+def _current_file(path: str) -> Optional[str]:
+    """Where a finished row's file is now: its own path, or the same name
+    with the container the encode switched it to (movie.mp4 -> movie.mkv)."""
+    if os.path.exists(path):
+        return path
+    stem = os.path.splitext(path)[0]
+    for ext in (".mkv", ".mp4", ".webm"):
+        if os.path.exists(stem + ext):
+            return stem + ext
+    return None
+
+
+def recheck_finished(scanner, cache: Dict, budget: int = MAX_FINISHED_CHECKS_PER_PASS) -> int:
+    """Re-queue finished files that don't meet their profile now.
+
+    Covers encodes finished before a rule existed (framerate/bitrate
+    ceilings, the 'doesn't meet the profile' policy) and profiles changed
+    since. Returns the number re-queued.
+    """
+    from app.scanner import profile_targets, unmet_targets
+    requeued = 0
+    for item in db.get_queue_items():
+        if budget <= 0:
+            break
+        if item.get("status") not in _FINISHED:
+            continue
+        profile, _ = _settings_for(item, cache)
+        if not profile:
+            continue
+        targets = profile_targets(profile)
+        stamp = json.dumps(targets, sort_keys=True)
+        if item.get("conformance_checked") == stamp:
+            continue
+        path = _current_file(item.get("file_path") or "")
+        if not path:
+            continue  # gone (or drive offline) — nothing to check
+        budget -= 1
+        specs = scanner.analyze_file(path)
+        if not specs or specs.get("codec", "unknown") == "unknown":
+            continue
+        unmet = unmet_targets(specs, targets)
+        if not unmet:
+            db.update_queue_item(item["id"], conformance_checked=stamp)
+            continue
+        size = os.path.getsize(path)
+        plan = _desired_plan({**item, "upscale_plan": None}, specs, cache)
+        db.update_queue_item(
+            item["id"], status="pending", file_path=path, progress=0.0,
+            current_specs=json.dumps(specs), target_specs=json.dumps(targets),
+            file_size_bytes=size, duration_seconds=specs.get("duration", 0),
+            upscale_plan=plan, error_message=None, retry_count=0,
+            retry_after=None, completed_at=None, phase=None, phase_progress=0.0,
+            estimated_savings_bytes=scanner._estimate_savings(
+                size, specs.get("codec", "unknown"), targets.get("codec", "unknown"),
+                current_specs=specs, profile=profile, upscale_plan=plan,
+                stereo_plan=item.get("stereo_plan")),
+            conformance_checked=stamp,
+        )
+        requeued += 1
+        optimizarr_logger.app_logger.info(
+            "Queue check: re-queued %s — doesn't meet its profile (%s)",
+            Path(path).name, "; ".join(unmet))
+    return requeued
+
+
 def revalidate_queue(scanner=None) -> Dict[str, int]:
     """One pass over the waiting queue. Returns what changed."""
     if scanner is None:
         from app.scanner import scanner
     counts = {k: 0 for k in ("removed_missing", "duplicates_removed", "updated",
                              "removed_optimized", "plans_synced", "targets_synced",
-                             "unquarantined", "failed")}
+                             "unquarantined", "requeued_nonconforming", "failed")}
     budget = [MAX_REPROBES_PER_PASS]
     cache: Dict = {}
     items = db.get_queue_items()
@@ -295,6 +369,10 @@ def revalidate_queue(scanner=None) -> Dict[str, int]:
             optimizarr_logger.app_logger.warning(
                 "Queue check: couldn't refresh %s: %s", name, e)
             counts["failed"] += 1
+    try:
+        counts["requeued_nonconforming"] = recheck_finished(scanner, cache)
+    except Exception as e:
+        optimizarr_logger.app_logger.warning("Queue check: finished-file sweep failed: %s", e)
     return counts
 
 

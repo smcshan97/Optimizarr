@@ -3748,3 +3748,73 @@ class TestProfileConformance:
         src, item = self._finalize(fresh_db, monkeypatch, tmp_path, 980, [])
         assert item['status'] == 'kept_original'
         assert 'already meets the profile' in item['error_message']
+
+
+class TestFinishedConformanceSweep:
+    PROFILE = {"codec": "av1", "resolution": "", "framerate": 30, "audio_codec": "copy",
+               "max_bitrate_kbps": 0, "upscale_enabled": 0}
+
+    def _setup(self, fresh_db, monkeypatch):
+        from app import queue_maintenance as qm
+        monkeypatch.setattr(qm, 'db', fresh_db)
+        prof = dict(self.PROFILE)
+        monkeypatch.setattr(fresh_db, 'get_profile', lambda pid: prof)
+        return qm, prof
+
+    def _scanner(self, specs):
+        return TestQueueMaintenance._FakeScanner(specs)
+
+    def _finished(self, fresh_db, tmp_path, name, status='completed', **kw):
+        f = tmp_path / name
+        f.write_bytes(b"x" * 10)
+        return fresh_db.add_to_queue(file_path=str(f), profile_id=1, status=status, **kw), f
+
+    def test_off_profile_requeued_once(self, fresh_db, monkeypatch, tmp_path):
+        qm, _ = self._setup(fresh_db, monkeypatch)
+        item, _ = self._finished(fresh_db, tmp_path, "a.mkv", status='kept_original',
+                                 error_message='Kept original — needs ≥5% savings')
+        sc = self._scanner({'codec': 'h264', 'height': 1080, 'framerate': 24})
+        assert qm.recheck_finished(sc, {}) == 1
+        row = fresh_db.get_queue_item(item)
+        assert row['status'] == 'pending' and row['error_message'] is None
+        # It encodes, but is kept as the original again (grew too much):
+        fresh_db.update_queue_item(item, status='kept_original')
+        assert qm.recheck_finished(sc, {}) == 0          # no loop
+        assert sc.calls == 1
+
+    def test_on_profile_stamped_not_reprobed(self, fresh_db, monkeypatch, tmp_path):
+        qm, _ = self._setup(fresh_db, monkeypatch)
+        item, _ = self._finished(fresh_db, tmp_path, "b.mkv")
+        sc = self._scanner({'codec': 'av1', 'height': 1080, 'framerate': 30})
+        assert qm.recheck_finished(sc, {}) == 0
+        assert fresh_db.get_queue_item(item)['status'] == 'completed'
+        qm.recheck_finished(sc, {})
+        assert sc.calls == 1
+
+    def test_profile_change_rechecks(self, fresh_db, monkeypatch, tmp_path):
+        """60 fps AV1 met a no-framerate profile; capping at 30 re-queues it."""
+        qm, prof = self._setup(fresh_db, monkeypatch)
+        prof['framerate'] = 0
+        item, _ = self._finished(fresh_db, tmp_path, "c.mkv")
+        sc = self._scanner({'codec': 'av1', 'height': 1080, 'framerate': 60})
+        assert qm.recheck_finished(sc, {}) == 0
+        prof['framerate'] = 30
+        assert qm.recheck_finished(sc, {}) == 1
+        assert fresh_db.get_queue_item(item)['status'] == 'pending'
+
+    def test_follows_container_change(self, fresh_db, monkeypatch, tmp_path):
+        qm, _ = self._setup(fresh_db, monkeypatch)
+        item = fresh_db.add_to_queue(file_path=str(tmp_path / "d.mp4"), profile_id=1,
+                                     status='completed')
+        (tmp_path / "d.mkv").write_bytes(b"x" * 10)
+        sc = self._scanner({'codec': 'av1', 'height': 1080, 'framerate': 60})
+        assert qm.recheck_finished(sc, {}) == 1
+        assert fresh_db.get_queue_item(item)['file_path'] == str(tmp_path / "d.mkv")
+
+    def test_budget(self, fresh_db, monkeypatch, tmp_path):
+        qm, _ = self._setup(fresh_db, monkeypatch)
+        for i in range(5):
+            self._finished(fresh_db, tmp_path, f"e{i}.mkv")
+        sc = self._scanner({'codec': 'av1', 'height': 1080, 'framerate': 30})
+        qm.recheck_finished(sc, {}, budget=2)
+        assert sc.calls == 2

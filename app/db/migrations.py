@@ -71,6 +71,10 @@ def _m7_profile_max_bitrate(cursor):
     _add_column(cursor, "profiles", "max_bitrate_kbps", "INTEGER DEFAULT 0")
 
 
+def _m8_queue_conformance_checked(cursor):
+    _add_column(cursor, "queue", "conformance_checked", "TEXT")
+
+
 MIGRATIONS = [
     (1, "users.token_version", _m1_token_version),
     (2, "drop unused sessions/api_keys tables", _m2_drop_unused_auth_tables),
@@ -79,6 +83,7 @@ MIGRATIONS = [
     (5, "external_connections.path_mappings", _m5_connection_path_mappings),
     (6, "target-quality (VMAF) encoding", _m6_target_quality),
     (7, "profiles.max_bitrate_kbps", _m7_profile_max_bitrate),
+    (8, "queue.conformance_checked", _m8_queue_conformance_checked),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]
