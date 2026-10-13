@@ -10,7 +10,7 @@ Prints one JSON line per file: {"file", "probs": {"2d","3d","live"}, "seconds"}.
 Measured 2026-10-13 on this library (8 frames/file, CPU, ~3.8 s/file):
 animated (2d+3d) vs live accuracy 91.2% on 80 folder-labelled files; deciding
 only when the winning side's probability >= 0.60 covered 85% of files at
-98.5% accuracy. 20/20 F:\movies titles classified plausibly (Shrek 2 and
+98.5% accuracy. 20/20 movie-folder titles classified plausibly (Shrek 2 and
 Encanto 3d, FernGully and Scooby-Doo 2d, Cats & Dogs live). VR180 fisheye
 frames and photoreal CGI are the weak spots.
 """
