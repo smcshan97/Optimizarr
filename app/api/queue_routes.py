@@ -400,7 +400,9 @@ def prioritize_queue(
 def get_queue_check_status(current_user: dict = Depends(get_current_user)):
     """Result of the last background queue check (for a passive status line)."""
     from app.queue_maintenance import last_check, interval_minutes
-    return {**last_check(), "interval_minutes": interval_minutes()}
+    from app.engine_health import problems_in_use
+    return {**last_check(), "interval_minutes": interval_minutes(),
+            "engine_problems": problems_in_use()}
 
 
 @router.get("/queue/auto-sort")

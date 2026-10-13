@@ -3818,3 +3818,110 @@ class TestFinishedConformanceSweep:
         sc = self._scanner({'codec': 'av1', 'height': 1080, 'framerate': 30})
         qm.recheck_finished(sc, {}, budget=2)
         assert sc.calls == 2
+
+
+class TestDontGrowSearch:
+    """Conversions pick the best quality that doesn't make the file bigger."""
+
+    @staticmethod
+    def _curve(q):
+        # Lean source: VMAF 95 needs q<=26, but q26 is 160% of the source;
+        # size drops ~8 points per q step, reaching <=100% at q>=34.
+        return (99 - q * 0.15, max(0.3, 1.6 - (q - 26) * 0.08), 40 - q * 0.2)
+
+    def test_size_limit_raises_q_until_it_fits(self):
+        from app.target_quality import search
+        r = search(self._curve, 15, 55, 28, target=95.0, max_size_ratio=1.0, max_iter=8)
+        assert r['size_limited'] and not r['met_target']
+        assert r['size_ratio'] <= 1.0
+        assert r['quality'] == 34                      # first q that fits
+        assert r['xpsnr'] == self._curve(34)[2]
+
+    def test_no_limit_stops_early_for_a_skip(self):
+        """Without the limit (source already meets its profile), a candidate
+        that misses VMAF while already bigger ends the search: the file will
+        be kept as the original, so more encodes would be wasted."""
+        from app.target_quality import search
+        r = search(self._curve, 15, 55, 28, target=95.0, max_iter=8)
+        assert not r['size_limited'] and not r['met_target']
+        assert r['size_ratio'] > 1.0 and list(r['evaluations']) == [28]
+
+    def test_limit_unused_when_already_small(self):
+        from app.target_quality import search
+        r = search(lambda q: (99 - q * 0.1, 0.4, 41.0), 15, 55, 28, target=95,
+                   max_size_ratio=1.0)
+        assert not r['size_limited'] and r['met_target']
+
+    def test_scores_parsed_from_one_pass(self, monkeypatch):
+        import app.target_quality as tq
+
+        class P:
+            def communicate(self, timeout=None):
+                return "", "[Parsed_libvmaf_7] VMAF score: 93.51\nXPSNR  y: 38.1234 u: 40.0"
+        monkeypatch.setattr(tq.subprocess, 'Popen', lambda *a, **k: P())
+        assert tq.quality_scores('d', 'r', 1920, 1080, lambda p: None) == (93.51, 38.1234)
+
+
+class TestPresetDefault:
+    def test_svt_auto_preset_is_6(self, monkeypatch):
+        cmd = TestProfileConformance._cmd(None, monkeypatch)
+        assert cmd[cmd.index('--encoder-preset') + 1] == '6'
+        cmd = TestProfileConformance._cmd(None, monkeypatch, preset='4')
+        assert cmd[cmd.index('--encoder-preset') + 1] == '4'
+        x265 = TestProfileConformance._cmd(None, monkeypatch, codec='h265', encoder='x265_10bit')
+        assert '--encoder-preset' not in x265            # HandBrake's own default
+
+
+class TestFallbackNotices:
+    def test_notice_saved_on_completion(self, fresh_db, monkeypatch, tmp_path):
+        import app.encoder as enc
+        monkeypatch.setattr(enc, 'db', fresh_db)
+        src = tmp_path / "n.mkv"
+        src.write_bytes(b"o" * 1000)
+        (tmp_path / "n_optimized.mkv").write_bytes(b"e" * 500)
+        job, qid = TestDestinationCollision._job(None, enc, fresh_db, src)
+        job._note("AI upscale (rtxvsr ULTRA) failed — encoded without upscaling; see the log")
+        job._note("AI upscale (rtxvsr ULTRA) failed — encoded without upscaling; see the log")
+        job._finalize_encoding()
+        row = fresh_db.get_queue_item(qid)
+        assert row['status'] == 'completed'
+        assert row['notice'].count('AI upscale') == 1
+
+    def test_no_notice_when_clean(self, fresh_db, monkeypatch, tmp_path):
+        import app.encoder as enc
+        monkeypatch.setattr(enc, 'db', fresh_db)
+        src = tmp_path / "c.mkv"
+        src.write_bytes(b"o" * 1000)
+        (tmp_path / "c_optimized.mkv").write_bytes(b"e" * 500)
+        job, qid = TestDestinationCollision._job(None, enc, fresh_db, src)
+        job._finalize_encoding()
+        assert fresh_db.get_queue_item(qid)['notice'] is None
+
+
+class TestEngineHealth:
+    def test_output_checks(self, monkeypatch, tmp_path):
+        import app.engine_health as eh
+        f = tmp_path / "o.mkv"
+        f.write_bytes(b"x")
+        monkeypatch.setattr(eh, '_probe', lambda p: {'width': 852, 'height': 480, 'frames': 48})
+        assert eh._check_output(str(f), 852, 480) is None
+        assert 'no output' in eh._check_output(None, 852, 480)
+        monkeypatch.setattr(eh, '_probe', lambda p: {'width': 852, 'height': 480, 'frames': 3})
+        assert 'frames' in eh._check_output(str(f), 852, 480)
+        monkeypatch.setattr(eh, '_probe', lambda p: {'width': 426, 'height': 240, 'frames': 48})
+        assert '426x240' in eh._check_output(str(f), 852, 480)
+
+    def test_failure_notifies_once_and_surfaces_when_in_use(self, fresh_db, monkeypatch, tmp_path):
+        import app.engine_health as eh
+        monkeypatch.setattr(eh, 'db', fresh_db)
+        monkeypatch.setattr(eh, 'make_clip', lambda work: tmp_path / "clip.mkv")
+        monkeypatch.setattr(eh, 'engines_to_test', lambda only=None: ['rtxvsr'])
+        monkeypatch.setattr(eh, '_test_upscaler', lambda key, clip: 'produced no output')
+        sent = []
+        monkeypatch.setattr(eh, '_notify_failure', lambda k, m: sent.append(k))
+        eh.run_self_test()
+        eh.run_self_test()
+        assert sent == ['rtxvsr']                       # only on the pass->fail edge
+        assert eh.load()['rtxvsr']['ok'] is False
+        monkeypatch.setattr(eh, 'engines_in_use', lambda: ['handbrake', 'rtxvsr'])
+        assert eh.problems_in_use() == [{'engine': 'rtxvsr', 'message': 'produced no output'}]

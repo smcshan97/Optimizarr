@@ -261,6 +261,7 @@ class QueueItemResponse(BaseModel):
     created_at: Optional[str]
     upscale_plan: Optional[str] = None
     stereo_plan: Optional[str] = None
+    notice: Optional[str] = None
 
 
 class QueueUpdateRequest(BaseModel):

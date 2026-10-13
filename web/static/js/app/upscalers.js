@@ -22,6 +22,7 @@ function renderUpscalerCards(info) {
     const engines = info.engines || {};
     const defs = { ...engines, ...(info.definitions || {}) };
     const det = { ...((info.detection && info.detection.details) || {}), ...engines };
+    const health = info.health || {};
 
     container.innerHTML = Object.entries(defs).map(([key, up]) => {
         const d = det[key] || {};
@@ -73,6 +74,14 @@ function renderUpscalerCards(info) {
         const statusBadge = installed || dlStatus === 'installed'
             ? '<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">Installed</span>'
             : '<span class="px-2 py-0.5 bg-gray-600 text-gray-400 text-xs rounded">Not Installed</span>';
+        // Daily self-test result (a real 2-second clip through the engine)
+        const h = health[key];
+        const ago = h ? Math.round((Date.now() / 1000 - h.at) / 3600) : 0;
+        const healthLine = (installed && h)
+            ? (h.ok
+                ? `<p class="text-xs text-green-400 mt-1" title="A test clip was run through this engine">✓ Self-test passed ${ago < 1 ? 'within the hour' : ago + ' h ago'} (${h.seconds}s)</p>`
+                : `<p class="text-xs mt-1" style="color:var(--warning)">⚠ Self-test failed ${ago < 1 ? 'within the hour' : ago + ' h ago'}: ${_esc(h.message)}</p>`)
+            : '';
 
         return `
             <div class="p-4 bg-gray-700 rounded-lg" id="upscaler-card-${key}">
@@ -85,6 +94,7 @@ function renderUpscalerCards(info) {
                 </div>
                 <p class="text-xs text-gray-400 mt-1">${up.description}</p>
                 <p class="text-xs text-gray-500">Best for: ${up.best_for}</p>
+                ${healthLine}
                 ${actionBtn}
                 ${isEngine && installed ? `
                 <label class="mt-2 flex items-center gap-2 text-xs text-gray-300">

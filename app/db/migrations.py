@@ -75,6 +75,13 @@ def _m8_queue_conformance_checked(cursor):
     _add_column(cursor, "queue", "conformance_checked", "TEXT")
 
 
+def _m9_queue_xpsnr_and_notice(cursor):
+    _add_column(cursor, "queue", "tq_xpsnr", "REAL")
+    # Non-fatal problems on an otherwise finished job ("upscale failed —
+    # encoded without it"), shown on the queue row instead of being silent.
+    _add_column(cursor, "queue", "notice", "TEXT")
+
+
 MIGRATIONS = [
     (1, "users.token_version", _m1_token_version),
     (2, "drop unused sessions/api_keys tables", _m2_drop_unused_auth_tables),
@@ -84,6 +91,7 @@ MIGRATIONS = [
     (6, "target-quality (VMAF) encoding", _m6_target_quality),
     (7, "profiles.max_bitrate_kbps", _m7_profile_max_bitrate),
     (8, "queue.conformance_checked", _m8_queue_conformance_checked),
+    (9, "queue.tq_xpsnr + queue.notice", _m9_queue_xpsnr_and_notice),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]

@@ -10,7 +10,15 @@ clean Blu-ray and a noisy TV rip each get the setting they need instead of
 one fixed CRF for everything.
 
 The same samples also predict the output size, so a file that wouldn't
-shrink enough is skipped before the full encode.
+shrink enough is skipped before the full encode — or, for a file that must
+be converted anyway (it doesn't meet its profile), the quality is raised
+until the output is no bigger than the source ("don't grow"). Measured on
+this library: the median queued file is a lean 1.8 Mbps H.264 that grew
+53-80% at a fixed CRF 28.
+
+XPSNR is scored in the same pass and logged/stored next to VMAF: VMAF can be
+inflated by sharpening, XPSNR (ISO/IEC 23002-7) is a plain perceptually
+weighted PSNR, so a big disagreement between them is worth a look.
 """
 import os
 import re
@@ -71,8 +79,15 @@ def cut_samples(source: str, work: Path, duration: float,
 
 def vmaf_score(distorted: Path, reference: Path, width: int, height: int,
                register: Callable) -> Optional[float]:
-    """Mean VMAF of ``distorted`` against ``reference`` (scaled to the
-    reference size; both compared as 10-bit so bit depth doesn't skew it).
+    """Mean VMAF only (see quality_scores)."""
+    return quality_scores(distorted, reference, width, height, register)[0]
+
+
+def quality_scores(distorted: Path, reference: Path, width: int, height: int,
+                   register: Callable) -> Tuple[Optional[float], Optional[float]]:
+    """(mean VMAF, XPSNR luma dB) of ``distorted`` against ``reference`` in
+    one decode (scaled to the reference size; both compared as 10-bit so bit
+    depth doesn't skew it).
 
     Frames are paired by ORDER, not timestamp: libvmaf syncs on pts, and
     HandBrake re-times irregular source timestamps slightly, which paired
@@ -80,9 +95,9 @@ def vmaf_score(distorted: Path, reference: Path, width: int, height: int,
     """
     threads = max(1, (os.cpu_count() or 4) // 2)
     graph = (f"[0:v]scale={width}:{height}:flags=bicubic,format=yuv420p10le,"
-             f"setpts=N/(25*TB)[d];"
-             f"[1:v]format=yuv420p10le,setpts=N/(25*TB)[r];"
-             f"[d][r]libvmaf=n_threads={threads}")
+             f"setpts=N/(25*TB),split[d][d2];"
+             f"[1:v]format=yuv420p10le,setpts=N/(25*TB),split[r][r2];"
+             f"[d][r]libvmaf=n_threads={threads};[d2][r2]xpsnr")
     proc = subprocess.Popen(
         ["ffmpeg", "-hide_banner", "-i", str(distorted), "-i", str(reference),
          "-lavfi", graph, "-f", "null", "-"],
@@ -94,7 +109,8 @@ def vmaf_score(distorted: Path, reference: Path, width: int, height: int,
     finally:
         register(None)
     m = re.search(r"VMAF score:\s*([\d.]+)", err or "")
-    return float(m.group(1)) if m else None
+    x = re.search(r"XPSNR\s+y:\s*([\d.]+)", err or "")
+    return (float(m.group(1)) if m else None, float(x.group(1)) if x else None)
 
 
 def _run(cmd: list, register: Callable, timeout: int) -> int:
@@ -110,14 +126,20 @@ def _run(cmd: list, register: Callable, timeout: int) -> int:
         register(None)
 
 
-def search(evaluate: Callable[[int], Optional[Tuple[float, float]]],
+def search(evaluate: Callable[[int], Optional[Tuple]],
            lo: int, hi: int, start: int, target: float,
-           max_iter: int = MAX_ITERATIONS) -> Dict:
+           max_iter: int = MAX_ITERATIONS,
+           max_size_ratio: Optional[float] = None) -> Dict:
     """Largest quality value whose VMAF >= ``target``.
 
-    ``evaluate(q)`` returns (vmaf, size_ratio) or None on failure. VMAF falls
-    as q rises, so this is a binary search on a monotonic function, started
-    at the profile's own value and bounded to ``max_iter`` evaluations.
+    ``evaluate(q)`` returns (vmaf, size_ratio[, xpsnr]) or None on failure.
+    VMAF falls as q rises, so this is a binary search on a monotonic
+    function, started at the profile's own value and bounded to
+    ``max_iter`` evaluations.
+
+    ``max_size_ratio`` ("don't grow"): if the chosen value's output would be
+    bigger than that fraction of the source, keep raising q (smaller, lower
+    quality) to the first value that fits — size falls as q rises too.
     """
     seen: Dict[int, Tuple[float, float]] = {}
     start = max(lo, min(hi, start))
@@ -161,16 +183,55 @@ def search(evaluate: Callable[[int], Optional[Tuple[float, float]]],
         chosen = min(seen) if seen else start          # closest we could get
     else:
         chosen = best_ok
-    vmaf, ratio = seen.get(chosen, (None, None))
-    return {"quality": chosen, "vmaf": vmaf, "size_ratio": ratio,
-            "met_target": best_ok is not None, "evaluations": seen}
+    size_limited = False
+    if max_size_ratio is not None and chosen in seen and seen[chosen][1] > max_size_ratio:
+        chosen = _fit_size(evaluate, seen, chosen, hi, max_size_ratio, max_iter)
+        size_limited = True
+    res = seen.get(chosen, (None, None))
+    return {"quality": chosen, "vmaf": res[0], "size_ratio": res[1],
+            "xpsnr": res[2] if len(res) > 2 else None,
+            "met_target": best_ok is not None and not size_limited,
+            "size_limited": size_limited, "evaluations": seen}
+
+
+def _fit_size(evaluate, seen: Dict, too_big: int, hi: int, limit: float,
+              max_iter: int) -> int:
+    """Smallest q above ``too_big`` whose size ratio <= ``limit`` (binary
+    search, reusing evaluations already made). If nothing fits within the
+    budget, the q with the smallest output found."""
+    fits = [q for q, r in seen.items() if q > too_big and r[1] <= limit]
+    low, high = too_big, (min(fits) if fits else None)
+    for _ in range(max_iter):
+        if high is not None and high - low <= 1:
+            break
+        if high is not None:
+            q = (low + high) // 2
+        else:
+            q = min(hi, low + max(4, (hi - low) // 2))
+        if q in seen:
+            res = seen[q]
+        else:
+            res = evaluate(q)
+            if res is None:
+                break
+            seen[q] = res
+        if res[1] <= limit:
+            high = q
+        else:
+            low = q
+            if q == hi:
+                break
+    if high is not None:
+        return high
+    return min(seen, key=lambda k: (seen[k][1], -k)) if seen else too_big
 
 
 def find_quality(*, source: str, duration: float, width: int, height: int,
                  hb_encoder: str, start_quality: int, target: float,
                  encode_sample: Callable[[Path, int, Path], bool],
                  register: Callable,
-                 progress: Callable[[float], None]) -> Optional[Dict]:
+                 progress: Callable[[float], None],
+                 max_size_ratio: Optional[float] = None) -> Optional[Dict]:
     """Run the whole search for one file. None = not applicable / failed
     (the caller then encodes with the profile's own quality)."""
     rng = quality_range(hb_encoder)
@@ -186,25 +247,30 @@ def find_quality(*, source: str, duration: float, width: int, height: int,
         step = [0]
 
         def evaluate(q: int):
-            scores, out_bytes = [], 0
+            scores, xps, out_bytes = [], [], 0
             for i, ref in enumerate(samples):
                 out = work / f"enc_{q}_{i}.mkv"
                 if not encode_sample(ref, q, out) or not out.exists():
                     return None
                 out_bytes += out.stat().st_size
-                score = vmaf_score(out, ref, width, height, register)
+                score, xp = quality_scores(out, ref, width, height, register)
                 if score is None:
                     return None
                 scores.append(score)
+                if xp is not None:
+                    xps.append(xp)
             step[0] += 1
-            progress(min(95.0, step[0] / MAX_ITERATIONS * 100))
+            progress(min(95.0, step[0] / (MAX_ITERATIONS * 2) * 100))
             vmaf = sum(scores) / len(scores)
+            xpsnr = sum(xps) / len(xps) if xps else None
             optimizarr_logger.app_logger.info(
-                "Target quality: q=%d -> VMAF %.2f (samples %s), size %.0f%% of source video",
-                q, vmaf, ", ".join(f"{s:.1f}" for s in scores), out_bytes / ref_bytes * 100)
-            return vmaf, out_bytes / ref_bytes
+                "Target quality: q=%d -> VMAF %.2f (samples %s), XPSNR %s, size %.0f%% of source video",
+                q, vmaf, ", ".join(f"{s:.1f}" for s in scores),
+                f"{xpsnr:.2f} dB" if xpsnr is not None else "n/a", out_bytes / ref_bytes * 100)
+            return vmaf, out_bytes / ref_bytes, xpsnr
 
-        result = search(evaluate, rng[0], rng[1], start_quality, target)
+        result = search(evaluate, rng[0], rng[1], start_quality, target,
+                        max_size_ratio=max_size_ratio)
         if not result["evaluations"]:
             return None
         progress(100.0)

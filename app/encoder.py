@@ -42,6 +42,13 @@ def max_conversion_growth_percent() -> float:
         return 10.0
 
 
+# SVT-AV1 preset when a profile leaves it on Auto. HandBrake's own default is
+# 5; measured on this library (SVT-AV1 4.1, i7-9700K) preset 6 was ~1.3x
+# faster for files ~6-13% bigger at the same CRF — with per-file target
+# quality the difference lands in size, not visible quality.
+DEFAULT_SVT_AV1_PRESET = "6"
+
+
 def bitrate_cap_encopts(hb_encoder: str, kbps: int) -> Optional[str]:
     """Encoder option string capping video bitrate at ``kbps``, or None
     when HandBrake gives no per-encoder way to (hardware encoders)."""
@@ -81,6 +88,10 @@ class EncodingJob:
         # Ways the source falls short of the profile (scanner.unmet_targets);
         # a source that meets it is only re-encoded if that saves space.
         self._unmet: list = []
+        # Non-fatal fallbacks this job took, saved to queue.notice so a
+        # finished row says "upscale failed — encoded without it" instead of
+        # looking like a normal success (RTX VSR failed silently for weeks).
+        self._notices: list = []
         # Megapixel-frames of AI work actually performed, recorded to history
         # so the estimator learns seconds-per-megapixel-frame. Stays 0 unless
         # an upscale genuinely ran — a failed upscale that fell back to a
@@ -172,9 +183,12 @@ class EncodingJob:
             quality = getattr(self, '_tq_quality', None) or self.profile['quality']
         cmd.extend(['--quality', str(quality)])
         
-        # Preset
-        if self.profile.get('preset'):
-            cmd.extend(['--encoder-preset', self.profile['preset']])
+        # Preset (Auto = our measured default for SVT-AV1, HandBrake's otherwise)
+        preset = self.profile.get('preset')
+        if not preset and hb_encoder.startswith('svt_av1'):
+            preset = DEFAULT_SVT_AV1_PRESET
+        if preset:
+            cmd.extend(['--encoder-preset', str(preset)])
         
         # Resolution — a CEILING: --width/--height upscaled smaller sources
         # to the profile size (a 720p file came out 1080p and bigger).
@@ -239,6 +253,7 @@ class EncodingJob:
             optimizarr_logger.app_logger.warning(
                 "%s has no bitrate cap option in HandBrake — the %d kbps limit "
                 "isn't enforced for this encode", hb_encoder, cap)
+            self._note(f"Bitrate cap not enforced — {hb_encoder} has no cap option")
         if encopts:
             cmd.extend(['--encopts', ':'.join(encopts)])
 
@@ -530,6 +545,14 @@ class EncodingJob:
                         current_memory_mb=process_resources['memory_mb']
                     )
 
+    def _note(self, text: str):
+        notes = self.__dict__.setdefault('_notices', [])
+        if text not in notes:
+            notes.append(text)
+
+    def _notice_text(self) -> Optional[str]:
+        return "; ".join(getattr(self, '_notices', None) or []) or None
+
     def _unmet_targets(self) -> list:
         """What the source falls short of in this profile (see
         scanner.unmet_targets). Webhook/sync rows only carry Sonarr/Radarr's
@@ -652,16 +675,30 @@ class EncodingJob:
             hb_encoder=hb_encoder, start_quality=int(self.profile['quality']),
             target=target, encode_sample=encode_sample, register=register,
             progress=lambda pct: db.update_queue_item(self.queue_item_id,
-                                                      phase_progress=round(pct, 1)))
-        if self._manually_stopped or not result:
+                                                      phase_progress=round(pct, 1)),
+            # Must convert anyway (doesn't meet the profile)? Then pick the
+            # best quality that doesn't make the file bigger.
+            max_size_ratio=1.0 if self._unmet else None)
+        if self._manually_stopped:
+            return None
+        if not result:
+            if duration >= tq.MIN_DURATION and width > 0:
+                self._note("Quality search failed — used the profile's fixed quality")
             return None
         self._tq_quality = int(result['quality'])
         db.update_queue_item(self.queue_item_id, tq_quality=self._tq_quality,
-                             tq_vmaf=result['vmaf'])
+                             tq_vmaf=result['vmaf'], tq_xpsnr=result.get('xpsnr'))
+        if result.get('size_limited'):
+            how = ", size-limited so the file doesn't grow"
+        elif not result['met_target']:
+            how = ", best reachable"
+        else:
+            how = ""
         optimizarr_logger.app_logger.info(
-            "Target VMAF %.1f: using quality %d (VMAF %.2f%s) for %s", target,
+            "Target VMAF %.1f: using quality %d (VMAF %.2f, XPSNR %s%s) for %s", target,
             self._tq_quality, result['vmaf'] or 0,
-            '' if result['met_target'] else ', best reachable', Path(source).name)
+            f"{result['xpsnr']:.2f} dB" if result.get('xpsnr') else "n/a",
+            how, Path(source).name)
 
         ratio = result.get('size_ratio')
         min_pct = min_savings_percent()
@@ -813,7 +850,7 @@ class EncodingJob:
 
         db.update_queue_item(
             self.queue_item_id,
-            status='processing',
+            status='processing', notice=None,
             started_at=utc_now().strftime('%Y-%m-%d %H:%M:%S')
         )
 
@@ -923,6 +960,7 @@ class EncodingJob:
                     "Stereo conversion failed for %s — encoding original file instead",
                     original_input,
                 )
+                self._note("3D conversion failed — encoded without it")
 
         if self._manually_stopped:
             # Stopped during the stereo phase — don't start an upscale/encode
@@ -1001,6 +1039,8 @@ class EncodingJob:
                     "Upscale failed for %s — encoding original file instead",
                     original_input,
                 )
+                self._note(f"AI upscale ({upscaler_key} {model}) failed — encoded without "
+                           f"upscaling; see the log")
 
         # ── Target quality: choose --quality from a VMAF goal (plain encodes) ─
         if not self._preprocessed and float(self.profile.get('target_vmaf') or 0) > 0:
@@ -1345,6 +1385,7 @@ class EncodingJob:
                     self.queue_item_id, status='kept_original', progress=100.0,
                     phase=None, phase_progress=0.0, phase_eta_seconds=0,
                     eta_seconds=0, current_fps=0, error_message=msg,
+                    notice=self._notice_text(),
                     completed_at=utc_now().strftime('%Y-%m-%d %H:%M:%S'))
                 optimizarr_logger.app_logger.info("%s: %s", input_path.name, msg)
                 from app.devlog import devlog
@@ -1432,6 +1473,7 @@ class EncodingJob:
             db.update_queue_item(
                 self.queue_item_id,
                 status='completed',
+                notice=self._notice_text(),
                 progress=100.0,
                 current_fps=0,
                 eta_seconds=0,

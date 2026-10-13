@@ -31,16 +31,22 @@ async function loadQueueCheckStatus() {
     const el = document.getElementById('queueCheckStatus');
     if (!el) return;
     const res = await apiRequest('/queue/check-status');
-    if (!res || !res.at) { el.textContent = ''; return; }
+    const probs = (res && res.engine_problems) || [];
+    const warn = probs.length
+        ? ` ⚠ ${probs.map(p => `${p.engine} failed its self-test`).join(', ')}`
+        : '';
+    el.style.color = probs.length ? 'var(--warning)' : 'var(--text-muted)';
+    if (!res || !res.at) { el.textContent = warn.trim(); el.title = probs.map(p => `${p.engine}: ${p.message}`).join('\n'); return; }
     const mins = Math.max(0, Math.round((Date.now() / 1000 - res.at) / 60));
     const ago = mins < 1 ? 'just now' : mins < 60 ? `${mins} min ago` : `${Math.round(mins / 60)} h ago`;
     const parts = Object.entries(res.counts || {})
         .filter(([k, v]) => v && _QUEUE_CHECK_LABELS[k])
         .map(([k, v]) => `${v} ${_QUEUE_CHECK_LABELS[k]}`);
-    el.textContent = `Queue checked ${ago}` + (parts.length ? ` — ${parts.join(', ')}` : ' — all good');
-    el.title = res.interval_minutes
+    el.textContent = `Queue checked ${ago}` + (parts.length ? ` — ${parts.join(', ')}` : ' — all good') + warn;
+    el.title = (res.interval_minutes
         ? `Checked automatically every ${res.interval_minutes} min and after each encode`
-        : 'Checked automatically after each encode';
+        : 'Checked automatically after each encode')
+        + probs.map(p => `\n${p.engine}: ${p.message}`).join('');
 }
 
 async function loadQueue() {
@@ -392,7 +398,7 @@ function displayQueueItems(items) {
         } else if (item.status === 'kept_original') {
             progressBar = `
                 <div class="flex items-center gap-2">
-                    <span class="text-teal-300 text-xs truncate" title="${_esc(item.error_message || '')}">${(item.error_message || '').startsWith('Skipped') ? 'Skipped — already efficient' : "Kept original — encode wasn't smaller"}</span>
+                    <span class="text-teal-300 text-xs truncate" title="${_esc(item.error_message || '')}">${(item.error_message || '').startsWith('Skipped') ? 'Skipped — already efficient' : ((item.error_message || '').includes("doesn't meet the profile") ? 'Kept original — conversion grew too much' : "Kept original — encode wasn't smaller")}</span>
                 </div>`;
         } else if (item.status === 'cancelled') {
             progressBar = `
@@ -461,7 +467,7 @@ function displayQueueItems(items) {
                 </td>
                 <td class="py-2 px-1 cursor-grab text-gray-500 text-center drag-handle" title="Drag to reorder">⠿</td>
                 <td class="py-2 px-2 max-w-[220px] truncate" title="${tooltip}">
-                    <span class="text-gray-100">${fileName}</span>${item.upscale_plan ? ' <span class="text-blue-400 text-xs" title="AI upscaling queued">🔼</span>' : ''}${item.stereo_plan ? ' <span class="text-purple-400 text-xs" title="3D conversion queued">🎥</span>' : ''}${item.retry_count > 0 ? ` <span class="text-xs" style="color:var(--warning)" title="Retried ${item.retry_count} time(s)">↻${item.retry_count}</span>` : ''}
+                    <span class="text-gray-100">${fileName}</span>${item.upscale_plan ? ' <span class="text-blue-400 text-xs" title="AI upscaling queued">🔼</span>' : ''}${item.stereo_plan ? ' <span class="text-purple-400 text-xs" title="3D conversion queued">🎥</span>' : ''}${item.retry_count > 0 ? ` <span class="text-xs" style="color:var(--warning)" title="Retried ${item.retry_count} time(s)">↻${item.retry_count}</span>` : ''}${item.notice ? ` <span class="text-xs" style="color:var(--warning)" title="${_esc(item.notice)}">⚠</span>` : ''}
                 </td>
                 <td class="py-2 px-2"><span class="${codecColor} text-xs font-medium">${codec.toUpperCase()}</span></td>
                 <td class="py-2 px-2 text-xs text-gray-300">${resolution}${fps !== '-' ? ` <span class="text-gray-500">@ ${fps}fps</span>` : ''}</td>

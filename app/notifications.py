@@ -163,6 +163,18 @@ def notify_encode_failed(file_path: str, error: str, profile_name: str = ''):
     _fire('encode_failed', payload)
 
 
+def notify_engine_failed(engine: str, error: str):
+    """An engine's self-test went from passing to failing. Sent on the
+    encode_failed channel: jobs needing it will fall back or fail."""
+    payload = {
+        'event': 'encode_failed',
+        'title': '⚠️ Engine Self-Test Failed',
+        'message': f"**{engine}** failed its self-test — jobs using it will fall back or fail.",
+        'fields': {'Engine': engine, 'Error': error[:200]},
+    }
+    _fire('encode_failed', payload)
+
+
 def notify_queue_empty():
     """Fire queue_empty notification."""
     payload = {

@@ -97,6 +97,10 @@ async def lifespan(app: FastAPI):
     from app.queue_maintenance import start_background_checker
     start_background_checker()
 
+    # Engine self-test (real 2-second clip through each installed engine)
+    from app.engine_health import start_health_checker
+    start_health_checker()
+
     # Background: backfill missing video durations so fastest/slowest-first
     # learns real encode-time estimates (gentle, paced — see scanner).
     from app.scanner import start_duration_backfill

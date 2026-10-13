@@ -401,6 +401,8 @@ def _download_worker(key: str):
             rtx_vsr.install(state)
             state.update(status="installed", progress=100,
                          message=f"✓ {upscaler['name']} ready ({state.get('version')})")
+            from app.engine_health import test_in_background
+            test_in_background([key])
         except Exception as e:
             state.update(status="error", error=str(e), message=f"Install failed: {e}")
             optimizarr_logger.app_logger.error("RTX VSR install failed: %s", e)
@@ -534,6 +536,8 @@ def _download_worker(key: str):
         state["version"] = tag
         state["message"] = f"✓ {upscaler['name']} {tag} installed to {install_dir}"
         optimizarr_logger.app_logger.info("Upscaler installed: %s %s", key, tag)
+        from app.engine_health import test_in_background
+        test_in_background([key])
 
     except Exception as e:
         state["status"] = "error"
@@ -686,8 +690,10 @@ def get_upscaler_info() -> Dict:
         engine_pref = _db.get_setting("upscale_engine", "auto")
     except Exception:
         engine_pref = "auto"
+    from app.engine_health import load as _health
     return {
         "engine_pref": engine_pref,
+        "health": _health(),
         "engines": {k: {
             "name": v["name"],
             "description": v["description"],
