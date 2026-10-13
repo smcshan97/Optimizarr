@@ -93,6 +93,10 @@ async def lifespan(app: FastAPI):
     from app.upscaler import start_update_checker
     start_update_checker()
 
+    # Warn (with the exact pip command) about missing requirements
+    from app.requirements_check import warn_missing
+    warn_missing()
+
     # Periodic queue upkeep (vanished files, stale specs, remembered sort)
     from app.queue_maintenance import start_background_checker
     start_background_checker()

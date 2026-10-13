@@ -75,6 +75,17 @@ def list_connections(current_user: dict = Depends(get_current_user)):
     return [public_connection(c) for c in conns]
 
 
+def _require_crypto():
+    """Fail with a readable reason, not a bare 500, when the encryption
+    package is missing (a system-Python install without cryptography made
+    every connection save crash silently)."""
+    from app.external_connections import _get_fernet, MissingDependency
+    try:
+        _get_fernet()
+    except MissingDependency as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/connections", status_code=status.HTTP_201_CREATED)
 def create_connection(
     data: dict,
@@ -88,6 +99,7 @@ def create_connection(
     from app.external_connections import (
         encrypt_api_key, public_connection, connection_manager
     )
+    _require_crypto()
 
     app_type = data.get("app_type", "").lower()
     if app_type not in ("sonarr", "radarr", "stash"):
@@ -100,7 +112,8 @@ def create_connection(
     if not raw_key:
         raise HTTPException(status_code=400, detail="api_key is required")
 
-    base_url = data.get("base_url", "").strip()
+    from app.external_connections import normalize_base_url
+    base_url = normalize_base_url(data.get("base_url", ""))
     if not base_url:
         raise HTTPException(status_code=400, detail="base_url is required")
 
@@ -153,6 +166,24 @@ def create_connection(
     }
 
 
+@router.post("/connections/test")
+def test_connection_settings(data: dict, current_user: dict = Depends(get_current_admin_user)):
+    """Test an unsaved connection (the form's Test button) — nothing is
+    saved. The button used to POST to create, which saved a connection
+    named "_test_" whenever the test passed."""
+    from app.external_connections import (
+        connection_manager, encrypt_api_key, normalize_base_url)
+    _require_crypto()
+    app_type = (data or {}).get("app_type", "").lower()
+    base_url = normalize_base_url((data or {}).get("base_url", ""))
+    raw_key = ((data or {}).get("api_key") or "").strip()
+    if app_type not in ("sonarr", "radarr", "stash") or not base_url or not raw_key:
+        raise HTTPException(status_code=400, detail="app_type, base_url and api_key are required")
+    return connection_manager.test_connection(
+        {"app_type": app_type, "base_url": base_url,
+         "api_key_encrypted": encrypt_api_key(raw_key)})
+
+
 @router.post("/connections/detect-mappings")
 def detect_path_mappings(data: dict, current_user: dict = Depends(get_current_admin_user)):
     """Suggest remote->local path mappings from the Docker container that
@@ -185,6 +216,9 @@ def update_connection(
     for field in ("name", "base_url", "enabled", "show_in_stats", "app_type"):
         if field in data:
             update_kwargs[field] = data[field]
+    if "base_url" in update_kwargs:
+        from app.external_connections import normalize_base_url
+        update_kwargs["base_url"] = normalize_base_url(update_kwargs["base_url"])
     if "sync_interval_hours" in data:
         update_kwargs["sync_interval_hours"] = int(data["sync_interval_hours"] or 0)
     if "path_mappings" in data:
@@ -197,6 +231,7 @@ def update_connection(
     # Only re-encrypt if a new key was actually supplied
     new_key = data.get("api_key", "").strip()
     if new_key:
+        _require_crypto()
         update_kwargs["api_key_encrypted"] = encrypt_api_key(new_key)
 
     db.update_external_connection(conn_id, **update_kwargs)

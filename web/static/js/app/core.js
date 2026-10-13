@@ -29,8 +29,15 @@ function logout() {
 }
 
 // API request helper
+// Returns parsed JSON, or null on failure. Failed POST/PUT/PATCH/DELETE
+// requests show the server's reason as an error message — they used to
+// fail silently ("hit save and got nada"). Pass quiet: true when the caller
+// shows the error itself; the last reason is kept in apiRequest.lastError.
 async function apiRequest(endpoint, options = {}) {
     const token = getToken();
+    const { quiet, ...fetchOptions } = options;
+    const method = (fetchOptions.method || 'GET').toUpperCase();
+    apiRequest.lastError = null;
     
     const defaultOptions = {
         headers: {
@@ -42,10 +49,10 @@ async function apiRequest(endpoint, options = {}) {
     try {
         const response = await fetch(`${API_BASE}${endpoint}`, {
             ...defaultOptions,
-            ...options,
+            ...fetchOptions,
             headers: {
                 ...defaultOptions.headers,
-                ...options.headers
+                ...fetchOptions.headers
             }
         });
         
@@ -58,13 +65,22 @@ async function apiRequest(endpoint, options = {}) {
             const errorText = await response.text();
             let detail = `HTTP ${response.status}`;
             try { detail = JSON.parse(errorText).detail || detail; } catch {}
+            if (typeof detail !== 'string') detail = JSON.stringify(detail);
             console.error(`API error ${endpoint}: ${detail}`);
+            apiRequest.lastError = detail;
+            if (method !== 'GET' && !quiet && typeof showMessage === 'function') {
+                showMessage(`✗ ${detail}`, 'error');
+            }
             return null;
         }
         
         return response.json();
     } catch (err) {
         console.error(`API request failed ${endpoint}:`, err);
+        apiRequest.lastError = `Couldn't reach Optimizarr (${err.message || err})`;
+        if (method !== 'GET' && !quiet && typeof showMessage === 'function') {
+            showMessage(`✗ ${apiRequest.lastError}`, 'error');
+        }
         return null;
     }
 }

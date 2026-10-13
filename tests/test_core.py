@@ -3925,3 +3925,70 @@ class TestEngineHealth:
         assert eh.load()['rtxvsr']['ok'] is False
         monkeypatch.setattr(eh, 'engines_in_use', lambda: ['handbrake', 'rtxvsr'])
         assert eh.problems_in_use() == [{'engine': 'rtxvsr', 'message': 'produced no output'}]
+
+
+class TestConnectionSave:
+    """Radarr 'hit save and got nada': missing cryptography + hidden errors."""
+
+    def test_normalize_base_url(self):
+        from app.external_connections import normalize_base_url as n
+        assert n("localhost:7878") == "http://localhost:7878"
+        assert n(" http://localhost:7878/ ") == "http://localhost:7878"
+        assert n("http://localhost:7878/api/v3") == "http://localhost:7878"
+        assert n("https://stash.lan/graphql") == "https://stash.lan"
+        assert n("http://nas:7878/radarr") == "http://nas:7878/radarr"   # URL base kept
+
+    def test_missing_cryptography_is_a_readable_error(self, monkeypatch):
+        import builtins
+        import pytest
+        from fastapi import HTTPException
+        from app.api import connection_routes
+        real_import = builtins.__import__
+
+        def no_crypto(name, *a, **k):
+            if name.startswith("cryptography"):
+                raise ImportError(name)
+            return real_import(name, *a, **k)
+        monkeypatch.setattr(builtins, "__import__", no_crypto)
+        with pytest.raises(HTTPException) as e:
+            connection_routes.create_connection(
+                {"app_type": "radarr", "base_url": "localhost:7878", "api_key": "k", "name": "R"},
+                current_user={})
+        assert e.value.status_code == 500
+        assert "pip install" in e.value.detail and "cryptography" in e.value.detail
+
+    def test_test_endpoint_saves_nothing(self, fresh_db, monkeypatch):
+        import pytest
+        pytest.importorskip("cryptography")
+        from app.api import connection_routes
+        from app.external_connections import connection_manager
+        monkeypatch.setattr(connection_routes, "db", fresh_db)
+        seen = {}
+
+        def fake_test(conn):
+            seen.update(conn)
+            return {"ok": True, "app_name": "Radarr", "version": "6"}
+        monkeypatch.setattr(connection_manager, "test_connection", fake_test)
+        r = connection_routes.test_connection_settings(
+            {"app_type": "radarr", "base_url": "localhost:7878", "api_key": "k"}, current_user={})
+        assert r["ok"] and seen["base_url"] == "http://localhost:7878"
+        assert fresh_db.get_external_connections() == []
+
+    def test_http_error_message_not_masked(self, monkeypatch):
+        """A requests Response is falsy for 4xx/5xx — 404 used to read 'HTTP error'."""
+        import requests
+        from app.external_connections import connection_manager
+        resp = requests.Response()
+        resp.status_code = 404
+
+        def raise_404(conn, path, params=None):
+            raise requests.exceptions.HTTPError(response=resp)
+        monkeypatch.setattr(connection_manager, "_get", raise_404)
+        r = connection_manager.test_connection({"app_type": "radarr", "base_url": "x"})
+        assert "404" in r["error"] and "address only" in r["error"]
+
+    def test_requirements_check(self, tmp_path):
+        from app.requirements_check import missing_requirements
+        req = tmp_path / "requirements.txt"
+        req.write_text("# comment\nrequests>=2\nsurely-not-a-real-pkg==1.0  # x\n", encoding="utf-8")
+        assert missing_requirements(req) == ["surely-not-a-real-pkg==1.0"]

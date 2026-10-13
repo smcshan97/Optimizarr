@@ -67,9 +67,20 @@ def parse_height(resolution) -> int:
 # Encryption helpers
 # ---------------------------------------------------------------------------
 
+class MissingDependency(RuntimeError):
+    """A required Python package isn't installed in the server's Python."""
+
+
 def _get_fernet():
     """Return a Fernet instance keyed from settings.SECRET_KEY."""
-    from cryptography.fernet import Fernet
+    try:
+        from cryptography.fernet import Fernet
+    except ImportError:
+        import sys
+        raise MissingDependency(
+            "The Python package 'cryptography' isn't installed, so API keys can't be "
+            f"stored. Run: \"{sys.executable}\" -m pip install \"cryptography>=42\" "
+            "— then try again (no restart needed).")
     # SHA-256 of the secret key → 32 bytes → urlsafe base64 → valid Fernet key
     key_bytes = hashlib.sha256(settings.secret_key.encode()).digest()
     return Fernet(base64.urlsafe_b64encode(key_bytes))
@@ -115,6 +126,23 @@ def public_connection(conn: Dict) -> Dict:
 # ExternalConnectionManager
 # ---------------------------------------------------------------------------
 
+def normalize_base_url(url: str) -> str:
+    """Tidy a user-entered Sonarr/Radarr/Stash address.
+
+    Adds http:// when there's no scheme (requests rejects "localhost:7878"
+    with "No scheme supplied"), drops a trailing slash and a pasted API
+    suffix (".../api/v3"), so the app's address works however it's typed.
+    """
+    url = (url or "").strip()
+    if url and "://" not in url:
+        url = "http://" + url
+    url = url.rstrip("/")
+    for suffix in ("/api/v3", "/api", "/graphql"):
+        if url.lower().endswith(suffix):
+            url = url[: -len(suffix)]
+    return url.rstrip("/")
+
+
 class ExternalConnectionManager:
     """
     Handles all communication with Sonarr / Radarr instances.
@@ -133,8 +161,8 @@ class ExternalConnectionManager:
         return {"X-Api-Key": plaintext, "Accept": "application/json"}
 
     def _base(self, conn: Dict) -> str:
-        """Return the base URL without trailing slash."""
-        return conn["base_url"].rstrip("/")
+        """Return the base URL, normalised (see normalize_base_url)."""
+        return normalize_base_url(conn["base_url"])
 
     def _get(self, conn: Dict, path: str, params: Dict = None) -> Any:
         url = f"{self._base(conn)}/api/v3{path}"
@@ -197,7 +225,12 @@ class ExternalConnectionManager:
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code == 401:
                 return {"ok": False, "error": "Invalid API key (401 Unauthorized)"}
-            return {"ok": False, "error": f"HTTP {e.response.status_code if e.response else 'error'}"}
+            # (a Response is falsy for 4xx/5xx, so test it against None)
+            code = e.response.status_code if e.response is not None else None
+            if code == 404:
+                return {"ok": False, "error": "HTTP 404 — the URL should be the app's address "
+                                              "only, e.g. http://localhost:7878 (no page path)"}
+            return {"ok": False, "error": f"HTTP {code or 'error'}"}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 

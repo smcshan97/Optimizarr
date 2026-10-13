@@ -6,3 +6,5 @@ import tempfile
 
 _tmp = tempfile.mkdtemp(prefix="optimizarr-tests-")
 os.environ["OPTIMIZARR_DB_PATH"] = os.path.join(_tmp, "optimizarr.db")
+# ...and logs/statistics too, so test failures never land in the real logs/
+os.environ["OPTIMIZARR_LOG_DIR"] = os.path.join(_tmp, "logs")

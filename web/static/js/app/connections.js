@@ -193,27 +193,16 @@ async function testConnectionForm() {
         return;
     }
 
-    // For edit mode we may be testing with existing key — send to a temporary endpoint
-    // But the server test-by-id endpoint covers that case; here we only have a new-entry scenario
-    const payload = { app_type: appType, base_url: url, api_key: apiKey, name: '_test_' };
-    const result = await apiRequest('/connections', {
+    // Tests what's typed in the form — nothing is saved
+    const r = await apiRequest('/connections/test', {
         method: 'POST',
-        body: JSON.stringify({ ...payload, _test_only: true })
-    }).catch(() => null);
-
-    // Because POST saves as side effect, we use the dedicated test endpoint if editing
-    if (_connectionEditId) {
-        const r = await apiRequest(`/connections/${_connectionEditId}/test`, { method: 'POST' });
-        if (r) {
-            _showConnectionTestResult(r.ok, r.ok
-                ? `Connected to ${r.app_name} ${r.version}`
-                : r.error);
-        }
+        body: JSON.stringify({ app_type: appType, base_url: url, api_key: apiKey }),
+        quiet: true,
+    });
+    if (r) {
+        _showConnectionTestResult(r.ok, r.ok ? `Connected to ${r.app_name} ${r.version}` : r.error);
     } else {
-        // We can't test-only without saving; show a note instead
-        _showConnectionTestResult(null, '');
-        // Just validate fields visually — actual test happens on save
-        _showConnectionTestResult(true, 'Fields look good — connection will be tested on Save');
+        _showConnectionTestResult(false, apiRequest.lastError || 'Test failed');
     }
 
     if (btn) { btn.disabled = false; btn.textContent = '🔌 Test Connection'; }
@@ -258,13 +247,19 @@ async function saveConnection() {
     if (id) {
         result = await apiRequest(`/connections/${id}`, {
             method: 'PUT',
-            body: JSON.stringify(body)
+            body: JSON.stringify(body),
+            quiet: true,
         });
     } else {
         result = await apiRequest('/connections', {
             method: 'POST',
-            body: JSON.stringify(body)
+            body: JSON.stringify(body),
+            quiet: true,
         });
+    }
+    if (!result) {
+        // Show WHY in the dialog (e.g. "Connection test failed: Invalid API key")
+        _showConnectionTestResult(false, apiRequest.lastError || 'Save failed');
     }
 
     if (result) {
