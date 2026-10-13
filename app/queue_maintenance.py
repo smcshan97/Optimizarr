@@ -118,17 +118,13 @@ def _same_plan(a, b) -> bool:
 
 
 def _desired_target(item: Dict, cache: Dict) -> Dict:
-    """target_specs refreshed from the profile's current codec/resolution/
-    audio (and framerate, when the row carries one)."""
+    """target_specs refreshed from the profile's current targets (codec,
+    resolution, framerate, bitrate cap, audio)."""
+    from app.scanner import profile_targets
     profile, _ = _settings_for(item, cache)
     target = dict(_as_dict(item.get("target_specs")))
-    if not profile:
-        return target
-    for key in ("codec", "resolution", "audio_codec"):
-        if key in profile:
-            target[key] = profile.get(key) or ""
-    if "framerate" in target and "framerate" in profile:
-        target["framerate"] = profile["framerate"]
+    if profile:
+        target.update(profile_targets(profile))
     return target
 
 

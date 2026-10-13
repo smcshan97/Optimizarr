@@ -1036,12 +1036,27 @@ class TestLowBitrateSkip:
                                      'quality': 30, 'container': 'mkv'}), qid
 
     def test_encode_start_skips_low_bitrate(self, fresh_db, monkeypatch):
+        """Only a source that already MEETS the profile (here: already AV1)
+        is skipped for being efficient."""
         import app.encoder as enc
         monkeypatch.setattr(enc, 'preflight_source_check', lambda p: None)
-        job, qid = self._job(fresh_db, monkeypatch, dict(self.SPECS, bit_rate=900_000))
+        job, qid = self._job(fresh_db, monkeypatch, dict(self.SPECS, codec='av1', bit_rate=900_000))
         assert job.start() is False
         item = fresh_db.get_queue_item(qid)
         assert item['status'] == 'kept_original' and 'already efficient' in item['error_message']
+
+    def test_wrong_codec_low_bitrate_still_converts(self, fresh_db, monkeypatch):
+        """An H.264 source under an AV1 profile doesn't meet it — the
+        efficiency skip must not keep it as H.264."""
+        import app.encoder as enc
+        monkeypatch.setattr(enc, 'preflight_source_check', lambda p: None)
+        job, qid = self._job(fresh_db, monkeypatch, dict(self.SPECS, bit_rate=900_000))
+        job._refresh_stale_specs = lambda p: None
+        job._unmet = None
+        assert job._unmet_targets() == ['codec h264 → av1']
+        assert enc.EncodingJob._low_bitrate_skip_reason(job)  # efficient, but…
+        job._unmet = job._unmet_targets()
+        assert (None if job._unmet else job._low_bitrate_skip_reason()) is None
 
     def test_upscale_jobs_exempt_and_setting_respected(self, fresh_db, monkeypatch):
         specs = dict(self.SPECS, bit_rate=900_000)
@@ -2741,6 +2756,7 @@ class TestDestinationCollision:
                           'duration_seconds': 0}
         job.profile = {'name': 'P', 'codec': 'av1', 'container': container}
         job._preprocessed = False
+        job._unmet = []
         job._upscale_work_mpf = 0.0
         job._paused_seconds = 0
         job._paused_at_monotonic = None
@@ -3363,7 +3379,8 @@ class TestQueueMaintenance:
         kw.setdefault('profile_id', 1)
         kw.setdefault('file_size_bytes', 10)
         kw.setdefault('current_specs', {'codec': 'h264', 'height': 1080})
-        kw.setdefault('target_specs', {'codec': 'av1', 'resolution': '', 'audio_codec': 'copy'})
+        from app.scanner import profile_targets
+        kw.setdefault('target_specs', profile_targets(self.PROFILE))
         return db.add_to_queue(file_path=path, **kw)
 
     def test_missing_file_removed_any_waiting_status(self, fresh_db, monkeypatch, tmp_path):
@@ -3644,3 +3661,90 @@ class TestCoverArtNeverPicked:
         job._refresh_stale_specs(str(f))
         assert job.queue_item['current_specs']['bit_depth'] == 10
         assert job._source_info is None and updates['duration_seconds'] == 60.0
+
+
+class TestProfileConformance:
+    """Optimizing means meeting the profile (codec, resolution, framerate,
+    bitrate) — not only getting smaller."""
+
+    TARGETS = {'codec': 'av1', 'resolution': '1920x1080', 'framerate': 30,
+               'max_bitrate_kbps': 8000, 'audio_codec': 'opus'}
+
+    def test_unmet_targets(self):
+        from app.scanner import unmet_targets
+        ok = {'codec': 'av1', 'height': 1080, 'framerate': 29.97, 'bit_rate': 6_000_000}
+        assert unmet_targets(ok, self.TARGETS) == []
+        assert unmet_targets(dict(ok, codec='h264'), self.TARGETS) == ['codec h264 → av1']
+        assert unmet_targets(dict(ok, height=2160), self.TARGETS) == ['2160p → 1080p']
+        assert unmet_targets(dict(ok, framerate=60), self.TARGETS) == ['60 fps → 30 fps']
+        assert unmet_targets(dict(ok, bit_rate=20_000_000), self.TARGETS) == ['20.0 Mbps → ≤8 Mbps']
+
+    def test_ceilings_and_unknowns_never_unmet(self):
+        from app.scanner import unmet_targets
+        low = {'codec': 'av1', 'height': 480, 'framerate': 24, 'bit_rate': 8_500_000}
+        assert unmet_targets(low, self.TARGETS) == []          # under ceilings; audio headroom
+        assert unmet_targets({'codec': 'unknown'}, self.TARGETS) == []
+        assert unmet_targets({'codec': 'av1'}, {'codec': 'av1'}) == []
+
+    def test_scanner_queues_framerate_and_bitrate_overages(self):
+        from app.scanner import scanner
+        av1 = {'codec': 'av1', 'resolution': '1920x1080', 'height': 1080,
+               'framerate': 60, 'bit_rate': 5_000_000}
+        assert scanner._needs_encoding(av1, self.TARGETS)
+        assert not scanner._needs_encoding(dict(av1, framerate=30), self.TARGETS)
+
+    def _cmd(self, monkeypatch, **profile):
+        import app.encoder as enc
+        job = enc.EncodingJob.__new__(enc.EncodingJob)
+        job.queue_item = {'file_path': '/x/a.mkv'}
+        job.profile = {'name': 'p', 'codec': 'av1', 'quality': 30, 'container': 'mkv', **profile}
+        monkeypatch.setattr(job, 'select_encoder', lambda: profile.get('encoder', 'svt_av1_10bit'),
+                            raising=False)
+        monkeypatch.setattr(enc.EncodingJob, '_build_audio_args', lambda self: [])
+        monkeypatch.setattr(enc.EncodingJob, '_build_subtitle_args', lambda self: [])
+        return job.build_command()
+
+    def test_resolution_and_framerate_are_ceilings(self, monkeypatch):
+        cmd = self._cmd(monkeypatch, resolution='1920x1080', framerate=30)
+        assert cmd[cmd.index('--maxWidth') + 1] == '1920'
+        assert cmd[cmd.index('--maxHeight') + 1] == '1080'
+        assert '--width' not in cmd and '--height' not in cmd   # upscaled small sources
+        assert '--pfr' in cmd and cmd[cmd.index('--rate') + 1] == '30'
+
+    def test_bitrate_cap_merged_with_grain(self, monkeypatch):
+        cmd = self._cmd(monkeypatch, max_bitrate_kbps=8000, film_grain=8)
+        assert cmd.count('--encopts') == 1
+        assert cmd[cmd.index('--encopts') + 1] == 'film-grain=8:film-grain-denoise=0:mbr=8000'
+        x265 = self._cmd(monkeypatch, codec='h265', encoder='x265_10bit', max_bitrate_kbps=5000)
+        assert x265[x265.index('--encopts') + 1] == 'vbv-maxrate=5000:vbv-bufsize=10000'
+        nvenc = self._cmd(monkeypatch, encoder='nvenc_h265', max_bitrate_kbps=5000)
+        assert '--encopts' not in nvenc
+
+    def _finalize(self, fresh_db, monkeypatch, tmp_path, new_bytes, unmet):
+        import app.encoder as enc
+        monkeypatch.setattr(enc, 'db', fresh_db)
+        src = tmp_path / "ep.mkv"
+        src.write_bytes(b"o" * 1000)
+        out = tmp_path / "ep_optimized.mkv"
+        out.write_bytes(b"e" * new_bytes)
+        job, qid = TestDestinationCollision._job(None, enc, fresh_db, src)
+        job._unmet = unmet
+        job._finalize_encoding()
+        return src, fresh_db.get_queue_item(qid)
+
+    def test_conversion_kept_when_slightly_bigger(self, fresh_db, monkeypatch, tmp_path):
+        """The 60 'kept original' H.264 files: +3% is fine to reach AV1."""
+        src, item = self._finalize(fresh_db, monkeypatch, tmp_path, 1030, ['codec h264 → av1'])
+        assert item['status'] == 'completed'
+        assert src.read_bytes() == b"e" * 1030
+
+    def test_conversion_rejected_past_allowance(self, fresh_db, monkeypatch, tmp_path):
+        src, item = self._finalize(fresh_db, monkeypatch, tmp_path, 1150, ['codec h264 → av1'])
+        assert item['status'] == 'kept_original'
+        assert "doesn't meet the profile (codec h264 → av1)" in item['error_message']
+        assert src.read_bytes() == b"o" * 1000
+
+    def test_conforming_source_still_needs_savings(self, fresh_db, monkeypatch, tmp_path):
+        src, item = self._finalize(fresh_db, monkeypatch, tmp_path, 980, [])
+        assert item['status'] == 'kept_original'
+        assert 'already meets the profile' in item['error_message']

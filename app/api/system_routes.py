@@ -150,6 +150,7 @@ def get_encoding_settings(current_user: dict = Depends(get_current_user)):
     return {
         'max_retries': db.get_setting('max_retries', '3'),
         'min_savings_percent': db.get_setting('min_savings_percent', '5'),
+        'max_conversion_growth_percent': db.get_setting('max_conversion_growth_percent', '10'),
         'min_source_bpp': db.get_setting('min_source_bpp', '0.03'),
         'queue_check_interval_minutes': db.get_setting('queue_check_interval_minutes', '15'),
     }
@@ -173,6 +174,12 @@ def update_encoding_settings(
         except (ValueError, TypeError):
             pct = 5.0
         db.set_setting('min_savings_percent', f"{pct:g}")
+    if 'max_conversion_growth_percent' in settings:
+        try:
+            grow = max(0.0, min(100.0, float(settings['max_conversion_growth_percent'])))
+        except (ValueError, TypeError):
+            grow = 10.0
+        db.set_setting('max_conversion_growth_percent', f"{grow:g}")
     if 'min_source_bpp' in settings:
         try:
             bpp = max(0.0, min(1.0, float(settings['min_source_bpp'])))

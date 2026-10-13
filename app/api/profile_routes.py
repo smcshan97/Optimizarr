@@ -114,6 +114,7 @@ def update_profile(
         stereo_depth_model=profile.stereo_depth_model,
         film_grain=profile.film_grain,
         target_vmaf=profile.target_vmaf,
+        max_bitrate_kbps=profile.max_bitrate_kbps,
     )
     
     if success:

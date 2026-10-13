@@ -67,6 +67,10 @@ def _m6_target_quality(cursor):
     _add_column(cursor, "queue", "tq_vmaf", "REAL")
 
 
+def _m7_profile_max_bitrate(cursor):
+    _add_column(cursor, "profiles", "max_bitrate_kbps", "INTEGER DEFAULT 0")
+
+
 MIGRATIONS = [
     (1, "users.token_version", _m1_token_version),
     (2, "drop unused sessions/api_keys tables", _m2_drop_unused_auth_tables),
@@ -74,6 +78,7 @@ MIGRATIONS = [
     (4, "move profiles to 10-bit encoders (H.264 stays 8-bit)", _m4_profiles_to_10bit),
     (5, "external_connections.path_mappings", _m5_connection_path_mappings),
     (6, "target-quality (VMAF) encoding", _m6_target_quality),
+    (7, "profiles.max_bitrate_kbps", _m7_profile_max_bitrate),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]

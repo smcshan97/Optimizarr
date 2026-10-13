@@ -163,11 +163,8 @@ class FolderWatcher:
             )
             return
 
-        target_specs = {
-            'codec':       profile['codec'],
-            'resolution':  profile.get('resolution', ''),
-            'audio_codec': profile['audio_codec'],
-        }
+        from app.scanner import profile_targets
+        target_specs = profile_targets(profile)
 
         queued_count = 0
         for file_path in sorted(new_files):

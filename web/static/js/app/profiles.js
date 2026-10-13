@@ -43,6 +43,7 @@ async function loadProfiles() {
                         ${p.chapter_markers ? '<span class="px-2 py-0.5 bg-gray-600 text-gray-300 text-xs rounded">Chapters</span>' : ''}
                         ${p.hw_accel_enabled ? '<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">GPU</span>' : ''}
                         ${p.film_grain ? `<span class="px-2 py-0.5 bg-yellow-900 text-yellow-300 text-xs rounded">Grain ${p.film_grain}</span>` : ''}
+                        ${p.max_bitrate_kbps ? `<span class="px-2 py-0.5 bg-teal-900 text-teal-300 text-xs rounded" title="Video bitrate ceiling">≤ ${p.max_bitrate_kbps / 1000} Mbps</span>` : ''}
                         ${p.target_vmaf ? `<span class="px-2 py-0.5 bg-amber-900 text-amber-300 text-xs rounded" title="Quality searched per file to reach this VMAF score">🎯 VMAF ${p.target_vmaf}</span>` : ''}
                         ${/_10bit$/.test(p.encoder || '') ? '<span class="px-2 py-0.5 bg-gray-600 text-gray-300 text-xs rounded">10-bit</span>' : ''}
                         ${p.upscale_enabled ? `<span class="px-2 py-0.5 bg-blue-900 text-blue-300 text-xs rounded" title="AI Upscale: ${p.upscale_key || 'realesrgan'} ×${p.upscale_factor || 2}, trigger below ${p.upscale_trigger_below || 720}px">🤖 Upscale ×${p.upscale_factor || 2}</span>` : ''}
@@ -79,6 +80,8 @@ function showCreateProfileForm() {
     document.getElementById('profileHwAccel').checked = false;
     document.getElementById('profileContainer').value = 'mkv';
     _setFilmGrain(0);
+    const mbEl = document.getElementById('profileMaxBitrate');
+    if (mbEl) mbEl.value = 0;
 
     // Reset AI upscale section to defaults and collapse it
     _fillProfileUpscaleFields({
@@ -140,6 +143,8 @@ async function editProfile(id) {
     
     document.getElementById('profileQuality').value = profile.quality;
     _setTargetVmaf(profile.target_vmaf || 0);
+    const mbEl = document.getElementById('profileMaxBitrate');
+    if (mbEl) mbEl.value = (profile.max_bitrate_kbps || 0) / 1000;
     document.getElementById('profilePreset').value = profile.preset || '';
     document.getElementById('profileAudioCodec').value = profile.audio_codec;
     document.getElementById('profileAudioHandling').value = profile.audio_handling || 'preserve_all';
@@ -186,6 +191,7 @@ document.getElementById('profileForm').addEventListener('submit', async (e) => {
         framerate: parseInt(framerate) || null,
         quality: parseInt(document.getElementById('profileQuality').value),
         target_vmaf: parseFloat(document.getElementById('profileTargetVmaf')?.value || '0') || 0,
+        max_bitrate_kbps: Math.round((parseFloat(document.getElementById('profileMaxBitrate')?.value || '0') || 0) * 1000),
         preset: document.getElementById('profilePreset').value || null,
         audio_codec: document.getElementById('profileAudioCodec').value,
         container: document.getElementById('profileContainer').value,

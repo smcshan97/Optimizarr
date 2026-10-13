@@ -120,6 +120,9 @@ class ProfileCreate(BaseModel):
     # Target quality: 0 = off (fixed `quality`); otherwise the VMAF score to
     # aim for — the quality value is searched per file (see target_quality).
     target_vmaf: float = Field(default=0, ge=0, le=99.5)
+    # Video bitrate ceiling in kbps: 0 = none. Sources above it don't meet
+    # the profile, and the encoder caps its output to it.
+    max_bitrate_kbps: int = Field(default=0, ge=0, le=500000)
     # AI upscale settings
     upscale_enabled: bool = False
     upscale_trigger_below: int = 720
@@ -157,6 +160,7 @@ class ProfileResponse(BaseModel):
     is_default: bool
     film_grain: Optional[int] = 0
     target_vmaf: Optional[float] = 0
+    max_bitrate_kbps: Optional[int] = 0
     created_at: Optional[str]
     # AI upscale settings
     upscale_enabled: Optional[bool] = False

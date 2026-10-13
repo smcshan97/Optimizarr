@@ -462,7 +462,19 @@
                     <div style="display:flex;align-items:center;gap:8px">
                         <input type="number" id="minSavingsPercent" min="0" max="90" step="1" value="5"
                             class="w-20 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center" style="font-size:14px">
-                        <span style="font-size:13px;color:var(--text-muted)">% — if an encode doesn't shrink the file by at least this much, the new file is discarded and the original kept (upscale/3D jobs exempt)</span>
+                        <span style="font-size:13px;color:var(--text-muted)">% — for files that already meet their profile (right codec, within its resolution/framerate/bitrate limits): if an encode doesn't shrink the file by at least this much, the new file is discarded and the original kept (upscale/3D jobs exempt)</span>
+                    </div>
+                </div>
+
+                <!-- Conversion growth allowance -->
+                <div style="margin-top:20px">
+                    <label style="font-size:14px;font-weight:500;color:var(--text-heading);display:block;margin-bottom:6px">
+                        Allowed Growth When Converting
+                    </label>
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <input type="number" id="maxConversionGrowth" min="0" max="100" step="1" value="10"
+                            class="w-20 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center" style="font-size:14px">
+                        <span style="font-size:13px;color:var(--text-muted)">% — files that DON'T meet their profile (wrong codec, or over its resolution/framerate/bitrate limits) are always converted, and the result is kept even if it's up to this much bigger. They also skip the "already efficient" check below.</span>
                     </div>
                 </div>
 
@@ -861,6 +873,13 @@
                             <option value="97">97 — near-lossless, larger files</option>
                         </select>
                         <p class="text-xs text-gray-400 mt-1">Per file, encodes three 10-second samples, scores them against the original with VMAF and picks the most compression that still reaches this score. Adds a few minutes of analysis per file; files that wouldn't shrink are skipped. Not used for HDR sources or upscale/3D jobs.</p>
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium mb-2">Max Bitrate (Mbps)</label>
+                        <input type="number" id="profileMaxBitrate" min="0" max="500" step="0.5" value="0"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                        <p class="text-xs text-gray-400 mt-1">0 = no cap. Files above this don't meet the profile and are always re-encoded; the output's video is capped to it (SVT-AV1, x264, x265).</p>
                     </div>
 
                     <div class="grid grid-cols-2 gap-4">

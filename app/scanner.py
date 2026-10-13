@@ -93,6 +93,64 @@ def low_bitrate_reason(specs: Dict, min_bpp: float) -> Optional[str]:
             f"saves nothing")
 
 
+def profile_targets(profile: Dict) -> Dict:
+    """What a profile asks of a file: codec, resolution and framerate
+    ceilings, bitrate ceiling and audio codec. Stored on each queue row as
+    target_specs and compared by unmet_targets()."""
+    return {
+        'codec': profile.get('codec'),
+        'resolution': profile.get('resolution') or '',
+        'framerate': profile.get('framerate') or 0,
+        'max_bitrate_kbps': int(profile.get('max_bitrate_kbps') or 0),
+        'audio_codec': profile.get('audio_codec'),
+    }
+
+
+# A file's bitrate is the container's overall figure (video + audio), so a
+# source only counts as over a video bitrate cap beyond this headroom.
+BITRATE_HEADROOM = 1.10
+
+
+def unmet_targets(specs: Dict, targets: Dict) -> List[str]:
+    """Ways a file falls short of its profile, as short human reasons.
+
+    Empty = the file already meets the profile, so the only question left is
+    whether re-encoding saves space. Resolution, framerate and bitrate are
+    ceilings: a file at or under them meets them (nothing is upscaled or
+    frame-doubled to match). Unknown values never count as unmet.
+    """
+    reasons = []
+    codec = specs.get('codec', 'unknown')
+    target_codec = targets.get('codec')
+    if target_codec and codec not in ('unknown', '', None) and codec != target_codec:
+        reasons.append(f"codec {codec} → {target_codec}")
+    target_res = targets.get('resolution')
+    if target_res and target_res != 'preserve':
+        try:
+            tgt_h = int(str(target_res).split('x')[1])
+            cur_h = int(specs.get('height') or 0) or int(
+                str(specs.get('resolution', '')).split('x')[1])
+            if cur_h > tgt_h:
+                reasons.append(f"{cur_h}p → {tgt_h}p")
+        except (ValueError, IndexError):
+            pass
+    try:
+        tgt_fps = float(targets.get('framerate') or 0)
+        cur_fps = float(specs.get('framerate') or 0)
+        if tgt_fps and cur_fps > tgt_fps + 0.5:
+            reasons.append(f"{cur_fps:g} fps → {tgt_fps:g} fps")
+    except (TypeError, ValueError):
+        pass
+    try:
+        cap = int(targets.get('max_bitrate_kbps') or 0)
+        rate = float(specs.get('bit_rate') or 0) / 1000
+        if cap and rate > cap * BITRATE_HEADROOM:
+            reasons.append(f"{rate / 1000:.1f} Mbps → ≤{cap / 1000:g} Mbps")
+    except (TypeError, ValueError):
+        pass
+    return reasons
+
+
 class MediaScanner:
     """Scans directories for video files and analyzes their specifications."""
     
@@ -410,12 +468,7 @@ class MediaScanner:
                 and current_specs.get('resolution', 'unknown') == 'unknown'
             )
             perm_status, _ = self.check_file_permissions(file_path)
-            target_specs = {
-                'codec': profile['codec'],
-                'resolution': profile['resolution'],
-                'framerate': profile['framerate'],
-                'audio_codec': profile['audio_codec']
-            }
+            target_specs = profile_targets(profile)
             if not self._needs_encoding(current_specs, target_specs):
                 optimizarr_logger.app_logger.info(f"  ⊙ Skipping (already optimized): {Path(file_path).name}")
                 continue
@@ -632,6 +685,8 @@ class MediaScanner:
     def _needs_encoding(self, current_specs: Dict, target_specs: Dict) -> bool:
         current_codec = current_specs.get('codec', 'unknown')
         if current_codec == 'unknown':
+            return True
+        if unmet_targets(current_specs, target_specs):
             return True
         target_codec = target_specs.get('codec')
         if target_codec and current_codec != target_codec:

@@ -33,6 +33,27 @@ def min_savings_percent() -> float:
         return 5.0
 
 
+def max_conversion_growth_percent() -> float:
+    """How much bigger an encode may get when the source doesn't meet its
+    profile (wrong codec, over the resolution/framerate/bitrate ceiling)."""
+    try:
+        return max(0.0, min(100.0, float(db.get_setting('max_conversion_growth_percent', '10'))))
+    except (TypeError, ValueError):
+        return 10.0
+
+
+def bitrate_cap_encopts(hb_encoder: str, kbps: int) -> Optional[str]:
+    """Encoder option string capping video bitrate at ``kbps``, or None
+    when HandBrake gives no per-encoder way to (hardware encoders)."""
+    if not kbps:
+        return None
+    if hb_encoder.startswith('svt_av1'):
+        return f"mbr={kbps}"      # SVT-AV1 capped CRF
+    if hb_encoder.startswith(('x264', 'x265')):
+        return f"vbv-maxrate={kbps}:vbv-bufsize={kbps * 2}"
+    return None
+
+
 class EncodingJob:
     """Represents a single video encoding job."""
     
@@ -57,6 +78,9 @@ class EncodingJob:
         self._paused_seconds = 0.0
         self._paused_at_monotonic: Optional[float] = None
         self._preprocessed = False
+        # Ways the source falls short of the profile (scanner.unmet_targets);
+        # a source that meets it is only re-encoded if that saves space.
+        self._unmet: list = []
         # Megapixel-frames of AI work actually performed, recorded to history
         # so the estimator learns seconds-per-megapixel-frame. Stays 0 unless
         # an upscale genuinely ran — a failed upscale that fell back to a
@@ -152,17 +176,19 @@ class EncodingJob:
         if self.profile.get('preset'):
             cmd.extend(['--encoder-preset', self.profile['preset']])
         
-        # Resolution
+        # Resolution — a CEILING: --width/--height upscaled smaller sources
+        # to the profile size (a 720p file came out 1080p and bigger).
         if self.profile.get('resolution'):
             width, height = self.profile['resolution'].split('x')
-            cmd.extend(['--width', width, '--height', height])
+            cmd.extend(['--maxWidth', width, '--maxHeight', height])
         elif size_override:
             cmd.extend(['--width', str(size_override[0]),
                         '--height', str(size_override[1])])
         
         # Framerate
         if self.profile.get('framerate'):
-            cmd.extend(['--rate', str(self.profile['framerate'])])
+            # Peak-limited: caps faster sources, never frame-doubles slower ones
+            cmd.extend(['--rate', str(self.profile['framerate']), '--pfr'])
         else:
             # Variable framerate (preserve source)
             cmd.append('--vfr')
@@ -191,11 +217,12 @@ class EncodingJob:
         # Film-grain mode. Grain is noise to an encoder: preserving it eats
         # bits, smoothing it looks plasticky. SVT-AV1 can strip it and
         # re-synthesise it on playback (film-grain=N); x265 has a grain tune.
+        # All --encopts go in ONE flag: HandBrake keeps only the last one.
+        encopts = []
         grain = int(self.profile.get('film_grain') or 0)
         if grain > 0:
             if hb_encoder.startswith('svt_av1'):
-                cmd.extend(['--encopts',
-                            f'film-grain={min(grain, 50)}:film-grain-denoise=0'])
+                encopts.append(f'film-grain={min(grain, 50)}:film-grain-denoise=0')
             elif hb_encoder.startswith('x265'):
                 # x265's grain tune segfaults HandBrake 1.10.x with the
                 # ultrafast/superfast presets (verified; fixed in 1.11.2).
@@ -203,6 +230,17 @@ class EncodingJob:
                           and handbrake_version() < (1, 11))
                 if not crashy:
                     cmd.extend(['--encoder-tune', 'grain'])
+
+        cap = int(self.profile.get('max_bitrate_kbps') or 0)
+        cap_opts = bitrate_cap_encopts(hb_encoder, cap)
+        if cap_opts:
+            encopts.append(cap_opts)
+        elif cap:
+            optimizarr_logger.app_logger.warning(
+                "%s has no bitrate cap option in HandBrake — the %d kbps limit "
+                "isn't enforced for this encode", hb_encoder, cap)
+        if encopts:
+            cmd.extend(['--encopts', ':'.join(encopts)])
 
         # (two_pass is intentionally not emitted: HandBrake's --multi-pass
         # only applies to average-bitrate encodes and every profile here is
@@ -492,6 +530,27 @@ class EncodingJob:
                         current_memory_mb=process_resources['memory_mb']
                     )
 
+    def _unmet_targets(self) -> list:
+        """What the source falls short of in this profile (see
+        scanner.unmet_targets). Webhook/sync rows only carry Sonarr/Radarr's
+        summary, so missing framerate/bitrate is probed."""
+        import json as _json
+        from app.scanner import profile_targets, unmet_targets
+        specs = self.queue_item.get('current_specs') or {}
+        if isinstance(specs, str):
+            try:
+                specs = _json.loads(specs)
+            except ValueError:
+                specs = {}
+        if not specs.get('framerate') or not specs.get('bit_rate'):
+            try:
+                from app.scanner import scanner as _scanner
+                specs = {**specs, **(_scanner._probe_with_ffprobe(
+                    self.queue_item['file_path']) or {})}
+            except Exception:
+                pass
+        return unmet_targets(specs, profile_targets(self.profile))
+
     def _refresh_stale_specs(self, source_path: str):
         """Re-probe the source when the queued specs can't be trusted.
 
@@ -606,7 +665,7 @@ class EncodingJob:
 
         ratio = result.get('size_ratio')
         min_pct = min_savings_percent()
-        if ratio is not None and ratio > 1 - min_pct / 100.0:
+        if ratio is not None and ratio > 1 - min_pct / 100.0 and not self._unmet:
             msg = (f"Skipped — at VMAF {target:g} the video would be {ratio * 100:.0f}% "
                    f"of its current size (needs ≥{min_pct:g}% savings)")
             db.update_queue_item(self.queue_item_id, status='kept_original', progress=0.0,
@@ -700,12 +759,17 @@ class EncodingJob:
             return False
 
         self._refresh_stale_specs(source_path)
+        self._unmet = self._unmet_targets()
+        if self._unmet:
+            optimizarr_logger.app_logger.info(
+                "%s doesn't meet its profile (%s) — encoding regardless of savings",
+                Path(source_path).name, "; ".join(self._unmet))
 
         # ── Pre-flight: is the source worth re-encoding at all? ────────────
         # Low bits-per-pixel sources mostly come out the same size or bigger
         # (see scanner.DEFAULT_MIN_SOURCE_BPP); skip them before spending an
         # encode. Jobs that upscale/convert to 3D are exempt.
-        reason = self._low_bitrate_skip_reason()
+        reason = None if self._unmet else self._low_bitrate_skip_reason()
         if reason:
             optimizarr_logger.app_logger.info("%s: %s", Path(source_path).name, reason)
             devlog('enc_skip_bpp', id=self.queue_item_id, f=Path(source_path).name)
@@ -1249,21 +1313,34 @@ class EncodingJob:
                     optimizarr_logger.log_handbrake_error(str(input_path), msg)
                     return
 
-        # ── Keep the original if the encode isn't meaningfully smaller ─────
-        # Low-bitrate sources often come out LARGER at a fixed CRF (this
-        # install's history: 899 of ~5,000 plain encodes grew, +94 GB).
+        # ── Keep the original if the encode isn't worth it ─────────────────
+        # A source that already meets its profile is only replaced when the
+        # encode is meaningfully smaller: low-bitrate sources often come out
+        # LARGER at a fixed CRF (this install's history: 899 of ~5,000 plain
+        # encodes grew, +94 GB). A source that DOESN'T meet it (wrong codec,
+        # over a resolution/framerate/bitrate ceiling) is replaced unless the
+        # encode grew past the conversion allowance — meeting the profile is
+        # the point; 60 H.264 files used to be kept for missing 5% savings.
         # Upscale/3D jobs are exempt — growth is the point there.
-        if not self._preprocessed:
-            min_pct = min_savings_percent()
-            if original_size > 0 and savings < original_size * (min_pct / 100.0):
-                change = (new_size - original_size) / original_size * 100
+        if not self._preprocessed and original_size > 0:
+            change = (new_size - original_size) / original_size * 100
+            if self._unmet:
+                allowed = max_conversion_growth_percent()
+                rejected = change > allowed
+                rule = (f"doesn't meet the profile ({'; '.join(self._unmet)}) but "
+                        f"may grow at most {allowed:g}%")
+            else:
+                min_pct = min_savings_percent()
+                rejected = savings < original_size * (min_pct / 100.0)
+                rule = f"already meets the profile, so needs ≥{min_pct:g}% savings"
+            if rejected:
                 try:
                     output_path.unlink()
                 except OSError:
                     pass
                 msg = (f"Kept original — re-encode was {change:+.1f}% "
                        f"({new_size / 1024**2:.0f} MB vs {original_size / 1024**2:.0f} MB); "
-                       f"needs ≥{min_pct:g}% savings")
+                       f"source {rule}")
                 db.update_queue_item(
                     self.queue_item_id, status='kept_original', progress=100.0,
                     phase=None, phase_progress=0.0, phase_eta_seconds=0,

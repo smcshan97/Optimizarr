@@ -327,11 +327,8 @@ def _sync_connection_task(conn_id: int):
             continue
 
         current_specs = item.get("current_specs", {})
-        target_specs = {
-            "codec": profile["codec"],
-            "resolution": profile.get("resolution", ""),
-            "audio_codec": profile["audio_codec"],
-        }
+        from app.scanner import profile_targets
+        target_specs = profile_targets(profile)
 
         # Skip if already at target codec
         if not scanner._needs_encoding(current_specs, target_specs):
@@ -579,11 +576,8 @@ def process_webhook_payload(app_type: str, payload: dict) -> dict:
     from app.external_connections import parse_height
     current_specs = {"codec": codec, "resolution": resolution,
                      "height": parse_height(resolution), "bit_rate": 0}
-    target_specs = {
-        "codec": profile["codec"],
-        "resolution": profile.get("resolution", ""),
-        "audio_codec": profile["audio_codec"],
-    }
+    from app.scanner import profile_targets
+    target_specs = profile_targets(profile)
 
     perm_status, _ = scanner.check_file_permissions(file_path)
 
