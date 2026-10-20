@@ -466,17 +466,9 @@
                     </div>
                 </div>
 
-                <!-- Conversion growth allowance -->
-                <div style="margin-top:20px">
-                    <label style="font-size:14px;font-weight:500;color:var(--text-heading);display:block;margin-bottom:6px">
-                        Allowed Growth When Converting
-                    </label>
-                    <div style="display:flex;align-items:center;gap:8px">
-                        <input type="number" id="maxConversionGrowth" min="0" max="100" step="1" value="10"
-                            class="w-20 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center" style="font-size:14px">
-                        <span style="font-size:13px;color:var(--text-muted)">% — files that DON'T meet their profile (wrong codec, or over its resolution/framerate/bitrate limits) are always converted, and the result is kept even if it's up to this much bigger. They also skip the "already efficient" check below.</span>
-                    </div>
-                </div>
+                <p style="margin-top:12px;font-size:13px;color:var(--text-muted)">
+                    Files that DON'T meet their profile (wrong codec, or over its resolution/framerate/bitrate limits) are always converted at the profile's quality, and the result is kept even if it's bigger — the aim is one codec and one quality level across the library, not the smallest files. Use the profile's bitrate limit to bound their size. They also skip the "already efficient" check below.
+                </p>
 
                 <!-- Skip already-efficient sources -->
                 <div style="margin-top:20px">

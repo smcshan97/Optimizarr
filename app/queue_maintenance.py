@@ -16,8 +16,9 @@ plan). After every encode, and on a timer (queue_check_interval_minutes):
     the current upscale rule (engine/model, trigger and target heights,
     upscaling on/off) — rows that no longer need encoding are removed;
   * finished rows (completed / kept original) whose file doesn't meet its
-    profile are re-queued — once per profile change, so a conversion kept
-    as the original for growing too much isn't retried every pass;
+    profile are re-queued — once per profile change (or keep/reject policy
+    change, CONFORMANCE_POLICY), so a conversion kept as the original isn't
+    retried every pass;
   * pending rows are tagged 2D / 3D / live action by the content
     classifier (a few per pass, in queue order) when it's installed;
   * a remembered "Prioritize by" choice is re-applied, so a smart sort
@@ -56,6 +57,11 @@ MAX_REPROBES_PER_PASS = 50
 # once per profile change (queue.conformance_checked), so a large history is
 # worked through over a few passes and then costs nothing.
 MAX_FINISHED_CHECKS_PER_PASS = 25
+
+# Bumped when the rule for keeping a conversion changes, so finished files
+# that were kept as the original under the old rule get one more pass.
+# 2: conversions may grow (uniform library) instead of a 10% cap.
+CONFORMANCE_POLICY = 2
 
 # Files classified per pass (~4 s each on CPU, below-normal priority).
 CLASSIFY_PER_PASS = 12
@@ -272,7 +278,7 @@ def recheck_finished(scanner, cache: Dict, budget: int = MAX_FINISHED_CHECKS_PER
         if not profile:
             continue
         targets = profile_targets(profile)
-        stamp = json.dumps(targets, sort_keys=True)
+        stamp = json.dumps({**targets, "policy": CONFORMANCE_POLICY}, sort_keys=True)
         if item.get("conformance_checked") == stamp:
             continue
         path = _current_file(item.get("file_path") or "")

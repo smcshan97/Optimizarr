@@ -3732,14 +3732,15 @@ class TestProfileConformance:
         job._finalize_encoding()
         return src, fresh_db.get_queue_item(qid)
 
-    def test_conversion_kept_when_slightly_bigger(self, fresh_db, monkeypatch, tmp_path):
-        """The 60 'kept original' H.264 files: +3% is fine to reach AV1."""
-        src, item = self._finalize(fresh_db, monkeypatch, tmp_path, 1030, ['codec h264 → av1'])
+    def test_conversion_kept_when_bigger(self, fresh_db, monkeypatch, tmp_path):
+        """Uniform library: a lean H.264 that grows 80% to reach AV1 at the
+        profile's quality is still converted."""
+        src, item = self._finalize(fresh_db, monkeypatch, tmp_path, 1800, ['codec h264 → av1'])
         assert item['status'] == 'completed'
-        assert src.read_bytes() == b"e" * 1030
+        assert src.read_bytes() == b"e" * 1800
 
-    def test_conversion_rejected_past_allowance(self, fresh_db, monkeypatch, tmp_path):
-        src, item = self._finalize(fresh_db, monkeypatch, tmp_path, 1150, ['codec h264 → av1'])
+    def test_conversion_rejected_only_when_implausible(self, fresh_db, monkeypatch, tmp_path):
+        src, item = self._finalize(fresh_db, monkeypatch, tmp_path, 3100, ['codec h264 → av1'])
         assert item['status'] == 'kept_original'
         assert "doesn't meet the profile (codec h264 → av1)" in item['error_message']
         assert src.read_bytes() == b"o" * 1000
@@ -3791,6 +3792,19 @@ class TestFinishedConformanceSweep:
         qm.recheck_finished(sc, {})
         assert sc.calls == 1
 
+    def test_policy_change_retries_kept_conversion(self, fresh_db, monkeypatch, tmp_path):
+        """A conversion kept as the original under the old 10% growth cap
+        (stamped without a policy) is re-queued once under the new rule."""
+        import json
+        from app.scanner import profile_targets
+        qm, prof = self._setup(fresh_db, monkeypatch)
+        old = json.dumps(profile_targets(prof), sort_keys=True)
+        item, _ = self._finished(fresh_db, tmp_path, "k.mkv", status='kept_original')
+        fresh_db.update_queue_item(item, conformance_checked=old)
+        sc = self._scanner({'codec': 'h264', 'height': 1080, 'framerate': 24})
+        assert qm.recheck_finished(sc, {}) == 1
+        assert fresh_db.get_queue_item(item)['status'] == 'pending'
+
     def test_profile_change_rechecks(self, fresh_db, monkeypatch, tmp_path):
         """60 fps AV1 met a no-framerate profile; capping at 30 re-queues it."""
         qm, prof = self._setup(fresh_db, monkeypatch)
@@ -3820,37 +3834,30 @@ class TestFinishedConformanceSweep:
         assert sc.calls == 2
 
 
-class TestDontGrowSearch:
-    """Conversions pick the best quality that doesn't make the file bigger."""
+class TestConversionSearch:
+    """Conversions get the profile's quality target whatever the size."""
 
     @staticmethod
     def _curve(q):
-        # Lean source: VMAF 95 needs q<=26, but q26 is 160% of the source;
-        # size drops ~8 points per q step, reaching <=100% at q>=34.
+        # Lean source: VMAF 95 needs q<=26, where the output is 160% of the
+        # source; size drops ~8 points per q step.
         return (99 - q * 0.15, max(0.3, 1.6 - (q - 26) * 0.08), 40 - q * 0.2)
 
-    def test_size_limit_raises_q_until_it_fits(self):
+    def test_conversion_meets_target_even_when_bigger(self):
         from app.target_quality import search
-        r = search(self._curve, 15, 55, 28, target=95.0, max_size_ratio=1.0, max_iter=8)
-        assert r['size_limited'] and not r['met_target']
-        assert r['size_ratio'] <= 1.0
-        assert r['quality'] == 34                      # first q that fits
-        assert r['xpsnr'] == self._curve(34)[2]
+        r = search(self._curve, 15, 55, 28, target=95.0, convert=True, max_iter=8)
+        assert r['met_target'] and r['quality'] == 26
+        assert r['size_ratio'] > 1.0
+        assert r['xpsnr'] == self._curve(26)[2]
 
-    def test_no_limit_stops_early_for_a_skip(self):
-        """Without the limit (source already meets its profile), a candidate
-        that misses VMAF while already bigger ends the search: the file will
-        be kept as the original, so more encodes would be wasted."""
+    def test_no_convert_stops_early_for_a_skip(self):
+        """Source already meets its profile: a candidate that misses VMAF
+        while already bigger ends the search — the file will be kept as the
+        original, so more encodes would be wasted."""
         from app.target_quality import search
         r = search(self._curve, 15, 55, 28, target=95.0, max_iter=8)
-        assert not r['size_limited'] and not r['met_target']
+        assert not r['met_target']
         assert r['size_ratio'] > 1.0 and list(r['evaluations']) == [28]
-
-    def test_limit_unused_when_already_small(self):
-        from app.target_quality import search
-        r = search(lambda q: (99 - q * 0.1, 0.4, 41.0), 15, 55, 28, target=95,
-                   max_size_ratio=1.0)
-        assert not r['size_limited'] and r['met_target']
 
     def test_scores_parsed_from_one_pass(self, monkeypatch):
         import app.target_quality as tq

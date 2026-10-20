@@ -33,13 +33,12 @@ def min_savings_percent() -> float:
         return 5.0
 
 
-def max_conversion_growth_percent() -> float:
-    """How much bigger an encode may get when the source doesn't meet its
-    profile (wrong codec, over the resolution/framerate/bitrate ceiling)."""
-    try:
-        return max(0.0, min(100.0, float(db.get_setting('max_conversion_growth_percent', '10'))))
-    except (TypeError, ValueError):
-        return 10.0
+# A conversion (source doesn't meet its profile) is kept even when it comes
+# out bigger — the point is a uniform library, not a smaller file. Only an
+# output past this multiple of the source is treated as a broken encode
+# (wrong quality scale, runaway bitrate) and discarded. Real conversions on
+# this library peak around 1.8x (lean H.264 at the profile's quality).
+CONVERSION_SANITY_RATIO = 3.0
 
 
 # SVT-AV1 preset when a profile leaves it on Auto. HandBrake's own default is
@@ -683,9 +682,9 @@ class EncodingJob:
             target=target, encode_sample=encode_sample, register=register,
             progress=lambda pct: db.update_queue_item(self.queue_item_id,
                                                       phase_progress=round(pct, 1)),
-            # Must convert anyway (doesn't meet the profile)? Then pick the
-            # best quality that doesn't make the file bigger.
-            max_size_ratio=1.0 if self._unmet else None)
+            # Must convert anyway (doesn't meet the profile)? Same target as
+            # every other file, whatever the size.
+            convert=bool(self._unmet))
         if self._manually_stopped:
             return None
         if not result:
@@ -695,9 +694,7 @@ class EncodingJob:
         self._tq_quality = int(result['quality'])
         db.update_queue_item(self.queue_item_id, tq_quality=self._tq_quality,
                              tq_vmaf=result['vmaf'], tq_xpsnr=result.get('xpsnr'))
-        if result.get('size_limited'):
-            how = ", size-limited so the file doesn't grow"
-        elif not result['met_target']:
+        if not result['met_target']:
             how = ", best reachable"
         else:
             how = ""
@@ -1377,17 +1374,19 @@ class EncodingJob:
         # encode is meaningfully smaller: low-bitrate sources often come out
         # LARGER at a fixed CRF (this install's history: 899 of ~5,000 plain
         # encodes grew, +94 GB). A source that DOESN'T meet it (wrong codec,
-        # over a resolution/framerate/bitrate ceiling) is replaced unless the
-        # encode grew past the conversion allowance — meeting the profile is
-        # the point; 60 H.264 files used to be kept for missing 5% savings.
+        # over a resolution/framerate/bitrate ceiling) is replaced even if it
+        # grew: the goal is every file on the profile's codec and quality, and
+        # holding conversions to "don't grow" left the leanest sources either
+        # unconverted or encoded worse than the rest. Only an implausible
+        # blow-up (CONVERSION_SANITY_RATIO) is discarded as a broken encode.
         # Upscale/3D jobs are exempt — growth is the point there.
         if not self._preprocessed and original_size > 0:
             change = (new_size - original_size) / original_size * 100
             if self._unmet:
-                allowed = max_conversion_growth_percent()
-                rejected = change > allowed
-                rule = (f"doesn't meet the profile ({'; '.join(self._unmet)}) but "
-                        f"may grow at most {allowed:g}%")
+                rejected = new_size > original_size * CONVERSION_SANITY_RATIO
+                rule = (f"doesn't meet the profile ({'; '.join(self._unmet)}), but more "
+                        f"than {CONVERSION_SANITY_RATIO:g}x its size means the encode "
+                        f"went wrong")
             else:
                 min_pct = min_savings_percent()
                 rejected = savings < original_size * (min_pct / 100.0)

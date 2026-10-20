@@ -9,12 +9,13 @@ result is the most compression that still meets the target score — so a
 clean Blu-ray and a noisy TV rip each get the setting they need instead of
 one fixed CRF for everything.
 
-The same samples also predict the output size, so a file that wouldn't
-shrink enough is skipped before the full encode — or, for a file that must
-be converted anyway (it doesn't meet its profile), the quality is raised
-until the output is no bigger than the source ("don't grow"). Measured on
-this library: the median queued file is a lean 1.8 Mbps H.264 that grew
-53-80% at a fixed CRF 28.
+The same samples also predict the output size, so a file that already meets
+its profile and wouldn't shrink enough is skipped before the full encode. A
+file that must be converted (it doesn't meet its profile) gets the same
+target as every other file even if that makes it bigger: the goal is a
+library at one codec and one quality level, not the smallest file. (Squeezing
+conversions to "don't grow" gave lean 1.8 Mbps H.264 sources — the median
+queued file here — visibly worse quality than the rest of the library.)
 
 XPSNR is scored in the same pass and logged/stored next to VMAF: VMAF can be
 inflated by sharpening, XPSNR (ISO/IEC 23002-7) is a plain perceptually
@@ -129,7 +130,7 @@ def _run(cmd: list, register: Callable, timeout: int) -> int:
 def search(evaluate: Callable[[int], Optional[Tuple]],
            lo: int, hi: int, start: int, target: float,
            max_iter: int = MAX_ITERATIONS,
-           max_size_ratio: Optional[float] = None) -> Dict:
+           convert: bool = False) -> Dict:
     """Largest quality value whose VMAF >= ``target``.
 
     ``evaluate(q)`` returns (vmaf, size_ratio[, xpsnr]) or None on failure.
@@ -137,9 +138,9 @@ def search(evaluate: Callable[[int], Optional[Tuple]],
     function, started at the profile's own value and bounded to
     ``max_iter`` evaluations.
 
-    ``max_size_ratio`` ("don't grow"): if the chosen value's output would be
-    bigger than that fraction of the source, keep raising q (smaller, lower
-    quality) to the first value that fits — size falls as q rises too.
+    ``convert``: the file is converted whatever its size (it doesn't meet
+    its profile), so the search never gives up early just because the
+    output is already bigger than the source.
     """
     seen: Dict[int, Tuple[float, float]] = {}
     start = max(lo, min(hi, start))
@@ -163,7 +164,7 @@ def search(evaluate: Callable[[int], Optional[Tuple]],
             break
         if best_ok is None and q == lo:
             break                       # even the best quality misses: give up
-        if best_ok is None and res[1] >= 1.0:
+        if best_ok is None and res[1] >= 1.0 and not convert:
             # Still short of the target while already no smaller than the
             # source: better quality only grows it further, so the file will
             # be skipped anyway — stop spending encodes on it.
@@ -183,47 +184,10 @@ def search(evaluate: Callable[[int], Optional[Tuple]],
         chosen = min(seen) if seen else start          # closest we could get
     else:
         chosen = best_ok
-    size_limited = False
-    if max_size_ratio is not None and chosen in seen and seen[chosen][1] > max_size_ratio:
-        chosen = _fit_size(evaluate, seen, chosen, hi, max_size_ratio, max_iter)
-        size_limited = True
     res = seen.get(chosen, (None, None))
     return {"quality": chosen, "vmaf": res[0], "size_ratio": res[1],
             "xpsnr": res[2] if len(res) > 2 else None,
-            "met_target": best_ok is not None and not size_limited,
-            "size_limited": size_limited, "evaluations": seen}
-
-
-def _fit_size(evaluate, seen: Dict, too_big: int, hi: int, limit: float,
-              max_iter: int) -> int:
-    """Smallest q above ``too_big`` whose size ratio <= ``limit`` (binary
-    search, reusing evaluations already made). If nothing fits within the
-    budget, the q with the smallest output found."""
-    fits = [q for q, r in seen.items() if q > too_big and r[1] <= limit]
-    low, high = too_big, (min(fits) if fits else None)
-    for _ in range(max_iter):
-        if high is not None and high - low <= 1:
-            break
-        if high is not None:
-            q = (low + high) // 2
-        else:
-            q = min(hi, low + max(4, (hi - low) // 2))
-        if q in seen:
-            res = seen[q]
-        else:
-            res = evaluate(q)
-            if res is None:
-                break
-            seen[q] = res
-        if res[1] <= limit:
-            high = q
-        else:
-            low = q
-            if q == hi:
-                break
-    if high is not None:
-        return high
-    return min(seen, key=lambda k: (seen[k][1], -k)) if seen else too_big
+            "met_target": best_ok is not None, "evaluations": seen}
 
 
 def find_quality(*, source: str, duration: float, width: int, height: int,
@@ -231,7 +195,7 @@ def find_quality(*, source: str, duration: float, width: int, height: int,
                  encode_sample: Callable[[Path, int, Path], bool],
                  register: Callable,
                  progress: Callable[[float], None],
-                 max_size_ratio: Optional[float] = None) -> Optional[Dict]:
+                 convert: bool = False) -> Optional[Dict]:
     """Run the whole search for one file. None = not applicable / failed
     (the caller then encodes with the profile's own quality)."""
     rng = quality_range(hb_encoder)
@@ -270,7 +234,7 @@ def find_quality(*, source: str, duration: float, width: int, height: int,
             return vmaf, out_bytes / ref_bytes, xpsnr
 
         result = search(evaluate, rng[0], rng[1], start_quality, target,
-                        max_size_ratio=max_size_ratio)
+                        convert=convert)
         if not result["evaluations"]:
             return None
         progress(100.0)

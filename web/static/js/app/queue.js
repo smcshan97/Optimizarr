@@ -840,8 +840,6 @@ async function loadSettings() {
         document.getElementById('maxRetries').value = parseInt(encSettings.max_retries || '3');
         const ms = document.getElementById('minSavingsPercent');
         if (ms) ms.value = parseFloat(encSettings.min_savings_percent ?? '5');
-        const mg = document.getElementById('maxConversionGrowth');
-        if (mg) mg.value = parseFloat(encSettings.max_conversion_growth_percent ?? '10');
         const mb = document.getElementById('minSourceBpp');
         if (mb) mb.value = parseFloat(encSettings.min_source_bpp ?? '0.03');
         const qc = document.getElementById('queueCheckInterval');
@@ -874,7 +872,6 @@ async function saveResourceSettings() {
         body: JSON.stringify({
             max_retries: document.getElementById('maxRetries').value,
             min_savings_percent: document.getElementById('minSavingsPercent')?.value ?? '5',
-            max_conversion_growth_percent: document.getElementById('maxConversionGrowth')?.value ?? '10',
             min_source_bpp: document.getElementById('minSourceBpp')?.value ?? '0.03',
             queue_check_interval_minutes: document.getElementById('queueCheckInterval')?.value ?? '15',
         })
