@@ -575,8 +575,11 @@ class MediaScanner:
                 pass
 
         # ── Codec efficiency table: fraction of original bitrate retained ─
+        # av1<-h264 is measured on this library: median 0.60x the source
+        # over 5,313 encodes (Feb-Oct 2026; whole file, audio included).
+        # The other pairs are still textbook guesses.
         EFFICIENCY = {
-            ('av1',  'h264'):   0.45,
+            ('av1',  'h264'):   0.60,
             ('av1',  'h265'):   0.65,
             ('av1',  'vp9'):    0.75,
             ('av1',  'mpeg4'):  0.35,
@@ -607,7 +610,10 @@ class MediaScanner:
             ratio = 1.0
 
         # ── Quality multiplier: adjust ratio based on CRF vs reference ──
-        if profile and profile.get('quality') is not None:
+        # Not with a VMAF target: there the quality value is only where the
+        # per-file search starts, not what the file is encoded at.
+        if (profile and profile.get('quality') is not None
+                and not float(profile.get('target_vmaf') or 0)):
             REFERENCE_CRF = {'av1': 30, 'h265': 24, 'h264': 23}
             ref_crf = REFERENCE_CRF.get(target_codec)
             if ref_crf is not None:
@@ -621,8 +627,9 @@ class MediaScanner:
                     pass
 
         # ── Resolution multiplier: scaling changes size proportionally ───
-        # Now handles BOTH downscaling (ratio decreases) and upscaling
-        # (ratio increases, meaning output is LARGER).
+        # The profile resolution is a ceiling: a file above it is scaled
+        # down, a file below it stays as it is (AI upscaling is the separate
+        # multiplier below), so this can only shrink the estimate.
         if profile and profile.get('resolution') and current_specs.get('resolution'):
             try:
                 src_res = current_specs['resolution']
@@ -631,7 +638,7 @@ class MediaScanner:
                     src_pixels = int(src_res.split('x')[0]) * int(src_res.split('x')[1])
                     tgt_pixels = int(tgt_res.split('x')[0]) * int(tgt_res.split('x')[1])
                     if src_pixels > 0:
-                        res_mult = tgt_pixels / src_pixels
+                        res_mult = min(1.0, tgt_pixels / src_pixels)
                         ratio = ratio * max(0.25, res_mult)
             except (ValueError, IndexError):
                 pass

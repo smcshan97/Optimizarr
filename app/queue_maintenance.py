@@ -19,6 +19,8 @@ plan). After every encode, and on a timer (queue_check_interval_minutes):
     profile are re-queued — once per profile change (or keep/reject policy
     change, CONFORMANCE_POLICY), so a conversion kept as the original isn't
     retried every pass;
+  * a policy change also clears quality searches cached on waiting rows,
+    since they were chosen under the old rule;
   * pending rows are tagged 2D / 3D / live action by the content
     classifier (a few per pass, in queue order) when it's installed;
   * a remembered "Prioritize by" choice is re-applied, so a smart sort
@@ -62,6 +64,10 @@ MAX_FINISHED_CHECKS_PER_PASS = 25
 # that were kept as the original under the old rule get one more pass.
 # 2: conversions may grow (uniform library) instead of a 10% cap.
 CONFORMANCE_POLICY = 2
+
+# Setting recording the CONFORMANCE_POLICY that cached quality searches on
+# waiting rows were made under.
+TQ_POLICY_SETTING = "tq_cache_policy"
 
 # Files classified per pass (~4 s each on CPU, below-normal priority).
 CLASSIFY_PER_PASS = 12
@@ -195,7 +201,17 @@ def _refresh_pending(item: Dict, size: int, scanner, cache: Dict,
     old_plan = item.get("upscale_plan")
     plan_changed = not _same_plan(old_plan, plan)
     target_changed = target != _as_dict(item.get("target_specs"))
+    profile, _ = _settings_for(item, cache)
+    estimate = scanner._estimate_savings(
+        size, specs.get("codec", "unknown"), target.get("codec", "unknown"),
+        current_specs=specs, profile=profile,
+        upscale_plan=plan, stereo_plan=item.get("stereo_plan"),
+    )
     if not (reprobed or plan_changed or target_changed):
+        # Pure arithmetic, so keep it current: rows saved under an older
+        # estimator would otherwise show (and sort by) stale numbers.
+        if estimate != item.get("estimated_savings_bytes"):
+            db.update_queue_item(item["id"], estimated_savings_bytes=estimate)
         return "unchanged"
     if plan_changed:
         if not _plan_enabled(plan):
@@ -206,13 +222,8 @@ def _refresh_pending(item: Dict, size: int, scanner, cache: Dict,
             how = "updated to current settings"
         optimizarr_logger.app_logger.info("Queue check: upscale plan for %s %s", name, how)
 
-    profile, _ = _settings_for(item, cache)
-    fields = {"target_specs": json.dumps(target), "upscale_plan": plan}
-    fields["estimated_savings_bytes"] = scanner._estimate_savings(
-        size, specs.get("codec", "unknown"), target.get("codec", "unknown"),
-        current_specs=specs, profile=profile,
-        upscale_plan=plan, stereo_plan=item.get("stereo_plan"),
-    )
+    fields = {"target_specs": json.dumps(target), "upscale_plan": plan,
+              "estimated_savings_bytes": estimate}
     if reprobed:
         fields.update(current_specs=json.dumps(specs), file_size_bytes=size,
                       duration_seconds=specs.get("duration", 0))
@@ -313,6 +324,27 @@ def recheck_finished(scanner, cache: Dict, budget: int = MAX_FINISHED_CHECKS_PER
     return requeued
 
 
+def reset_stale_quality_searches() -> int:
+    """Clear quality searches cached on waiting rows once per policy change.
+
+    A search made under an older keep/reject rule (e.g. "don't grow" capped
+    the quality to fit the source size) would otherwise be reused as-is when
+    the file finally encodes. Finished rows keep theirs as history.
+    """
+    if db.get_setting(TQ_POLICY_SETTING, "") == str(CONFORMANCE_POLICY):
+        return 0
+    cleared = 0
+    for item in db.get_queue_items():
+        if item.get("status") in _WAITING and item.get("tq_quality") is not None:
+            db.update_queue_item(item["id"], tq_quality=None, tq_vmaf=None, tq_xpsnr=None)
+            cleared += 1
+    db.set_setting(TQ_POLICY_SETTING, str(CONFORMANCE_POLICY))
+    if cleared:
+        optimizarr_logger.app_logger.info(
+            "Queue check: cleared %d quality searches made under an older policy", cleared)
+    return cleared
+
+
 def classify_pending(budget: int = CLASSIFY_PER_PASS) -> int:
     """Tag unclassified pending rows (queue order). Returns how many."""
     from app import content_classifier as cc
@@ -348,9 +380,13 @@ def revalidate_queue(scanner=None) -> Dict[str, int]:
     counts = {k: 0 for k in ("removed_missing", "duplicates_removed", "updated",
                              "removed_optimized", "plans_synced", "targets_synced",
                              "unquarantined", "requeued_nonconforming", "classified",
-                             "failed")}
+                             "searches_reset", "failed")}
     budget = [MAX_REPROBES_PER_PASS]
     cache: Dict = {}
+    try:
+        counts["searches_reset"] = reset_stale_quality_searches()
+    except Exception as e:
+        optimizarr_logger.app_logger.warning("Queue check: quality-search reset failed: %s", e)
     items = db.get_queue_items()
     # Rows a live job owns anchor duplicate detection: a waiting copy of a
     # file that's encoding right now is the duplicate, never the live one.

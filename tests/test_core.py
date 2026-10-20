@@ -197,6 +197,31 @@ class TestEstimateSavings:
         )
         assert downscaled > base
 
+    def test_resolution_ceiling_never_grows_estimate(self, scanner):
+        """A 1080p ceiling leaves a 720p file at 720p (nothing is upscaled),
+        so it must not multiply the estimate by the pixel ratio."""
+        free = scanner._estimate_savings(
+            1_000_000_000, 'h264', 'av1',
+            current_specs={'resolution': '1280x720'}, profile={'resolution': ''})
+        capped = scanner._estimate_savings(
+            1_000_000_000, 'h264', 'av1',
+            current_specs={'resolution': '1280x720'}, profile={'resolution': '1920x1080'})
+        assert capped == free > 0
+
+    def test_h264_to_av1_matches_measured_ratio(self, scanner):
+        """Measured on this library: AV1 encodes land at a median 0.60x
+        the source (5,313 encodes, Feb-Oct 2026)."""
+        assert scanner._estimate_savings(1_000_000_000, 'h264', 'av1') == 400_000_000
+
+    def test_target_vmaf_profile_ignores_crf(self, scanner):
+        """With a VMAF target the quality value is only a search start, not
+        the encode's quality, so it must not skew the estimate."""
+        a = scanner._estimate_savings(1_000_000_000, 'h264', 'av1',
+                                      profile={'quality': 20, 'target_vmaf': 95})
+        b = scanner._estimate_savings(1_000_000_000, 'h264', 'av1',
+                                      profile={'quality': 40, 'target_vmaf': 95})
+        assert a == b == 400_000_000
+
     def test_bitrate_based_estimate(self, scanner):
         """When bitrate and duration are available, use them."""
         savings = scanner._estimate_savings(
@@ -3394,6 +3419,16 @@ class TestQueueMaintenance:
         assert fresh_db.get_queue_item(failed) is None
         assert fresh_db.get_queue_item(kept) is not None
 
+    def test_stale_savings_estimate_recomputed(self, fresh_db, monkeypatch, tmp_path):
+        """A row saved under an older estimator gets the current estimate
+        even when nothing else about it changed."""
+        qm, _ = self._setup(fresh_db, monkeypatch)
+        item = self._add(fresh_db, self._file(tmp_path, "e.mkv"),
+                         estimated_savings_bytes=-999)
+        counts = qm.revalidate_queue(scanner=self._FakeScanner({}))
+        assert fresh_db.get_queue_item(item)['estimated_savings_bytes'] == 5
+        assert counts['updated'] == counts['targets_synced'] == 0
+
     def test_offline_drive_keeps_rows(self, fresh_db, monkeypatch, tmp_path):
         """Scan root unreachable (unplugged drive) — not proof of deletion."""
         qm, _ = self._setup(fresh_db, monkeypatch)
@@ -3751,6 +3786,28 @@ class TestProfileConformance:
         assert 'already meets the profile' in item['error_message']
 
 
+class TestStaleQualitySearch:
+    """A keep/reject policy change invalidates quality searches cached on
+    waiting rows (they were chosen under the old rule)."""
+
+    def test_policy_change_clears_cached_search_once(self, fresh_db, monkeypatch, tmp_path):
+        from app import queue_maintenance as qm
+        monkeypatch.setattr(qm, 'db', fresh_db)
+        f = tmp_path / "a.mkv"
+        f.write_bytes(b"x")
+        waiting = fresh_db.add_to_queue(file_path=str(f), profile_id=1, status='pending')
+        done = fresh_db.add_to_queue(file_path=str(tmp_path / "b.mkv"), profile_id=1,
+                                     status='completed')
+        for qid in (waiting, done):
+            fresh_db.update_queue_item(qid, tq_quality=34, tq_vmaf=92.3)
+        assert qm.reset_stale_quality_searches() == 1
+        assert fresh_db.get_queue_item(waiting)['tq_quality'] is None
+        assert fresh_db.get_queue_item(done)['tq_quality'] == 34     # history untouched
+        fresh_db.update_queue_item(waiting, tq_quality=39)
+        assert qm.reset_stale_quality_searches() == 0                 # once per policy
+        assert fresh_db.get_queue_item(waiting)['tq_quality'] == 39
+
+
 class TestFinishedConformanceSweep:
     PROFILE = {"codec": "av1", "resolution": "", "framerate": 30, "audio_codec": "copy",
                "max_bitrate_kbps": 0, "upscale_enabled": 0}
@@ -3858,6 +3915,86 @@ class TestConversionSearch:
         r = search(self._curve, 15, 55, 28, target=95.0, max_iter=8)
         assert not r['met_target']
         assert r['size_ratio'] > 1.0 and list(r['evaluations']) == [28]
+
+    @staticmethod
+    def _measured(q):
+        # Shape of a real search on this library (animated 1080p, Oct 20):
+        # VMAF 96.90 @ q28, 95.33 @ q38, 95.12 @ q39, 94.91 @ q40, 94.35 @ q42.
+        pts = {28: 96.90, 35: 95.95, 38: 95.33, 39: 95.12, 40: 94.91, 42: 94.35}
+        if q in pts:
+            v = pts[q]
+        elif q < 28:
+            v = 96.90 + (28 - q) * 0.15
+        elif q > 42:
+            v = 94.35 - (q - 42) * 0.3
+        else:
+            lo = max(k for k in pts if k < q)
+            hi = min(k for k in pts if k > q)
+            v = pts[lo] + (pts[hi] - pts[lo]) * (q - lo) / (hi - lo)
+        return v, 0.3 + (55 - q) * 0.02, 39.0
+
+    def test_interpolation_needs_few_encodes(self):
+        """From the profile's q28 the old bisection took 6 encodes on this
+        curve; interpolating toward the crossing finds q39 in fewer (the
+        curve bends, so a cold start still overshoots once)."""
+        from app.target_quality import search
+        calls = []
+
+        def ev(q):
+            calls.append(q)
+            return self._measured(q)
+        r = search(ev, 15, 55, 28, target=95.0, convert=True)
+        assert r['quality'] == 39 and r['met_target']
+        assert len(calls) <= 5
+
+    def test_good_start_needs_two_encodes(self):
+        """Started where similar files ended (q39): confirm it and its
+        neighbour, nothing else."""
+        from app.target_quality import search
+        calls = []
+
+        def ev(q):
+            calls.append(q)
+            return self._measured(q)
+        r = search(ev, 15, 55, 39, target=95.0, convert=True)
+        assert r['quality'] == 39 and sorted(calls) == [39, 40]
+
+    def test_unreachable_target_goes_straight_to_best_quality(self):
+        """A source that can't reach the target at the start jumps toward the
+        best quality instead of halving down step by step."""
+        from app.target_quality import search
+        calls = []
+
+        def ev(q):
+            calls.append(q)
+            return 88.0 - (q - 15) * 0.2, 1.4, 35.0
+        r = search(ev, 15, 55, 28, target=95.0, convert=True)
+        assert r['quality'] == 15 and not r['met_target']
+        assert len(calls) <= 3
+
+
+class TestLearnedStartQuality:
+    """The quality search starts where similar finished files ended."""
+
+    def _rows(self, db, tmp_path, qualities, profile_id=2, content_type=None):
+        for i, q in enumerate(qualities):
+            qid = db.add_to_queue(file_path=str(tmp_path / f"{profile_id}{content_type}{i}.mkv"),
+                                  profile_id=profile_id, status='completed')
+            db.update_queue_item(qid, tq_quality=q, content_type=content_type)
+
+    def test_median_of_same_content_type(self, fresh_db, tmp_path):
+        from app.encoder import learned_start_quality
+        self._rows(fresh_db, tmp_path, [38, 39, 39, 40, 41], content_type='2d')
+        self._rows(fresh_db, tmp_path, [28, 29, 30, 30, 31], content_type='live')
+        assert learned_start_quality(fresh_db, 2, '2d', default=28) == 39
+        assert learned_start_quality(fresh_db, 2, 'live', default=28) == 30
+
+    def test_falls_back_to_profile_then_default(self, fresh_db, tmp_path):
+        from app.encoder import learned_start_quality
+        self._rows(fresh_db, tmp_path, [33, 34, 35, 36, 37], content_type='live')
+        # too few '3d' rows -> whole profile; other profile -> default
+        assert learned_start_quality(fresh_db, 2, '3d', default=28) == 35
+        assert learned_start_quality(fresh_db, 9, 'live', default=28) == 28
 
     def test_scores_parsed_from_one_pass(self, monkeypatch):
         import app.target_quality as tq

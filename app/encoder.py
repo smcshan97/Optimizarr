@@ -41,6 +41,36 @@ def min_savings_percent() -> float:
 CONVERSION_SANITY_RATIO = 3.0
 
 
+# Finished quality searches needed before their median replaces the
+# profile's own quality as the next search's starting point.
+LEARNED_START_MIN_SAMPLES = 5
+
+
+def learned_start_quality(database, profile_id, content_type: Optional[str],
+                          default: int) -> int:
+    """Where to start a file's quality search: the median result of recent
+    searches for the same profile and content type (2D / 3D / live), else
+    the same profile, else ``default``. Similar files converge on similar
+    values (animated clips here settled near 39 at VMAF 95), and a start at
+    the answer settles the search in two encodes instead of five or six."""
+    import statistics
+    sql = ("SELECT tq_quality FROM queue WHERE profile_id = ? AND tq_quality IS NOT NULL "
+           "AND status IN ('completed', 'kept_original'){} "
+           "ORDER BY completed_at DESC, id DESC LIMIT 50")
+    try:
+        with database.get_read_connection() as conn:
+            for extra, args in ((" AND content_type = ?", (profile_id, content_type)),
+                                ("", (profile_id,))):
+                if extra and not content_type:
+                    continue
+                rows = [r[0] for r in conn.execute(sql.format(extra), args).fetchall()]
+                if len(rows) >= LEARNED_START_MIN_SAMPLES:
+                    return int(round(statistics.median(rows)))
+    except Exception:
+        pass
+    return int(default)
+
+
 # SVT-AV1 preset when a profile leaves it on Auto. HandBrake's own default is
 # 5; measured on this library (SVT-AV1 4.1, i7-9700K) preset 6 was ~1.3x
 # faster for files ~6-13% bigger at the same CRF — with per-file target
@@ -678,7 +708,10 @@ class EncodingJob:
                              phase_eta_seconds=0)
         result = tq.find_quality(
             source=source, duration=duration, width=width, height=height,
-            hb_encoder=hb_encoder, start_quality=int(self.profile['quality']),
+            hb_encoder=hb_encoder,
+            start_quality=learned_start_quality(
+                db, self.profile.get('id') or self.queue_item.get('profile_id'),
+                self.queue_item.get('content_type'), int(self.profile['quality'])),
             target=target, encode_sample=encode_sample, register=register,
             progress=lambda pct: db.update_queue_item(self.queue_item_id,
                                                       phase_progress=round(pct, 1)),

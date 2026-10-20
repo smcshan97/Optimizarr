@@ -21,6 +21,7 @@ XPSNR is scored in the same pass and logged/stored next to VMAF: VMAF can be
 inflated by sharpening, XPSNR (ISO/IEC 23002-7) is a plain perceptually
 weighted PSNR, so a big disagreement between them is worth a look.
 """
+import math
 import os
 import re
 import shutil
@@ -127,6 +128,42 @@ def _run(cmd: list, register: Callable, timeout: int) -> int:
         register(None)
 
 
+# VMAF lost per quality step, assumed until a file has two measured points.
+# Measured searches here fall 0.15-0.4 per step; the middle keeps the first
+# jump from overshooting badly either way.
+DEFAULT_VMAF_SLOPE = 0.25
+MAX_FIRST_STEP = 12
+
+
+def _next_guess(seen: Dict, best_ok: Optional[int], worst_fail: Optional[int],
+                lo: int, hi: int, target: float) -> int:
+    """Next quality to try: where the VMAF curve is predicted to cross the
+    target, rounded to the passing side and kept strictly inside the
+    unexplored bracket. Two measured points give the line through them (the
+    bracket ends when there is one); a single point uses DEFAULT_VMAF_SLOPE.
+    """
+    a = best_ok + 1 if best_ok is not None else lo
+    b = worst_fail - 1 if worst_fail is not None else hi
+    if best_ok is not None and worst_fail is not None:
+        pts = [best_ok, worst_fail]
+    else:
+        pts = sorted(seen, key=lambda k: abs(seen[k][0] - target))[:2]
+    guess = None
+    if len(pts) == 2 and pts[0] != pts[1]:
+        (q1, v1), (q2, v2) = ((q, seen[q][0]) for q in pts)
+        slope = (v2 - v1) / (q2 - q1)
+        if slope < 0:
+            guess = math.floor(q1 + (target - v1) / slope)
+    if guess is None:
+        # Step from the bracket end still open: up from the best pass, or
+        # down from the first fail when nothing passes yet.
+        q0 = best_ok if best_ok is not None else (worst_fail if worst_fail is not None else pts[0])
+        step = (seen[q0][0] - target) / DEFAULT_VMAF_SLOPE
+        step = max(-MAX_FIRST_STEP, min(MAX_FIRST_STEP, step))
+        guess = math.floor(q0 + step)
+    return max(a, min(b, guess))
+
+
 def search(evaluate: Callable[[int], Optional[Tuple]],
            lo: int, hi: int, start: int, target: float,
            max_iter: int = MAX_ITERATIONS,
@@ -134,9 +171,11 @@ def search(evaluate: Callable[[int], Optional[Tuple]],
     """Largest quality value whose VMAF >= ``target``.
 
     ``evaluate(q)`` returns (vmaf, size_ratio[, xpsnr]) or None on failure.
-    VMAF falls as q rises, so this is a binary search on a monotonic
-    function, started at the profile's own value and bounded to
-    ``max_iter`` evaluations.
+    VMAF falls as q rises, so each next value is interpolated toward where
+    the measured curve crosses the target (secant steps, kept inside the
+    bracket of known pass/fail values), started at ``start`` and bounded to
+    ``max_iter`` evaluations. A good ``start`` — where similar files ended —
+    usually settles it in two: the answer and its failing neighbour.
 
     ``convert``: the file is converted whatever its size (it doesn't meet
     its profile), so the search never gives up early just because the
@@ -171,15 +210,7 @@ def search(evaluate: Callable[[int], Optional[Tuple]],
             break
         if worst_fail is None and q == hi:
             break                       # even the smallest passes
-        if best_ok is None:
-            q = max(lo, (lo + q) // 2 if q > lo else lo)
-            if worst_fail is not None and q >= worst_fail:
-                q = worst_fail - 1
-        elif worst_fail is None:
-            q = min(hi, (q + hi + 1) // 2)
-        else:
-            q = (best_ok + worst_fail) // 2
-        q = max(lo, min(hi, q))
+        q = _next_guess(seen, best_ok, worst_fail, lo, hi, target)
     if best_ok is None:
         chosen = min(seen) if seen else start          # closest we could get
     else:

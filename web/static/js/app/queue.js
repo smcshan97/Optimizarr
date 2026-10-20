@@ -25,6 +25,7 @@ const _QUEUE_CHECK_LABELS = {
     updated: 'refreshed', removed_optimized: 'already optimized',
     plans_synced: 'upscale plans synced', targets_synced: 'targets synced',
     unquarantined: 'un-quarantined', requeued_nonconforming: 'finished files re-queued (off-profile)',
+    searches_reset: 'quality searches redone (rule changed)',
 };
 
 async function loadQueueCheckStatus() {
