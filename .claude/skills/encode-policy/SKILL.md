@@ -7,6 +7,8 @@ description: Optimizarr keep/reject rules — use before changing when an encode
 
 ## The goal
 
+Recorded in `docs/adr/0001-uniform-library-over-smaller-files.md`; terms are defined in `GLOSSARY.md`.
+
 **Uniformity**: every file in the library ends on its profile — one codec, within the resolution/framerate/bitrate ceilings, at the profile's quality level. Smaller files are a side benefit, never the target. Judge every rule change against this goal; when a rule would leave a file off-profile or encode it worse than its neighbours just to save space, the rule is wrong.
 
 Two kinds of source, two questions:
