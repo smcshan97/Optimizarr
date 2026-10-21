@@ -58,6 +58,7 @@ def create_scan_root(
             stereo_divergence=scan_root.stereo_divergence,
             stereo_convergence=scan_root.stereo_convergence,
             stereo_depth_model=scan_root.stereo_depth_model,
+            organize_companions=scan_root.organize_companions,
         )
         roots = db.get_scan_roots()
         created_root = next((r for r in roots if r['id'] == root_id), None)
@@ -139,6 +140,7 @@ def update_scan_root(
         stereo_divergence=root_data.stereo_divergence,
         stereo_convergence=root_data.stereo_convergence,
         stereo_depth_model=root_data.stereo_depth_model,
+        organize_companions=root_data.organize_companions,
     )
     
     if success:

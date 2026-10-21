@@ -13,7 +13,8 @@ class LibraryMixin:
                         upscale_factor: int = 2, upscale_key: str = "realesrgan",
                         stereo_enabled: bool = False, stereo_mode: str = "2d_to_3d",
                         stereo_format: str = "half_sbs", stereo_divergence: float = 2.0,
-                        stereo_convergence: float = 0.5, stereo_depth_model: str = "Any_V2_S") -> int:
+                        stereo_convergence: float = 0.5, stereo_depth_model: str = "Any_V2_S",
+                        organize_companions: bool = False) -> int:
         """Create a new scan root."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -23,13 +24,15 @@ class LibraryMixin:
                      upscale_enabled, upscale_trigger_below, upscale_target_height,
                      upscale_model, upscale_factor, upscale_key,
                      stereo_enabled, stereo_mode, stereo_format,
-                     stereo_divergence, stereo_convergence, stereo_depth_model)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     stereo_divergence, stereo_convergence, stereo_depth_model,
+                     organize_companions)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (path, profile_id, library_type, enabled, recursive, show_in_stats,
                   upscale_enabled, upscale_trigger_below, upscale_target_height,
                   upscale_model, upscale_factor, upscale_key,
                   stereo_enabled, stereo_mode, stereo_format,
-                  stereo_divergence, stereo_convergence, stereo_depth_model))
+                  stereo_divergence, stereo_convergence, stereo_depth_model,
+                  organize_companions))
             return cursor.lastrowid
     
     # Joins the linked folder watch so callers see watch_enabled / watch_id.
@@ -67,7 +70,8 @@ class LibraryMixin:
                         upscale_key: str = None, stereo_enabled: bool = None,
                         stereo_mode: str = None, stereo_format: str = None,
                         stereo_divergence: float = None, stereo_convergence: float = None,
-                        stereo_depth_model: str = None) -> bool:
+                        stereo_depth_model: str = None,
+                        organize_companions: bool = None) -> bool:
         """Update a scan root."""
         with self.get_connection() as conn:
             cursor = conn.cursor()
@@ -93,6 +97,7 @@ class LibraryMixin:
                 "stereo_divergence":      stereo_divergence,
                 "stereo_convergence":     stereo_convergence,
                 "stereo_depth_model":     stereo_depth_model,
+                "organize_companions":    organize_companions,
             }
             for col, val in field_map.items():
                 if val is not None:

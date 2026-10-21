@@ -24,6 +24,10 @@ _Avoid_: compliant, done, meets targets
 A file that misses its profile in at least one way: wrong codec, or above a resolution, framerate or bitrate ceiling.
 _Avoid_: non-conforming, unmet
 
+**Companion file**:
+A file that belongs to a video because it shares the video's name (funscript, subtitle, artwork, metadata), and so must move with it.
+_Avoid_: sidecar, extra, attachment
+
 **Ceiling**:
 A profile limit a file must not exceed (resolution, framerate, bitrate). Files below a ceiling already meet it; nothing is raised to reach one.
 _Avoid_: target resolution, minimum

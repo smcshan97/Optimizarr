@@ -205,6 +205,9 @@ class ScanRootCreate(BaseModel):
     stereo_divergence: float = Field(default=2.0, ge=0.0, le=5.0)
     stereo_convergence: float = Field(default=0.5, ge=0.0, le=1.0)
     stereo_depth_model: str = "Any_V2_S"
+    # Move loose videos and their companion files (funscripts, subtitles,
+    # art) into a folder named after the video — see app/organizer.py.
+    organize_companions: bool = False
 
 
 class ScanRootResponse(BaseModel):
@@ -229,6 +232,9 @@ class ScanRootResponse(BaseModel):
     stereo_divergence: Optional[float] = 2.0
     stereo_convergence: Optional[float] = 0.5
     stereo_depth_model: Optional[str] = "Any_V2_S"
+    organize_companions: Optional[bool] = False
+    # Set when Sonarr/Radarr manage this library (organizer stays off)
+    external_connection_id: Optional[int] = None
     # Folder-watch state (eye toggle)
     watch_enabled: Optional[bool] = False
     watch_id: Optional[int] = None

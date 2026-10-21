@@ -641,6 +641,7 @@ _SCANROOT_EXPORT_FIELDS = [
     "upscale_model", "upscale_factor", "upscale_key",
     "stereo_enabled", "stereo_mode", "stereo_format",
     "stereo_divergence", "stereo_convergence", "stereo_depth_model",
+    "organize_companions",
 ]
 
 

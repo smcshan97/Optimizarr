@@ -106,6 +106,10 @@ def _m11_profile_denoise(cursor):
     cursor.execute("UPDATE profiles SET denoise = 1 WHERE enable_filters")
 
 
+def _m12_scan_root_organize_companions(cursor):
+    _add_column(cursor, "scan_roots", "organize_companions", "BOOLEAN DEFAULT 0")
+
+
 MIGRATIONS = [
     (1, "users.token_version", _m1_token_version),
     (2, "drop unused sessions/api_keys tables", _m2_drop_unused_auth_tables),
@@ -118,6 +122,7 @@ MIGRATIONS = [
     (9, "queue.tq_xpsnr + queue.notice", _m9_queue_xpsnr_and_notice),
     (10, "content classification + quiz labels", _m10_content_classification),
     (11, "profiles.denoise (split out of filters)", _m11_profile_denoise),
+    (12, "scan_roots.organize_companions", _m12_scan_root_organize_companions),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]

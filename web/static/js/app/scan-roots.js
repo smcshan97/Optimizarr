@@ -41,6 +41,12 @@ async function loadScanRoots() {
                                 ${r.show_in_stats !== false ? '📊 Stats: On' : '🔒 Stats: Hidden'}
                             </span>
                         </div>
+                        ${r.organize_companions && !r.external_connection_id ? `
+                        <div>
+                            <span class="px-2 py-1 rounded text-xs bg-purple-900 text-purple-300" title="Loose videos and their same-name files are moved into their own folder on each scan">
+                                🗂️ Organizing
+                            </span>
+                        </div>` : ''}
                         ${r.watch_enabled ? `
                         <div>
                             <span class="px-2 py-1 rounded text-xs bg-green-900 text-green-300" title="Auto-queues new files added to this folder">
@@ -81,6 +87,7 @@ async function showCreateScanRootForm() {
     document.getElementById('scanRootRecursive').checked = true;
     document.getElementById('scanRootEnabled').checked = true;
     document.getElementById('scanRootShowInStats').checked = true;
+    _fillOrganizeField({});
     document.getElementById('scanRootLibraryType').value = 'custom';
     document.getElementById('libraryTypeRecommendation').classList.add('hidden');
 
@@ -141,10 +148,24 @@ async function editScanRoot(id) {
     document.getElementById('scanRootRecursive').checked = root.recursive;
     document.getElementById('scanRootEnabled').checked = root.enabled;
     document.getElementById('scanRootShowInStats').checked = root.show_in_stats !== false;
+    _fillOrganizeField(root);
     _fillUpscaleFields(root);
     _fillScanRootStereoFields(root);
     
     document.getElementById('scanRootModal').classList.remove('hidden');
+}
+
+// Sonarr/Radarr track file paths themselves, so the organizer stays off for
+// libraries they manage (the backend ignores it there too).
+function _fillOrganizeField(root) {
+    const box = document.getElementById('scanRootOrganize');
+    const hint = document.getElementById('scanRootOrganizeHint');
+    const managed = !!root.external_connection_id;
+    box.checked = !managed && !!root.organize_companions;
+    box.disabled = managed;
+    hint.textContent = managed
+        ? 'Off: Sonarr/Radarr manage this library and track its file paths.'
+        : 'On each scan, a loose video with files of the same name (funscripts, subtitles, artwork) is moved with them into a folder named after the video. Nothing is overwritten.';
 }
 
 function closeScanRootModal() {
@@ -162,6 +183,7 @@ document.getElementById('scanRootForm').addEventListener('submit', async (e) => 
         recursive:     document.getElementById('scanRootRecursive').checked,
         enabled:       document.getElementById('scanRootEnabled').checked,
         show_in_stats: document.getElementById('scanRootShowInStats').checked,
+        organize_companions: document.getElementById('scanRootOrganize').checked,
         // AI upscale settings
         upscale_enabled:        document.getElementById('scanRootUpscaleEnabled')?.checked ?? false,
         upscale_trigger_below:  parseInt(document.getElementById('scanRootUpscaleTrigger')?.value || '720'),

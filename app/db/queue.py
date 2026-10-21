@@ -235,6 +235,15 @@ class QueueMixin:
             cursor.execute("SELECT file_path FROM queue")
             return {row[0] for row in cursor.fetchall()}
 
+    def rename_queue_path(self, old_path: str, new_path: str) -> int:
+        """Point every row for ``old_path`` at ``new_path`` (the file was
+        moved, e.g. by the companion organizer). Returns rows changed."""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE queue SET file_path = ? WHERE file_path = ?",
+                           (new_path, old_path))
+            return cursor.rowcount
+
     def set_queue_priorities(self, pairs) -> int:
         """Batch-write (item_id, priority) pairs in ONE transaction.
 

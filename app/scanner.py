@@ -434,6 +434,15 @@ class MediaScanner:
         if not profile:
             optimizarr_logger.app_logger.error(f"✗ Profile {scan_root['profile_id']} not found")
             return 0
+        # Companion organizer first, so newly queued rows get the final paths.
+        try:
+            from app.organizer import organize_root
+            organized = organize_root(scan_root)
+            if organized:
+                optimizarr_logger.app_logger.info(
+                    f"Organized {organized} video(s) into their own folders")
+        except Exception as e:
+            optimizarr_logger.app_logger.warning(f"Organizer failed for {scan_root['path']}: {e}")
         video_files = self.discover_video_files(scan_root['path'], recursive=scan_root['recursive'])
         optimizarr_logger.app_logger.info(f"Found {len(video_files)} video files")
         added_count = 0

@@ -4287,3 +4287,112 @@ class TestContentClassifier:
         assert cmd_for('2d') == ''
         assert cmd_for('uncertain') == ''
         assert 'film-grain=3' in cmd_for('live', profile_grain=3)    # profile wins
+
+
+class TestCompanionOrganizer:
+    """Loose videos with companion files (funscripts, subtitles, art) get a
+    folder of their own; everything else is left alone."""
+
+    @staticmethod
+    def _touch(base, *names):
+        for n in names:
+            f = base / n
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_bytes(n.encode())
+
+    @staticmethod
+    def _tree(base):
+        return sorted(str(p.relative_to(base)).replace("\\", "/")
+                      for p in base.rglob("*") if p.is_file())
+
+    def test_groups_video_with_its_companions(self, tmp_path):
+        from app.organizer import organize_tree
+        self._touch(tmp_path, "Movie.mp4", "Movie.funscript", "Movie.en.srt", "Other.mkv")
+        moved = organize_tree(str(tmp_path))
+        assert self._tree(tmp_path) == ["Movie/Movie.en.srt", "Movie/Movie.funscript",
+                                        "Movie/Movie.mp4", "Other.mkv"]
+        assert moved == [(str(tmp_path / "Movie.mp4"), str(tmp_path / "Movie" / "Movie.mp4"))]
+
+    def test_already_in_own_folder_untouched(self, tmp_path):
+        from app.organizer import organize_tree
+        self._touch(tmp_path, "Movie/Movie.mp4", "Movie/Movie.funscript")
+        assert organize_tree(str(tmp_path)) == []
+        assert self._tree(tmp_path) == ["Movie/Movie.funscript", "Movie/Movie.mp4"]
+
+    def test_video_without_companions_untouched(self, tmp_path):
+        from app.organizer import organize_tree
+        self._touch(tmp_path, "Solo.mp4")
+        assert organize_tree(str(tmp_path)) == []
+
+    def test_companions_go_to_longest_matching_video(self, tmp_path):
+        """Movie.Part2.funscript belongs to Movie.Part2.mp4, not Movie.mp4,
+        and a video is never treated as another video's companion."""
+        from app.organizer import organize_tree
+        self._touch(tmp_path, "Movie.mp4", "Movie.funscript",
+                    "Movie.Part2.mp4", "Movie.Part2.funscript")
+        organize_tree(str(tmp_path))
+        assert self._tree(tmp_path) == ["Movie.Part2/Movie.Part2.funscript",
+                                        "Movie.Part2/Movie.Part2.mp4",
+                                        "Movie/Movie.funscript", "Movie/Movie.mp4"]
+
+    def test_artwork_extras_move_but_other_dashes_dont(self, tmp_path):
+        from app.organizer import organize_tree
+        self._touch(tmp_path, "Movie.mp4", "Movie-poster.jpg", "Movie-2.funscript")
+        organize_tree(str(tmp_path))
+        assert self._tree(tmp_path) == ["Movie-2.funscript", "Movie/Movie-poster.jpg",
+                                        "Movie/Movie.mp4"]
+
+    def test_never_overwrites(self, tmp_path):
+        """A folder of that name already holding a different file with a
+        clashing name: the whole group stays put."""
+        from app.organizer import organize_tree
+        self._touch(tmp_path, "Movie.mp4", "Movie.funscript")
+        (tmp_path / "Movie").mkdir()
+        (tmp_path / "Movie" / "Movie.funscript").write_bytes(b"different")
+        assert organize_tree(str(tmp_path)) == []
+        assert (tmp_path / "Movie.mp4").exists()
+        assert (tmp_path / "Movie" / "Movie.funscript").read_bytes() == b"different"
+
+    def test_busy_video_skipped(self, tmp_path):
+        from app.organizer import organize_tree
+        self._touch(tmp_path, "Movie.mp4", "Movie.funscript")
+        assert organize_tree(str(tmp_path), busy={str(tmp_path / "Movie.mp4")}) == []
+        assert (tmp_path / "Movie.mp4").exists()
+
+    def test_non_recursive_stays_at_top(self, tmp_path):
+        from app.organizer import organize_tree
+        self._touch(tmp_path, "sub/Deep.mp4", "sub/Deep.funscript")
+        assert organize_tree(str(tmp_path), recursive=False) == []
+        assert organize_tree(str(tmp_path), recursive=True) != []
+
+    def test_library_pass_updates_queue_and_respects_arr_libraries(self, fresh_db, monkeypatch, tmp_path):
+        import app.organizer as org
+        monkeypatch.setattr(org, 'db', fresh_db)
+        self._touch(tmp_path, "lib/Movie.mp4", "lib/Movie.funscript",
+                    "arr/Show.mkv", "arr/Show.srt")
+        lib = fresh_db.create_scan_root(str(tmp_path / "lib"), 1)
+        arr = fresh_db.create_scan_root(str(tmp_path / "arr"), 1)
+        for rid in (lib, arr):
+            fresh_db.update_scan_root(rid, organize_companions=True)
+        with fresh_db.get_connection() as conn:
+            conn.execute("UPDATE scan_roots SET external_connection_id = 1 WHERE id = ?", (arr,))
+        qid = fresh_db.add_to_queue(file_path=str(tmp_path / "lib" / "Movie.mp4"), profile_id=1)
+        assert org.organize_root(fresh_db.get_scan_root(lib)) == 1
+        assert fresh_db.get_queue_item(qid)['file_path'] == str(tmp_path / "lib" / "Movie" / "Movie.mp4")
+        assert org.organize_root(fresh_db.get_scan_root(arr)) == 0      # Sonarr/Radarr owns it
+        assert (tmp_path / "arr" / "Show.mkv").exists()
+
+    def test_scan_organizes_before_queueing(self, fresh_db, monkeypatch, tmp_path, scanner):
+        """A scan of an organizing library queues the video at its new path."""
+        import app.organizer as org
+        import app.scanner as sc_mod
+        monkeypatch.setattr(org, 'db', fresh_db)
+        monkeypatch.setattr(sc_mod, 'db', fresh_db)
+        self._touch(tmp_path, "Movie.mp4", "Movie.funscript")
+        pid = fresh_db.create_profile(name="P", codec="av1", encoder="svt_av1_10bit",
+                                      quality=30, audio_codec="passthrough")
+        rid = fresh_db.create_scan_root(str(tmp_path), pid, organize_companions=True)
+        monkeypatch.setattr(scanner, 'analyze_file', lambda p: {'codec': 'h264', 'height': 1080,
+                                                                 'resolution': '1920x1080'})
+        scanner.scan_root(rid)
+        assert fresh_db.get_queue_file_paths() == {str(tmp_path / "Movie" / "Movie.mp4")}
