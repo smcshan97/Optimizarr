@@ -94,6 +94,7 @@ def update_profile(
         audio_handling=profile.audio_handling,
         subtitle_handling=profile.subtitle_handling,
         enable_filters=profile.enable_filters,
+        denoise=profile.denoise,
         chapter_markers=profile.chapter_markers,
         hw_accel_enabled=profile.hw_accel_enabled,
         preset=profile.preset,

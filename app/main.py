@@ -345,7 +345,7 @@ DEFAULT_PROFILES = [
             "codec": "h264", "encoder": "x264", "quality": 23,
             "audio_codec": "aac", "container": "mp4",
             "audio_handling": "stereo_mixdown", "subtitle_handling": "none",
-            "chapter_markers": False, "enable_filters": True,
+            "chapter_markers": False, "enable_filters": True, "denoise": True,
             "hw_accel_enabled": False, "preset": "fast",
             "two_pass": False, "custom_args": None, "is_default": False,
         },

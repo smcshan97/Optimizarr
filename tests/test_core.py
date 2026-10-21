@@ -3786,6 +3786,61 @@ class TestProfileConformance:
         assert 'already meets the profile' in item['error_message']
 
 
+class TestFilterArgs:
+    """Profile filters: deinterlace + auto-crop under "filters", NLMeans
+    denoise as its own option (it made encodes ~2.7x slower)."""
+
+    @staticmethod
+    def _crop_mode(cmd):
+        vals = [cmd[i + 1] for i, a in enumerate(cmd) if a == '--crop-mode']
+        vals += [a.split('=', 1)[1] for a in cmd if a.startswith('--crop-mode=')]
+        return vals
+
+    def test_quality_samples_are_never_cropped(self, monkeypatch):
+        """Samples double as the VMAF reference; the filters' auto-crop came
+        after --crop-mode none and won, so letterboxed samples were cropped."""
+        import app.encoder as enc
+        job = enc.EncodingJob.__new__(enc.EncodingJob)
+        job.queue_item = {'file_path': '/x/a.mkv'}
+        job.profile = {'name': 'p', 'codec': 'av1', 'quality': 30, 'container': 'mkv',
+                       'enable_filters': 1, 'denoise': 0}
+        monkeypatch.setattr(job, 'select_encoder', lambda: 'svt_av1_10bit', raising=False)
+        cmd = job.build_command(input_override='/x/s.mkv', output_override='/x/o.mkv',
+                                quality_override=30, video_only=True)
+        assert self._crop_mode(cmd) == ['none']
+        assert '--decomb' in cmd                      # rest of the real pipeline kept
+
+    def test_filters_without_denoise(self, monkeypatch):
+        cmd = TestProfileConformance._cmd(None, monkeypatch, enable_filters=1, denoise=0)
+        assert '--decomb' in cmd and '--crop-mode=auto' in cmd
+        assert not any(a.startswith('--nlmeans') for a in cmd)
+
+    def test_denoise_is_its_own_option(self, monkeypatch):
+        with_filters = TestProfileConformance._cmd(None, monkeypatch, enable_filters=1, denoise=1)
+        alone = TestProfileConformance._cmd(None, monkeypatch, enable_filters=0, denoise=1)
+        assert '--nlmeans=light' in with_filters and '--decomb' in with_filters
+        assert '--nlmeans=light' in alone and '--decomb' not in alone
+
+    def test_denoise_saved_with_profile(self, fresh_db):
+        pid = fresh_db.create_profile(name="D", codec="av1", encoder="svt_av1_10bit", quality=30,
+                                      audio_codec="passthrough", enable_filters=True, denoise=True)
+        assert fresh_db.get_profile(pid)['denoise']
+        fresh_db.update_profile(pid, denoise=False)
+        p = fresh_db.get_profile(pid)
+        assert not p['denoise'] and p['enable_filters']
+
+    def test_migration_keeps_existing_profiles_as_they_were(self):
+        """Profiles that had filters on had NLMeans too; they keep it until
+        it's switched off, so nothing changes silently on upgrade."""
+        import sqlite3
+        from app.db.migrations import _m11_profile_denoise
+        con = sqlite3.connect(':memory:')
+        con.execute("CREATE TABLE profiles (id INTEGER PRIMARY KEY, enable_filters BOOLEAN)")
+        con.executemany("INSERT INTO profiles VALUES (?, ?)", [(1, 1), (2, 0)])
+        _m11_profile_denoise(con.cursor())
+        assert con.execute("SELECT id, denoise FROM profiles ORDER BY id").fetchall() == [(1, 1), (2, 0)]
+
+
 class TestStaleQualitySearch:
     """A keep/reject policy change invalidates quality searches cached on
     waiting rows (they were chosen under the old rule)."""

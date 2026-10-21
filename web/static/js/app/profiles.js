@@ -40,6 +40,7 @@ async function loadProfiles() {
                     </div>
                     <div class="flex gap-2 mt-2 flex-wrap">
                         ${p.enable_filters ? '<span class="px-2 py-0.5 bg-purple-900 text-purple-300 text-xs rounded">Filters</span>' : ''}
+                        ${p.denoise ? '<span class="px-2 py-0.5 bg-purple-900 text-purple-300 text-xs rounded">Denoise</span>' : ''}
                         ${p.chapter_markers ? '<span class="px-2 py-0.5 bg-gray-600 text-gray-300 text-xs rounded">Chapters</span>' : ''}
                         ${p.hw_accel_enabled ? '<span class="px-2 py-0.5 bg-green-900 text-green-300 text-xs rounded">GPU</span>' : ''}
                         ${p.film_grain ? `<span class="px-2 py-0.5 bg-yellow-900 text-yellow-300 text-xs rounded">Grain ${p.film_grain}</span>` : ''}
@@ -76,6 +77,7 @@ function showCreateProfileForm() {
     document.getElementById('profileAudioHandling').value = 'preserve_all';
     document.getElementById('profileSubtitleHandling').value = 'none';
     document.getElementById('profileEnableFilters').checked = false;
+    document.getElementById('profileDenoise').checked = false;
     document.getElementById('profileChapterMarkers').checked = true;
     document.getElementById('profileHwAccel').checked = false;
     document.getElementById('profileContainer').value = 'mkv';
@@ -150,6 +152,7 @@ async function editProfile(id) {
     document.getElementById('profileAudioHandling').value = profile.audio_handling || 'preserve_all';
     document.getElementById('profileSubtitleHandling').value = profile.subtitle_handling || 'none';
     document.getElementById('profileEnableFilters').checked = profile.enable_filters || false;
+    document.getElementById('profileDenoise').checked = !!profile.denoise;
     document.getElementById('profileChapterMarkers').checked = profile.chapter_markers !== false;
     document.getElementById('profileHwAccel').checked = profile.hw_accel_enabled || false;
     document.getElementById('profileTwoPass').checked = profile.two_pass;
@@ -198,6 +201,7 @@ document.getElementById('profileForm').addEventListener('submit', async (e) => {
         audio_handling: document.getElementById('profileAudioHandling').value,
         subtitle_handling: document.getElementById('profileSubtitleHandling').value,
         enable_filters: document.getElementById('profileEnableFilters').checked,
+        denoise: document.getElementById('profileDenoise').checked,
         chapter_markers: document.getElementById('profileChapterMarkers').checked,
         hw_accel_enabled: document.getElementById('profileHwAccel').checked,
         two_pass: document.getElementById('profileTwoPass').checked,

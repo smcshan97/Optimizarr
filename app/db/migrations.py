@@ -99,6 +99,13 @@ def _m10_content_classification(cursor):
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_content_labels_path ON content_labels(file_path)")
 
 
+def _m11_profile_denoise(cursor):
+    # NLMeans used to be part of "filters"; profiles that had filters on
+    # keep denoise on, so nothing changes until someone switches it off.
+    _add_column(cursor, "profiles", "denoise", "BOOLEAN DEFAULT 0")
+    cursor.execute("UPDATE profiles SET denoise = 1 WHERE enable_filters")
+
+
 MIGRATIONS = [
     (1, "users.token_version", _m1_token_version),
     (2, "drop unused sessions/api_keys tables", _m2_drop_unused_auth_tables),
@@ -110,6 +117,7 @@ MIGRATIONS = [
     (8, "queue.conformance_checked", _m8_queue_conformance_checked),
     (9, "queue.tq_xpsnr + queue.notice", _m9_queue_xpsnr_and_notice),
     (10, "content classification + quiz labels", _m10_content_classification),
+    (11, "profiles.denoise (split out of filters)", _m11_profile_denoise),
 ]
 
 SCHEMA_VERSION = MIGRATIONS[-1][0]

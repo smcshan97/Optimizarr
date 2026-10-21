@@ -107,7 +107,8 @@ class ProfileCreate(BaseModel):
     container: str = Field(default="mkv", pattern="^(mkv|mp4|webm)$")
     audio_handling: str = Field(default="preserve_all", pattern="^(preserve_all|keep_primary|stereo_mixdown|hd_plus_aac|high_quality)$")
     subtitle_handling: str = Field(default="none", pattern="^(preserve_all|keep_english|burn_in|foreign_scan|none)$")
-    enable_filters: bool = False
+    enable_filters: bool = False   # deinterlace + auto-crop
+    denoise: bool = False          # NLMeans light; ~2.7x slower encodes
     chapter_markers: bool = True
     hw_accel_enabled: bool = False
     preset: Optional[str] = None
@@ -152,6 +153,7 @@ class ProfileResponse(BaseModel):
     audio_handling: Optional[str] = "preserve_all"
     subtitle_handling: Optional[str] = "none"
     enable_filters: Optional[bool] = False
+    denoise: Optional[bool] = False
     chapter_markers: Optional[bool] = True
     hw_accel_enabled: Optional[bool] = False
     preset: Optional[str]

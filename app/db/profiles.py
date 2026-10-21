@@ -22,8 +22,8 @@ class ProfilesMixin:
                  upscale_model, upscale_factor, upscale_key,
                  stereo_enabled, stereo_mode, stereo_format,
                  stereo_divergence, stereo_convergence, stereo_depth_model, film_grain,
-                 target_vmaf, max_bitrate_kbps)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 target_vmaf, max_bitrate_kbps, denoise)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 kwargs.get('name'),
                 kwargs.get('resolution'),
@@ -57,6 +57,7 @@ class ProfilesMixin:
                 kwargs.get('film_grain', 0) or 0,
                 kwargs.get('target_vmaf', 0) or 0,
                 kwargs.get('max_bitrate_kbps', 0) or 0,
+                kwargs.get('denoise', False),
             ))
             return cursor.lastrowid
     
@@ -81,7 +82,7 @@ class ProfilesMixin:
                 'upscale_model', 'upscale_factor', 'upscale_key',
                 'stereo_enabled', 'stereo_mode', 'stereo_format',
                 'stereo_divergence', 'stereo_convergence', 'stereo_depth_model',
-                'film_grain', 'target_vmaf', 'max_bitrate_kbps',
+                'film_grain', 'target_vmaf', 'max_bitrate_kbps', 'denoise',
             ]
             
             for field in allowed_fields:

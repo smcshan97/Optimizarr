@@ -631,7 +631,7 @@ _PROFILE_EXPORT_FIELDS = [
     "upscale_model", "upscale_factor", "upscale_key",
     "stereo_enabled", "stereo_mode", "stereo_format",
     "stereo_divergence", "stereo_convergence", "stereo_depth_model",
-    "film_grain", "target_vmaf",
+    "film_grain", "target_vmaf", "max_bitrate_kbps", "denoise",
 ]
 # Scan-root columns.external_connection_id is intentionally omitted —
 # connection IDs are instance-specific and connections aren't imported.
