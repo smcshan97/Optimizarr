@@ -4396,3 +4396,162 @@ class TestCompanionOrganizer:
                                                                  'resolution': '1920x1080'})
         scanner.scan_root(rid)
         assert fresh_db.get_queue_file_paths() == {str(tmp_path / "Movie" / "Movie.mp4")}
+
+
+# ---------------------------------------------------------------------------
+# Windows long paths — over MAX_PATH (260) a plain Path.exists() is False
+# unless the OS opts in, so finished encodes were reported "not found"
+# ---------------------------------------------------------------------------
+
+def _lp(p) -> str:
+    """Path as Windows' extended-length form, for test setup only."""
+    return "\\\\?\\" + str(p)
+
+
+def _long_dir(base, total: int):
+    """A directory under ``base`` whose path is ``total`` characters long."""
+    d = Path(base) / ("d" * (total - len(str(base)) - 1))
+    os.mkdir(_lp(d))
+    return d
+
+
+@pytest.mark.skipif(os.name != "nt", reason="MAX_PATH is a Windows limit")
+class TestLongPaths:
+    def test_finalize_completes_past_max_path(self, fresh_db, monkeypatch, tmp_path):
+        """A 263-character _optimized output is found, replaces the source,
+        and the queue row completes — not 'Output file not found'."""
+        import app.encoder as enc
+        monkeypatch.setattr(enc, 'db', fresh_db)
+        d = _long_dir(tmp_path, 249)
+        src = d / "ep.mkv"                                  # 256 chars
+        out = d / "ep_optimized.mkv"                        # 266 chars
+        with open(_lp(src), "wb") as f:
+            f.write(b"o" * 1000)
+        with open(_lp(out), "wb") as f:
+            f.write(b"e" * 500)
+        job, qid = TestDestinationCollision._job(None, enc, fresh_db, src)
+        job._finalize_encoding()
+        item = fresh_db.get_queue_item(qid)
+        assert item['status'] == 'completed', item['error_message']
+        with open(_lp(src), "rb") as f:
+            assert f.read() == b"e" * 500
+        assert not os.path.exists(_lp(out))
+
+    def test_failure_removes_partial_output_past_max_path(
+            self, fresh_db, monkeypatch, tmp_path):
+        import app.encoder as enc
+        monkeypatch.setattr(enc, 'db', fresh_db)
+        d = _long_dir(tmp_path, 249)
+        src = d / "ep.mkv"
+        out = d / "ep_optimized.mkv"
+        for p in (src, out):
+            with open(_lp(p), "wb") as f:
+                f.write(b"x")
+        job, _ = TestDestinationCollision._job(None, enc, fresh_db, src)
+        job._handle_failure("HandBrakeCLI exited with code 3")
+        assert not os.path.exists(_lp(out))
+        assert os.path.exists(_lp(src))
+
+    def test_long_source_is_not_mistaken_for_missing(self, tmp_path):
+        """'missing' drops the queue row, so a source that is there must
+        never read as missing just for being past 260 characters."""
+        from app.handbrake import preflight_source_check
+        src = _long_dir(tmp_path, 255) / "ep.mkv"
+        with open(_lp(src), "wb") as f:
+            f.write(b"")
+        assert preflight_source_check(str(src)) == 'File is empty (0 bytes)'
+
+    def test_start_fails_fast_when_output_name_cannot_exist(
+            self, fresh_db, monkeypatch):
+        """NTFS caps one file name at 255 characters, prefix or not. A
+        246-character name grows past that as {stem}_optimized.mkv, so the
+        job fails before any encode, and without burning retries."""
+        import app.encoder as enc
+        monkeypatch.setattr(enc, 'db', fresh_db)
+        monkeypatch.setattr(enc, 'preflight_source_check', lambda p: None)
+        src = 'E:\\lib\\' + 'n' * 242 + '.mp4'
+        qid = fresh_db.add_to_queue(file_path=src, root_id=1, profile_id=1,
+                                    current_specs={}, target_specs={})
+        job = enc.EncodingJob(qid, {'name': 'p', 'codec': 'av1', 'quality': 30,
+                                    'encoder': 'svt_av1_10bit', 'container': 'mkv'})
+        monkeypatch.setattr(enc.subprocess, 'Popen',
+                            lambda *a, **k: pytest.fail("HandBrake must not run"))
+        assert job.start() is False
+        item = fresh_db.get_queue_item(qid)
+        assert item['status'] == 'failed'
+        assert '255' in item['error_message'] and 'rename' in item['error_message']
+        assert item['retry_after'] is None
+
+    def test_organizer_leaves_video_whose_folder_would_pass_max_path(self, tmp_path):
+        """The per-video folder repeats the name, so it can push a path that
+        fits today past 260 — the reason these encodes started failing.
+        Such a group stays where it is."""
+        from app.organizer import organize_tree
+        lib = _long_dir(tmp_path, 125)
+        stem = "s" * 60
+        # Moved, the video is 251 characters (the move itself works); its
+        # encode, {stem}_optimized.mkv in that folder, would be 262.
+        for n in (f"{stem}.mp4", f"{stem}.funscript"):
+            (lib / n).write_bytes(b"x")
+        assert organize_tree(str(lib)) == []
+        assert sorted(p.name for p in lib.iterdir()) == [f"{stem}.funscript", f"{stem}.mp4"]
+
+
+class TestAdoptFinishedOutput:
+    """An encode that finished but was never finalized (it was reported
+    'not found') is still next to its source as _optimized. Re-queued, the
+    job uses it instead of spending the encode again — if it is complete
+    and on the profile."""
+    SPECS = {'codec': 'h264', 'width': 1920, 'height': 1080,
+             'resolution': '1920x1080', 'framerate': 24.0,
+             'bit_rate': 8_000_000, 'duration': 600}
+
+    def _start(self, fresh_db, monkeypatch, tmp_path, out_specs):
+        import app.encoder as enc
+        import app.scanner as sc
+        monkeypatch.setattr(enc, 'db', fresh_db)
+        monkeypatch.setattr(enc, 'preflight_source_check', lambda p: None)
+        lib = tmp_path / f"lib{len(list(tmp_path.glob('lib*')))}"
+        lib.mkdir()
+        src = lib / "ep.mkv"
+        src.write_bytes(b"o" * 1000)
+        out = lib / "ep_optimized.mkv"
+        out.write_bytes(b"e" * 400)
+        monkeypatch.setattr(sc.scanner, 'analyze_file',
+                            lambda p: dict(out_specs) if p.endswith('_optimized.mkv') else None)
+        ran = []
+        def _no_handbrake(cmd, *a, **k):
+            if '--json' in cmd:                              # the encode itself
+                ran.append(cmd)
+            raise OSError("no external tools in tests")
+        monkeypatch.setattr(enc.subprocess, 'Popen', _no_handbrake)
+        qid = fresh_db.add_to_queue(file_path=str(src), root_id=1, profile_id=1,
+                                    current_specs=self.SPECS, target_specs={})
+        job = enc.EncodingJob(qid, {'name': 'p', 'codec': 'av1', 'quality': 30,
+                                    'encoder': 'svt_av1_10bit', 'container': 'mkv'})
+        job.start()
+        return src, out, ran, fresh_db.get_queue_item(qid)
+
+    def test_complete_output_is_finalized_without_encoding(
+            self, fresh_db, monkeypatch, tmp_path):
+        src, out, ran, item = self._start(
+            fresh_db, monkeypatch, tmp_path,
+            {'codec': 'av1', 'height': 1080, 'resolution': '1920x1080', 'duration': 599})
+        assert ran == [], "HandBrake must not run"
+        assert item['status'] == 'completed', item['error_message']
+        assert src.read_bytes() == b"e" * 400 and not out.exists()
+        with fresh_db.get_read_connection() as conn:
+            # No encode happened here, so the speed learner gets no sample
+            assert conn.execute("SELECT encoding_time_seconds FROM history"
+                                ).fetchone()[0] == 0
+
+    def test_partial_or_off_profile_output_is_encoded_again(
+            self, fresh_db, monkeypatch, tmp_path):
+        _, _, ran, _ = self._start(
+            fresh_db, monkeypatch, tmp_path,
+            {'codec': 'av1', 'height': 1080, 'resolution': '1920x1080', 'duration': 200})
+        assert len(ran) == 1                                  # truncated: encode
+        _, _, ran, _ = self._start(
+            fresh_db, monkeypatch, tmp_path,
+            {'codec': 'h265', 'height': 1080, 'resolution': '1920x1080', 'duration': 600})
+        assert len(ran) == 1                                  # wrong codec: encode

@@ -111,7 +111,10 @@ def preflight_source_check(file_path: str) -> Optional[str]:
       other str  — human-readable reason the file is unreadable/incomplete
                    (caller should quarantine it, without touching the file)
     """
-    p = Path(file_path)
+    from app.winpath import fs_path
+    # Long-path form: past 260 characters a present file reads as missing,
+    # and 'missing' drops the queue row.
+    p = Path(fs_path(file_path))
     if not p.exists():
         return 'missing'
     try:

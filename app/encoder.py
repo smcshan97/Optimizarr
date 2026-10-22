@@ -18,6 +18,7 @@ from app.resources import resource_monitor, resource_throttler
 from app.timeutil import utc_now
 from app.scanner import DEFAULT_MIN_SOURCE_BPP, source_bpp, low_bitrate_reason
 from app.logger import optimizarr_logger
+from app.winpath import MAX_COMPONENT, fs_path
 from app.handbrake import (  # noqa: F401  (re-exported)
     HB_PROGRESS_RE, HBJsonStream, parse_hb_json_progress, parse_hb_progress,
     preflight_source_check, parse_hb_encoder_list, detect_hardware_acceleration,
@@ -835,6 +836,28 @@ class EncodingJob:
             )
             return False
 
+        # ── Pre-flight: the encode's file name must be able to exist ────────
+        # Long paths are handled (app.winpath), but NTFS still caps a single
+        # file name at 255 characters, and the temp output adds "_optimized".
+        # HandBrake would fail on it every retry; say why once instead.
+        _src = Path(source_path)
+        _ext = {'mkv': '.mkv', 'mp4': '.mp4', 'webm': '.webm'}.get(
+            self.profile.get('container', 'mkv'), '.mkv')
+        _temp_name = f"{_src.stem}_optimized{_ext}"
+        if len(_temp_name) > MAX_COMPONENT:
+            msg = (f"File name is too long to encode: the temporary output "
+                   f"{_temp_name[:40]}… would be {len(_temp_name)} characters, "
+                   f"over the {MAX_COMPONENT}-character limit for one file name. "
+                   f"Shorten the name by {len(_temp_name) - MAX_COMPONENT} "
+                   f"characters (rename the file) and re-queue.")
+            optimizarr_logger.app_logger.warning("Skipping %s — %s", _src.name, msg)
+            devlog('enc_name_too_long', id=self.queue_item_id, n=len(_temp_name))
+            db.update_queue_item(
+                self.queue_item_id, status='failed', progress=0.0,
+                phase=None, phase_progress=0.0, phase_eta_seconds=0,
+                error_message=msg, retry_after=None)
+            return False
+
         self._refresh_stale_specs(source_path)
         self._unmet = self._unmet_targets()
         if self._unmet:
@@ -930,6 +953,17 @@ class EncodingJob:
         if has_upscale and self._source_already_at_target(original_input, upscale_plan):
             has_upscale = False
         self._preprocessed = bool(has_stereo or has_upscale)
+
+        # ── A finished encode from an earlier run: use it ────────────────────
+        if not self._preprocessed and self._finished_output_on_disk():
+            optimizarr_logger.app_logger.info(
+                "%s: a complete encode from an earlier run is already on disk "
+                "— finalizing it instead of encoding again",
+                Path(original_input).name)
+            devlog('enc_adopt', id=self.queue_item_id, f=Path(original_input).name)
+            self._adopted = True
+            self._finalize_encoding()
+            return True
 
         # ── Calculate progress ranges per phase ──────────────────────────────
         # Three phases: stereo → upscale → handbrake
@@ -1289,6 +1323,44 @@ class EncodingJob:
             f"{out_duration:.0f}s, {short_by:.0f}s of the claim was never "
             f"picture")
 
+    def _source_duration(self) -> float:
+        """The source's runtime in seconds from its queued specs, 0 if unknown."""
+        specs = self.queue_item.get('current_specs')
+        if isinstance(specs, str):
+            try:
+                import json as _cjson
+                specs = _cjson.loads(specs)
+            except (ValueError, TypeError):
+                specs = {}
+        duration = 0.0
+        if isinstance(specs, dict):
+            duration = float(specs.get('duration') or 0)
+        return duration or float(self.queue_item.get('duration_seconds') or 0)
+
+    def _finished_output_on_disk(self) -> bool:
+        """Whether {stem}_optimized from an earlier run is a whole encode on
+        this profile. Finalize used to miss outputs past 260 characters and
+        fail the row, leaving the finished encode behind. Anything partial
+        or off-profile is left for HandBrake to overwrite."""
+        from app.scanner import scanner as _probe_scanner, profile_targets, unmet_targets
+        src = Path(self.queue_item['file_path'])
+        ext = {'mkv': '.mkv', 'mp4': '.mp4', 'webm': '.webm'}.get(
+            self.profile.get('container', 'mkv'), '.mkv')
+        out_fs = Path(fs_path(src.parent / f"{src.stem}_optimized{ext}"))
+        source_duration = self._source_duration()
+        if source_duration <= 0 or not out_fs.exists():
+            return False
+        try:
+            specs = _probe_scanner.analyze_file(str(out_fs)) or {}
+        except Exception:
+            return False
+        out_duration = float(specs.get('duration') or 0)
+        # Same tolerance as finalize's truncation check
+        tolerance = max(5.0, source_duration * 0.02)
+        if out_duration <= 0 or abs(out_duration - source_duration) > tolerance:
+            return False
+        return not unmet_targets(specs, profile_targets(self.profile))
+
     def _finalize_encoding(self):
         """Replace original file with encoded version and update database."""
         from app.logger import optimizarr_logger
@@ -1308,11 +1380,16 @@ class EncodingJob:
         ext_map = {'mkv': '.mkv', 'mp4': '.mp4', 'webm': '.webm'}
         output_ext = ext_map.get(container, '.mkv')
         output_path = input_path.parent / f"{input_path.stem}_optimized{output_ext}"
+        # File operations use the long-path form (app.winpath): past 260
+        # characters a plain exists() is False for a file that is there.
+        # The plain paths stay for the database, logs and messages.
+        src_fs = Path(fs_path(input_path))
+        out_fs = Path(fs_path(output_path))
 
-        if not output_path.exists():
+        if not out_fs.exists():
             # Diagnostic: list files in the directory that match the stem
             try:
-                nearby = [f.name for f in input_path.parent.iterdir()
+                nearby = [f.name for f in src_fs.parent.iterdir()
                           if input_path.stem in f.name and f.name != input_path.name]
             except Exception:
                 nearby = []
@@ -1334,8 +1411,8 @@ class EncodingJob:
             return
 
         # Get file sizes
-        original_size = input_path.stat().st_size
-        new_size = output_path.stat().st_size
+        original_size = src_fs.stat().st_size
+        new_size = out_fs.stat().st_size
         savings = original_size - new_size
 
         # ── Sanity-check the output BEFORE deleting the original ──────────
@@ -1344,23 +1421,11 @@ class EncodingJob:
         # durations first. A shorter output is only a SUSPICION — container
         # durations lie — so _diagnose_short_output re-probes the source
         # before anything is thrown away.
-        source_duration = 0.0
-        specs_for_check = self.queue_item.get('current_specs')
-        if isinstance(specs_for_check, str):
-            try:
-                import json as _cjson
-                specs_for_check = _cjson.loads(specs_for_check)
-            except (ValueError, TypeError):
-                specs_for_check = {}
-        if isinstance(specs_for_check, dict):
-            source_duration = float(specs_for_check.get('duration') or 0)
-        if not source_duration:
-            source_duration = float(self.queue_item.get('duration_seconds') or 0)
-
+        source_duration = self._source_duration()
         if source_duration > 0:
             try:
                 from app.scanner import scanner as _probe_scanner
-                out_specs = _probe_scanner.analyze_file(str(output_path)) or {}
+                out_specs = _probe_scanner.analyze_file(str(out_fs)) or {}
                 out_duration = float(out_specs.get('duration') or 0)
             except Exception:
                 out_duration = 0.0
@@ -1386,7 +1451,7 @@ class EncodingJob:
                         else 'Truncated output',
                         input_path.name, msg)
                     try:
-                        output_path.unlink()
+                        out_fs.unlink()
                     except OSError:
                         pass
                     db.update_queue_item(
@@ -1429,7 +1494,7 @@ class EncodingJob:
                 rule = f"already meets the profile, so needs ≥{min_pct:g}% savings"
             if rejected:
                 try:
-                    output_path.unlink()
+                    out_fs.unlink()
                 except OSError:
                     pass
                 msg = (f"Kept original — re-encode was {change:+.1f}% "
@@ -1468,8 +1533,11 @@ class EncodingJob:
                     encoding_time = int((utc_now() - start_dt).total_seconds())
                 except (ValueError, TypeError):
                     encoding_time = 0
+        if getattr(self, '_adopted', False):
+            encoding_time = 0   # encoded in an earlier run: no speed sample
 
         final_path = input_path.parent / f"{input_path.stem}{output_ext}"
+        final_fs = Path(fs_path(final_path))
         # Same name as the source when the container didn't change.
         # normcase because Windows paths are case-insensitive.
         in_place = (os.path.normcase(str(final_path))
@@ -1482,7 +1550,7 @@ class EncodingJob:
         # (unlink source, THEN rename) had already deleted the original by
         # this point, so the failed rename left only the _optimized temp,
         # which the orphan sweeper then deleted as well. That path lost files.
-        if not in_place and final_path.exists():
+        if not in_place and final_fs.exists():
             msg = (f"Destination already exists: {final_path.name}. Another "
                    f"file already occupies the encoded name, so the original "
                    f"was kept and nothing was overwritten. Remove or rename "
@@ -1508,14 +1576,14 @@ class EncodingJob:
             if in_place:
                 # Atomic overwrite of the source — no window in which neither
                 # the original nor the encode exists.
-                os.replace(str(output_path), str(final_path))
+                os.replace(out_fs, final_fs)
             else:
                 # Move the encode into place FIRST, drop the source only once
                 # it is safely there. rename() (not replace()) so a file that
                 # appeared since the check above still can't be clobbered.
-                output_path.rename(final_path)
+                out_fs.rename(final_fs)
                 try:
-                    input_path.unlink()
+                    src_fs.unlink()
                 except OSError as unlink_err:
                     # Encode is in place and correct; only the old container
                     # lingers. Worth a warning, not a failure.
@@ -1682,7 +1750,8 @@ class EncodingJob:
             container = self.profile.get('container', 'mkv')
             ext_map = {'mkv': '.mkv', 'mp4': '.mp4', 'webm': '.webm'}
             output_ext = ext_map.get(container, '.mkv')
-            temp_out = original_path.parent / f"{original_path.stem}_optimized{output_ext}"
+            temp_out = Path(fs_path(
+                original_path.parent / f"{original_path.stem}_optimized{output_ext}"))
             if not temp_out.exists():
                 return
             # Windows doesn't release the file handle the instant the process
