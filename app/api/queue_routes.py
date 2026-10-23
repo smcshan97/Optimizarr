@@ -21,14 +21,19 @@ router = APIRouter()
 async def encode_progress_events(token: Optional[str] = None):
     """Server-sent events stream of live encode progress (~every 2s).
 
-    EventSource cannot set an Authorization header, so the JWT is passed as
-    a ``token`` query parameter and validated the same way the header is.
+    EventSource cannot set an Authorization header, so a one-minute stream
+    token from POST /auth/stream-token is passed as the ``token`` query
+    parameter.
     Each event is JSON: {"processing": [{id, progress, fps, eta_seconds,
-    file}, ...]}. The stream ends only when the client disconnects.
+    phase, phase_progress, phase_eta_seconds, file}, ...]}. ``phase`` is one
+    of stereo/upscale/encode/finalize so the UI can colour the bar and label
+    the ETA for the phase that is actually running. The stream ends only when
+    the client disconnects.
     """
+    # Only short-lived stream tokens (POST /auth/stream-token) are accepted
+    # here — the full API token must never sit in a URL.
     from app.auth import auth as _auth
-    payload = _auth.decode_token(token) if token else None
-    if not payload or not db.get_user_by_id(int(payload.get("sub", 0) or 0)):
+    if not await asyncio.to_thread(_auth.user_from_token, token, "stream"):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
                             detail="Invalid or expired token")
 
@@ -42,6 +47,9 @@ async def encode_progress_events(token: Optional[str] = None):
                 'progress': round(r.get('progress') or 0, 1),
                 'fps': r.get('current_fps') or 0,
                 'eta_seconds': r.get('eta_seconds') or 0,
+                'phase': r.get('phase') or 'encode',
+                'phase_progress': round(r.get('phase_progress') or 0, 1),
+                'phase_eta_seconds': r.get('phase_eta_seconds') or 0,
                 'file': _Path(r['file_path']).name,
             } for r in rows]
             yield f"data: {_json.dumps({'processing': data})}\n\n"
@@ -108,23 +116,19 @@ def _attach_eta(envelope: dict):
     ``pending_eta_seconds`` totals ALL pending items (not just this page),
     with ``pending_eta_unknown`` counting items lacking duration data.
     """
-    from app.scanner import estimate_encode_seconds
+    from app.scanner import estimate_item_seconds
 
     speed_stats = db.get_encode_speed_stats()
 
     for item in envelope.get('items', []):
         if item.get('status') not in ('pending', 'paused', 'processing'):
             continue
-        # Processing rows carry a REAL ETA parsed live from HandBrake output
-        # (Patch 33) — never overwrite it with a history-based estimate.
+        # Processing rows carry a REAL ETA measured live from the running
+        # phase (HandBrake output, or the upscaler's frame counter) — never
+        # overwrite that with a history-based estimate.
         if item.get('status') == 'processing' and (item.get('eta_seconds') or 0) > 0:
             continue
-        target = item.get('target_specs') or {}
-        est = estimate_encode_seconds(
-            item.get('duration_seconds') or 0,
-            target.get('codec') if isinstance(target, dict) else None,
-            speed_stats,
-        )
+        est = estimate_item_seconds(item, speed_stats)
         if est is None:
             continue
         if item.get('status') == 'processing':
@@ -143,24 +147,32 @@ def compute_pending_eta(speed_stats: Optional[dict] = None) -> tuple:
     of pending items lacking duration data (excluded from the total).
     Shared by the queue envelope and the /health endpoint.
     """
-    from app.scanner import estimate_encode_seconds
+    from app.scanner import estimate_encode_seconds, estimate_item_seconds
 
     if speed_stats is None:
         speed_stats = db.get_encode_speed_stats()
     total_eta = 0.0
     unknown = 0
+    # Plain encodes aggregate cleanly by codec — one SQL group per codec.
     for group in db.get_pending_duration_by_codec():
         unknown += group['unknown_count'] or 0
+        if group.get('preprocessed'):
+            continue
         est = estimate_encode_seconds(
-            group['total_duration'], group['codec'] or None, speed_stats
-        )
+            group['total_duration'], group['codec'] or None, speed_stats)
+        if est:
+            total_eta += est
+    # Upscale/stereo items cost by output pixels, not duration, so they can't
+    # be summed as a group. There are rarely many of them.
+    for item in db.get_pending_preprocessed_items():
+        est = estimate_item_seconds(item, speed_stats)
         if est:
             total_eta += est
     return round(total_eta), unknown
 
 
 @router.post("/queue/scan", response_model=MessageResponse)
-async def trigger_scan(
+def trigger_scan(
     background_tasks: BackgroundTasks,
     root_id: Optional[int] = None,
     current_user: dict = Depends(get_current_user)
@@ -171,7 +183,7 @@ async def trigger_scan(
             added = scanner.scan_root(root_id)
         else:
             added = scanner.scan_all_roots()
-        print(f"Scan completed: {added} files added to queue")
+        optimizarr_logger.app_logger.info(f"Scan completed: {added} files added to queue")
     
     background_tasks.add_task(run_scan)
     
@@ -181,7 +193,7 @@ async def trigger_scan(
 
 
 @router.patch("/queue/{item_id}", response_model=MessageResponse)
-async def update_queue_item(
+def update_queue_item(
     item_id: int,
     update: QueueUpdateRequest,
     current_user: dict = Depends(get_current_user)
@@ -189,6 +201,10 @@ async def update_queue_item(
     """Update a queue item (e.g., change priority or status)."""
     try:
         update_data = update.model_dump(exclude_none=True)
+        if 'profile_id' in update_data:
+            # A different profile means a different encoder/target — the
+            # cached target-quality result no longer applies.
+            update_data.update(tq_quality=None, tq_vmaf=None)
         db.update_queue_item(item_id, **update_data)
         
         return MessageResponse(message=f"Queue item {item_id} updated")
@@ -200,7 +216,7 @@ async def update_queue_item(
 
 
 @router.delete("/queue/{item_id}", response_model=MessageResponse)
-async def delete_queue_item(
+def delete_queue_item(
     item_id: int,
     current_user: dict = Depends(get_current_user)
 ):
@@ -217,7 +233,7 @@ async def delete_queue_item(
 
 
 @router.post("/queue/clear", response_model=MessageResponse)
-async def clear_queue(
+def clear_queue(
     status: Optional[str] = None,
     current_user: dict = Depends(get_current_admin_user)
 ):
@@ -233,7 +249,7 @@ async def clear_queue(
 
 # Control Endpoints
 @router.post("/control/start", response_model=MessageResponse)
-async def start_encoding(
+def start_encoding(
     background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_user)
 ):
@@ -262,7 +278,7 @@ async def start_encoding(
 
 
 @router.post("/control/stop", response_model=MessageResponse)
-async def stop_encoding(current_user: dict = Depends(get_current_user)):
+def stop_encoding(current_user: dict = Depends(get_current_user)):
     """Stop processing the encoding queue."""
     if not encoder_pool.is_running:
         return MessageResponse(
@@ -327,20 +343,20 @@ async def get_statistics(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/stats/clear-names", response_model=MessageResponse)
-async def clear_history_file_names(current_user: dict = Depends(get_current_admin_user)):
+def clear_history_file_names(current_user: dict = Depends(get_current_admin_user)):
     """Anonymize file paths in history while preserving all statistical data (admin only)."""
     count = db.clear_history_file_names()
     return MessageResponse(message=f"Cleared file names from {count} history records")
 
 
 @router.post("/stats/purge", response_model=MessageResponse)
-async def purge_history(current_user: dict = Depends(get_current_admin_user)):
+def purge_history(current_user: dict = Depends(get_current_admin_user)):
     """Delete all history records. Aggregate stats will reset to zero (admin only)."""
     count = db.purge_history()
     return MessageResponse(message=f"Purged {count} history records")
 
 @router.post("/queue/prioritize")
-async def prioritize_queue(
+def prioritize_queue(
     data: dict,
     current_user: dict = Depends(get_current_user)
 ):
@@ -357,62 +373,20 @@ async def prioritize_queue(
     back to a file-size proxy calibrated from items that DO have durations, so
     a 25-hour VR file still sorts after a 15-minute clip without a re-scan.
     Fastest-first suits short encoding windows; slowest-first suits overnight.
+
+    Any mode but 'default' is remembered and re-applied after each encode.
     """
+    from app import queue_maintenance as qm
     sort_by = data.get("sort_by", "default")
     order = data.get("order", "desc")
-    reverse = (order == "desc")
 
-    items = db.get_queue_items(status="pending")
-    if not items:
-        return {"message": "No pending items to prioritize", "count": 0}
-
-    # Sort by chosen criterion
-    if sort_by == "file_size":
-        items.sort(key=lambda i: i.get("file_size_bytes", 0), reverse=reverse)
-    elif sort_by == "estimated_savings":
-        items.sort(key=lambda i: i.get("estimated_savings_bytes", 0), reverse=reverse)
-    elif sort_by == "filename":
-        items.sort(key=lambda i: Path(i.get("file_path", "")).name.lower(), reverse=reverse)
-    elif sort_by in ("fastest_first", "slowest_first"):
-        from app.scanner import estimate_encode_seconds
-        speed_stats = db.get_encode_speed_stats()
-        slowest = (sort_by == "slowest_first")
-
-        def _codec(item):
-            t = item.get("target_specs") or {}
-            return t.get("codec") if isinstance(t, dict) else None
-
-        # Calibrate seconds-per-byte from items that HAVE a duration, then use
-        # it to estimate a cost for items that don't — so unknowns order by
-        # size instead of all piling at the end.
-        spb_samples = []
-        for it in items:
-            dur = it.get("duration_seconds") or 0
-            size = it.get("file_size_bytes") or 0
-            if dur > 0 and size > 0:
-                est = estimate_encode_seconds(dur, _codec(it), speed_stats)
-                if est:
-                    spb_samples.append(est / size)
-        avg_spb = (sum(spb_samples) / len(spb_samples)) if spb_samples else None
-
-        def _cost(item):
-            est = estimate_encode_seconds(
-                item.get("duration_seconds") or 0, _codec(item), speed_stats)
-            if est is not None:
-                return est
-            size = item.get("file_size_bytes") or 0
-            # Calibrated proxy when we have samples; else raw size keeps a
-            # consistent big-after-small ordering among unknowns.
-            return size * avg_spb if avg_spb is not None else size * 1e-6
-
-        items.sort(key=_cost, reverse=slowest)
-    # default: leave current order but we still write priorities below
-
-    # Assign rank-based priorities: 1 = first to encode, 2 = second, etc.
-    # Matches DB ORDER BY priority ASC
-    total = len(items)
-    for rank, item in enumerate(items):
-        db.update_queue_item(item["id"], priority=rank + 1)
+    # Remember the choice: it's re-applied after every encode so new items
+    # and maturing speed estimates keep the order right. Default clears it.
+    qm.set_auto_sort(sort_by, order)
+    total = qm.apply_sort(sort_by, order)
+    if not total:
+        return {"message": "No pending items to prioritize", "count": 0,
+                "sort_by": sort_by, "order": order}
 
     return {
         "message": f"Prioritized {total} pending items by {sort_by} ({order})",
@@ -422,13 +396,32 @@ async def prioritize_queue(
     }
 
 
+@router.get("/queue/check-status")
+def get_queue_check_status(current_user: dict = Depends(get_current_user)):
+    """Result of the last background queue check (for a passive status line)."""
+    from app.queue_maintenance import last_check, interval_minutes
+    from app.engine_health import problems_in_use
+    return {**last_check(), "interval_minutes": interval_minutes(),
+            "engine_problems": problems_in_use()}
+
+
+@router.get("/queue/auto-sort")
+def get_queue_auto_sort(current_user: dict = Depends(get_current_user)):
+    """The "Prioritize by" mode re-applied after each encode (null = none)."""
+    from app.queue_maintenance import get_auto_sort
+    mode = get_auto_sort()
+    return {"sort_by": mode[0] if mode else None, "order": mode[1] if mode else None}
+
+
 @router.post("/queue/reprobe")
-async def reprobe_queue_items(
+def reprobe_queue_items(
     current_user: dict = Depends(get_current_user)
 ):
     """
-    Re-run ffprobe on all queue items with UNKNOWN codec or resolution.
-    Useful after updating the scanner or adding new media.
+    Re-run ffprobe on all queue items with UNKNOWN codec or missing height.
+    Useful after updating the scanner or adding new media. (Items queued
+    before numeric width/height were recorded lack '$.height', which the
+    resolution sort and upscale-eligibility check rely on.)
     """
     import json
     from app.scanner import MediaScanner
@@ -436,7 +429,7 @@ async def reprobe_queue_items(
     scanner = MediaScanner()
     items = db.get_queue_items()
 
-    # Filter to items where codec is unknown/missing
+    # Filter to items where codec is unknown/missing or height was never stored
     to_probe = []
     for item in items:
         specs = item.get("current_specs") or {}
@@ -446,7 +439,7 @@ async def reprobe_queue_items(
             except Exception:
                 specs = {}
         codec = specs.get("codec", "unknown")
-        if codec in ("unknown", "", None):
+        if codec in ("unknown", "", None) or not specs.get("height"):
             to_probe.append(item)
 
     if not to_probe:
@@ -473,7 +466,7 @@ async def reprobe_queue_items(
 
 
 @router.post("/queue/clear-completed")
-async def clear_completed_queue(
+def clear_completed_queue(
     current_user: dict = Depends(get_current_user)
 ):
     """Remove all completed items from the queue."""
@@ -515,7 +508,7 @@ def _recheck_permission_item(item: dict) -> bool:
 
 
 @router.post("/queue/recheck-permissions", response_model=MessageResponse)
-async def recheck_all_permissions(current_user: dict = Depends(get_current_user)):
+def recheck_all_permissions(current_user: dict = Depends(get_current_user)):
     """Re-check every permission_error item; accessible files go pending."""
     items = db.get_queue_items(status='permission_error')
     if not items:
@@ -528,7 +521,7 @@ async def recheck_all_permissions(current_user: dict = Depends(get_current_user)
 
 
 @router.post("/queue/{item_id}/recheck-permissions", response_model=MessageResponse)
-async def recheck_item_permissions(
+def recheck_item_permissions(
     item_id: int,
     current_user: dict = Depends(get_current_user)
 ):
@@ -546,6 +539,59 @@ async def recheck_item_permissions(
     refreshed = db.get_queue_item(item_id) or {}
     return MessageResponse(
         message=f"Still blocked: {refreshed.get('permission_message') or 'permission error'}",
+        success=False
+    )
+
+
+def _recheck_quarantined_item(item: dict) -> str:
+    """Re-probe one quarantined item (shared with the background queue check)."""
+    from app.queue_maintenance import recheck_quarantined_item
+    return recheck_quarantined_item(item)
+
+
+@router.post("/queue/recheck-quarantined", response_model=MessageResponse)
+async def recheck_all_quarantined(current_user: dict = Depends(get_current_user)):
+    """Re-probe every quarantined item.
+
+    Valid videos (e.g. a download that has since completed) go back to
+    pending; vanished files are removed; still-broken files stay quarantined.
+    """
+    items = db.get_queue_items(status='quarantined')
+    if not items:
+        return MessageResponse(message="No quarantined items to check")
+    results = {'pending': 0, 'removed': 0, 'quarantined': 0}
+    for item in items:
+        outcome = await asyncio.to_thread(_recheck_quarantined_item, item)
+        results[outcome] += 1
+    return MessageResponse(
+        message=f"Re-checked {len(items)} item(s): {results['pending']} now pending, "
+                f"{results['removed']} removed (file gone), "
+                f"{results['quarantined']} still quarantined"
+    )
+
+
+@router.post("/queue/{item_id}/recheck-quarantined", response_model=MessageResponse)
+async def recheck_item_quarantined(
+    item_id: int,
+    current_user: dict = Depends(get_current_user)
+):
+    """Re-probe a single quarantined item."""
+    item = db.get_queue_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Queue item not found")
+    if item['status'] != 'quarantined':
+        return MessageResponse(
+            message=f"Item is '{item['status']}' — nothing to re-check",
+            success=False
+        )
+    outcome = await asyncio.to_thread(_recheck_quarantined_item, item)
+    if outcome == 'pending':
+        return MessageResponse(message="File is a valid video now — re-queued as pending")
+    if outcome == 'removed':
+        return MessageResponse(message="File no longer exists — removed from queue")
+    refreshed = db.get_queue_item(item_id) or {}
+    return MessageResponse(
+        message=f"Still quarantined: {refreshed.get('error_message') or 'not a readable video'}",
         success=False
     )
 
@@ -568,19 +614,48 @@ async def cleanup_temp_outputs(current_user: dict = Depends(get_current_admin_us
 
 
 @router.post("/queue/retry-failed", response_model=MessageResponse)
-async def retry_all_failed(current_user: dict = Depends(get_current_user)):
+def retry_all_failed(current_user: dict = Depends(get_current_user)):
     """Re-queue every failed item (resets retry counters)."""
     failed = db.get_queue_items(status='failed')
     for it in failed:
         db.update_queue_item(
             it['id'], status='pending', retry_count=0,
-            progress=0.0, error_message=None, retry_after=None
+            progress=0.0, phase=None, phase_progress=0.0, phase_eta_seconds=0,
+            current_fps=0, eta_seconds=0,
+            error_message=None, retry_after=None
         )
     return MessageResponse(message=f"Re-queued {len(failed)} failed item(s)")
 
 
+@router.post("/queue/{item_id}/reveal")
+async def reveal_queue_item(item_id: int,
+                            current_user: dict = Depends(get_current_user)):
+    """Open the host's file manager on this item's folder, file selected.
+
+    The path is looked up from the queue row — never taken from the request —
+    so there is no path for a caller to point somewhere else.
+
+    Returns {success, path, folder, message}. ``success`` false with a path
+    still present means the host could not open a window (headless box, or
+    you are browsing from another device); the UI copies the path instead.
+    """
+    item = db.get_queue_item(item_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Queue item not found")
+
+    from app.api.filesystem import reveal_path
+    path = item['file_path']
+    result = await asyncio.to_thread(reveal_path, path)
+    return {
+        "success": result['ok'],
+        "path": path,
+        "folder": result['folder'],
+        "message": result['detail'],
+    }
+
+
 @router.post("/queue/{item_id}/retry", response_model=MessageResponse)
-async def retry_queue_item(item_id: int, current_user: dict = Depends(get_current_user)):
+def retry_queue_item(item_id: int, current_user: dict = Depends(get_current_user)):
     """Re-queue a single failed or cancelled item (resets its retry counter)."""
     item = db.get_queue_item(item_id)
     if not item:
@@ -592,13 +667,15 @@ async def retry_queue_item(item_id: int, current_user: dict = Depends(get_curren
         )
     db.update_queue_item(
         item_id, status='pending', retry_count=0,
-        progress=0.0, error_message=None, retry_after=None
+        progress=0.0, phase=None, phase_progress=0.0, phase_eta_seconds=0,
+        current_fps=0, eta_seconds=0,
+        error_message=None, retry_after=None
     )
     return MessageResponse(message="Item re-queued")
 
 
 @router.post("/queue/reorder", response_model=MessageResponse)
-async def reorder_queue(
+def reorder_queue(
     data: dict,
     current_user: dict = Depends(get_current_user)
 ):
@@ -610,10 +687,13 @@ async def reorder_queue(
     if not items:
         raise HTTPException(status_code=400, detail="No items provided")
 
-    for entry in items:
-        item_id = entry.get('id')
-        priority = entry.get('priority')
-        if item_id is not None and priority is not None:
-            db.update_queue_item(int(item_id), priority=int(priority))
+    # A hand-arranged order must not be undone by the next auto re-sort
+    from app.queue_maintenance import set_auto_sort
+    set_auto_sort(None)
 
-    return MessageResponse(message=f"Reordered {len(items)} items")
+    count = db.set_queue_priorities(
+        (e['id'], e['priority']) for e in items
+        if e.get('id') is not None and e.get('priority') is not None
+    )
+
+    return MessageResponse(message=f"Reordered {count} items")

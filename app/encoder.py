@@ -3,45 +3,92 @@ Encoder module for Optimizarr.
 Handles video transcoding using HandBrakeCLI with progress tracking.
 """
 import subprocess
-import re
+import shlex
 import time
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Callable
 import os
-import shutil
 import signal
 import platform
 
 from app.database import db
 from app.resources import resource_monitor, resource_throttler
-
-
-# HandBrakeCLI progress line, e.g.:
-#   Encoding: task 1 of 1, 23.45 % (113.06 fps, avg 102.33 fps, ETA 00h12m34s)
-# The fps/ETA group is absent on the first few lines of an encode.
-HB_PROGRESS_RE = re.compile(
-    r'Encoding: task \d+ of \d+, ([\d.]+) %'
-    r'(?:\s*\(([\d.]+) fps, avg ([\d.]+) fps, ETA (\d+)h(\d+)m(\d+)s\))?'
+from app.timeutil import utc_now
+from app.scanner import DEFAULT_MIN_SOURCE_BPP, source_bpp, low_bitrate_reason
+from app.logger import optimizarr_logger
+from app.winpath import MAX_COMPONENT, fs_path
+from app.handbrake import (  # noqa: F401  (re-exported)
+    HB_PROGRESS_RE, HBJsonStream, parse_hb_json_progress, parse_hb_progress,
+    preflight_source_check, parse_hb_encoder_list, detect_hardware_acceleration,
+    handbrake_cli, handbrake_version,
 )
 
 
-def parse_hb_progress(line: str):
-    """Parse a HandBrakeCLI progress line.
+def min_savings_percent() -> float:
+    """Minimum size reduction (percent) for an encode to replace its source."""
+    try:
+        return max(0.0, min(90.0, float(db.get_setting('min_savings_percent', '5'))))
+    except (TypeError, ValueError):
+        return 5.0
 
-    Returns (percent, current_fps, eta_seconds) — fps/eta are None when
-    HandBrake hasn't printed them yet — or None for non-progress lines.
-    """
-    m = HB_PROGRESS_RE.search(line)
-    if not m:
+
+# A conversion (source doesn't meet its profile) is kept even when it comes
+# out bigger — the point is a uniform library, not a smaller file. Only an
+# output past this multiple of the source is treated as a broken encode
+# (wrong quality scale, runaway bitrate) and discarded. Real conversions on
+# this library peak around 1.8x (lean H.264 at the profile's quality).
+CONVERSION_SANITY_RATIO = 3.0
+
+
+# Finished quality searches needed before their median replaces the
+# profile's own quality as the next search's starting point.
+LEARNED_START_MIN_SAMPLES = 5
+
+
+def learned_start_quality(database, profile_id, content_type: Optional[str],
+                          default: int) -> int:
+    """Where to start a file's quality search: the median result of recent
+    searches for the same profile and content type (2D / 3D / live), else
+    the same profile, else ``default``. Similar files converge on similar
+    values (animated clips here settled near 39 at VMAF 95), and a start at
+    the answer settles the search in two encodes instead of five or six."""
+    import statistics
+    sql = ("SELECT tq_quality FROM queue WHERE profile_id = ? AND tq_quality IS NOT NULL "
+           "AND status IN ('completed', 'kept_original'){} "
+           "ORDER BY completed_at DESC, id DESC LIMIT 50")
+    try:
+        with database.get_read_connection() as conn:
+            for extra, args in ((" AND content_type = ?", (profile_id, content_type)),
+                                ("", (profile_id,))):
+                if extra and not content_type:
+                    continue
+                rows = [r[0] for r in conn.execute(sql.format(extra), args).fetchall()]
+                if len(rows) >= LEARNED_START_MIN_SAMPLES:
+                    return int(round(statistics.median(rows)))
+    except Exception:
+        pass
+    return int(default)
+
+
+# SVT-AV1 preset when a profile leaves it on Auto. HandBrake's own default is
+# 5; measured on this library (SVT-AV1 4.1, i7-9700K) preset 6 was ~1.3x
+# faster for files ~6-13% bigger at the same CRF — with per-file target
+# quality the difference lands in size, not visible quality.
+DEFAULT_SVT_AV1_PRESET = "6"
+
+
+def bitrate_cap_encopts(hb_encoder: str, kbps: int) -> Optional[str]:
+    """Encoder option string capping video bitrate at ``kbps``, or None
+    when HandBrake gives no per-encoder way to (hardware encoders)."""
+    if not kbps:
         return None
-    pct = float(m.group(1))
-    fps = float(m.group(2)) if m.group(2) else None
-    eta = None
-    if m.group(4) is not None:
-        eta = int(m.group(4)) * 3600 + int(m.group(5)) * 60 + int(m.group(6))
-    return pct, fps, eta
+    if hb_encoder.startswith('svt_av1'):
+        return f"mbr={kbps}"      # SVT-AV1 capped CRF
+    if hb_encoder.startswith(('x264', 'x265')):
+        return f"vbv-maxrate={kbps}:vbv-bufsize={kbps * 2}"
+    return None
 
 
 class EncodingJob:
@@ -51,12 +98,35 @@ class EncodingJob:
         self.queue_item_id = queue_item_id
         self.profile = profile
         self.process: Optional[subprocess.Popen] = None
+        # Active pre-phase subprocess (ffmpeg/upscaler) — registered by the
+        # upscale pipeline so stop() can kill it; HandBrake uses self.process.
+        self.pipeline_process: Optional[subprocess.Popen] = None
         self.progress = 0.0
         self.is_paused = False
         self.paused_reason = None
         self.monitoring_thread = None
         self.stop_monitoring = False
         self._manually_stopped = False
+        # Honest encode timing: monotonic clock around the HandBrake phase
+        # only, minus time spent thermally paused. The old completed_at −
+        # started_at wall clock swallowed upscale phases and pauses, teaching
+        # the speed learner ratios like 4800× realtime.
+        self._hb_started_monotonic: Optional[float] = None
+        self._paused_seconds = 0.0
+        self._paused_at_monotonic: Optional[float] = None
+        self._preprocessed = False
+        # Ways the source falls short of the profile (scanner.unmet_targets);
+        # a source that meets it is only re-encoded if that saves space.
+        self._unmet: list = []
+        # Non-fatal fallbacks this job took, saved to queue.notice so a
+        # finished row says "upscale failed — encoded without it" instead of
+        # looking like a normal success (RTX VSR failed silently for weeks).
+        self._notices: list = []
+        # Megapixel-frames of AI work actually performed, recorded to history
+        # so the estimator learns seconds-per-megapixel-frame. Stays 0 unless
+        # an upscale genuinely ran — a failed upscale that fell back to a
+        # plain encode must not teach that the work was free.
+        self._upscale_work_mpf = 0.0
         
         # Resource limits — temperature-first defaults
         self.resource_limits = resource_limits or {
@@ -80,12 +150,21 @@ class EncodingJob:
         if not self.queue_item:
             raise ValueError(f"Queue item {queue_item_id} not found")
     
-    def build_command(self, input_override: str = None) -> list:
+    def build_command(self, input_override: str = None, size_override=None,
+                      output_override: str = None, quality_override: int = None,
+                      video_only: bool = False) -> list:
         """Build HandBrakeCLI command from profile settings.
         
         Args:
             input_override: If provided, use this path as the input instead of
                             the queue item's file_path (used for upscaled temp files).
+            size_override: (width, height) to scale to when the profile sets no
+                           resolution — an upscale whose model overshot the
+                           requested factor is brought down here.
+            output_override / quality_override / video_only: used by the
+                           target-quality search to encode short samples
+                           with the profile's real settings at a candidate
+                           quality, without audio, subtitles or chapters.
         """
         input_file = input_override if input_override else self.queue_item['file_path']
         original_file = self.queue_item['file_path']
@@ -102,86 +181,138 @@ class EncodingJob:
         # Output always goes next to the ORIGINAL file, not the temp upscale file
         original_path = Path(original_file)
         output_ext = container_info['ext']
-        output_file = str(original_path.parent / f"{original_path.stem}_optimized{output_ext}")
+        output_file = output_override or str(
+            original_path.parent / f"{original_path.stem}_optimized{output_ext}")
 
-        # Base command
-        cmd = ['HandBrakeCLI', '-i', input_file, '-o', output_file]
+        # Base command. --json emits structured Progress/scan blocks instead
+        # of the human text lines — exact progress/fps/ETA, immune to output
+        # format drift between HandBrake versions.
+        cmd = [handbrake_cli(), '--json', '-i', input_file, '-o', output_file]
 
         # Container format
         cmd.extend(['--format', container_info['format']])
         
-        # ---- Encoder Selection (with HW accel support) ----
-        encoder = self.profile['encoder']
-        
-        # If hardware acceleration is enabled, try to use a GPU encoder
-        if self.profile.get('hw_accel_enabled'):
-            hw_encoder = self._get_hw_encoder(encoder)
-            if hw_encoder:
-                encoder = hw_encoder
-        
-        # Map encoder names to HandBrake encoder names
-        encoder_map = {
-            'svt_av1': 'svt_av1',
-            'x265': 'x265',
-            'x264': 'x264',
-            'nvenc_h265': 'nvenc_h265',
-            'nvenc_h264': 'nvenc_h264',
-            'nvenc_av1': 'nvenc_av1',
-            'qsv_h265': 'qsv_h265',
-            'qsv_h264': 'qsv_h264',
-            'qsv_av1': 'qsv_av1',
-            'vce_h264': 'vce_h264',
-            'vce_h265': 'vce_h265',
-            'vt_h264': 'vt_h264',
-            'vt_h265': 'vt_h265',
-        }
-        
-        hb_encoder = encoder_map.get(encoder, encoder)
+        # ---- Encoder Selection (HW accel + 10-bit/HDR) ----
+        hb_encoder = self.select_encoder()
         cmd.extend(['--encoder', hb_encoder])
+
+        # Hardware DECODING (independent of the encoder choice): NVDEC/QSV
+        # offloads source decode to the GPU, freeing CPU for software encoders
+        # like SVT-AV1. HandBrake falls back to software decoding on its own
+        # for sources the hardware can't handle.
+        if self.profile.get('hw_accel_enabled'):
+            hw = detect_hardware_acceleration()
+            if hw.get('nvidia'):
+                cmd.extend(['--enable-hw-decoding', 'nvdec'])
+            elif hw.get('intel'):
+                cmd.extend(['--enable-hw-decoding', 'qsv'])
         
-        # Quality
-        cmd.extend(['--quality', str(self.profile['quality'])])
+        # Quality — per-file value from the target-quality search when one ran
+        quality = quality_override
+        if quality is None:
+            quality = getattr(self, '_tq_quality', None) or self.profile['quality']
+        cmd.extend(['--quality', str(quality)])
         
-        # Preset
-        if self.profile.get('preset'):
-            cmd.extend(['--encoder-preset', self.profile['preset']])
+        # Preset (Auto = our measured default for SVT-AV1, HandBrake's otherwise)
+        preset = self.profile.get('preset')
+        if not preset and hb_encoder.startswith('svt_av1'):
+            preset = DEFAULT_SVT_AV1_PRESET
+        if preset:
+            cmd.extend(['--encoder-preset', str(preset)])
         
-        # Resolution
+        # Resolution — a CEILING: --width/--height upscaled smaller sources
+        # to the profile size (a 720p file came out 1080p and bigger).
         if self.profile.get('resolution'):
             width, height = self.profile['resolution'].split('x')
-            cmd.extend(['--width', width, '--height', height])
+            cmd.extend(['--maxWidth', width, '--maxHeight', height])
+        elif size_override:
+            cmd.extend(['--width', str(size_override[0]),
+                        '--height', str(size_override[1])])
         
         # Framerate
         if self.profile.get('framerate'):
-            cmd.extend(['--rate', str(self.profile['framerate'])])
+            # Peak-limited: caps faster sources, never frame-doubles slower ones
+            cmd.extend(['--rate', str(self.profile['framerate']), '--pfr'])
         else:
             # Variable framerate (preserve source)
             cmd.append('--vfr')
         
-        # ---- Audio Handling ----
-        audio_args = self._build_audio_args()
-        cmd.extend(audio_args)
-        
-        # ---- Subtitle Handling ----
-        subtitle_args = self._build_subtitle_args()
-        cmd.extend(subtitle_args)
+        if video_only:
+            # Samples for the VMAF search: no audio/subs, and no auto-crop —
+            # cropping a sample changes its geometry, so VMAF would compare
+            # shifted pixels (a 1918-wide encode of a 1920 reference scored
+            # ~70 regardless of quality).
+            cmd.extend(['--audio', 'none', '--subtitle', 'none', '--crop-mode', 'none'])
+        else:
+            # ---- Audio Handling ----
+            cmd.extend(self._build_audio_args())
+            # ---- Subtitle Handling ----
+            cmd.extend(self._build_subtitle_args())
         
         # ---- Video Filters ----
-        if self.profile.get('enable_filters'):
-            filter_args = self._build_filter_args()
-            cmd.extend(filter_args)
+        filter_args = self._build_filter_args()
+        if video_only:
+            # The sample's --crop-mode none above must win (see there).
+            filter_args = [a for a in filter_args if not a.startswith('--crop-mode')]
+        cmd.extend(filter_args)
         
         # ---- Chapter Markers ----
-        if self.profile.get('chapter_markers', True):
+        if self.profile.get('chapter_markers', True) and not video_only:
             cmd.append('--markers')
         
-        # Two-pass encoding
-        if self.profile.get('two_pass'):
-            cmd.append('--multi-pass')
+        # Film-grain mode. Grain is noise to an encoder: preserving it eats
+        # bits, smoothing it looks plasticky. SVT-AV1 can strip it and
+        # re-synthesise it on playback (film-grain=N); x265 has a grain tune.
+        # All --encopts go in ONE flag: HandBrake keeps only the last one.
+        encopts = []
+        grain = int(self.profile.get('film_grain') or 0)
+        if not grain and self.queue_item.get('content_type') == 'live':
+            # Optional grain synthesis for files classified as live action
+            # (Settings -> Content Detection; off by default)
+            try:
+                grain = int(db.get_setting('auto_film_grain_live', '0') or 0)
+            except (TypeError, ValueError):
+                grain = 0
+        if grain > 0:
+            if hb_encoder.startswith('svt_av1'):
+                encopts.append(f'film-grain={min(grain, 50)}:film-grain-denoise=0')
+            elif hb_encoder.startswith('x265'):
+                # x265's grain tune segfaults HandBrake 1.10.x with the
+                # ultrafast/superfast presets (verified; fixed in 1.11.2).
+                crashy = ((self.profile.get('preset') or '') in ('ultrafast', 'superfast')
+                          and handbrake_version() < (1, 11))
+                if not crashy:
+                    cmd.extend(['--encoder-tune', 'grain'])
+
+        cap = int(self.profile.get('max_bitrate_kbps') or 0)
+        cap_opts = bitrate_cap_encopts(hb_encoder, cap)
+        if cap_opts:
+            encopts.append(cap_opts)
+        elif cap:
+            optimizarr_logger.app_logger.warning(
+                "%s has no bitrate cap option in HandBrake — the %d kbps limit "
+                "isn't enforced for this encode", hb_encoder, cap)
+            self._note(f"Bitrate cap not enforced — {hb_encoder} has no cap option")
+        if encopts:
+            cmd.extend(['--encopts', ':'.join(encopts)])
+
+        # (two_pass is intentionally not emitted: HandBrake's --multi-pass
+        # only applies to average-bitrate encodes and every profile here is
+        # constant-quality --quality, so it did nothing but imply otherwise.)
         
-        # Custom arguments (always last so they can override)
+        # Custom arguments (always last so they can override).
+        # shlex keeps quoted values intact (--encoder-options "a=1:b=2 c") but
+        # POSIX-mode would eat backslashes in bare Windows paths — so only use
+        # it when the string actually contains quotes.
         if self.profile.get('custom_args'):
-            custom_args = self.profile['custom_args'].split()
+            raw_args = self.profile['custom_args']
+            if '"' in raw_args or "'" in raw_args:
+                try:
+                    custom_args = shlex.split(raw_args)
+                except ValueError:
+                    custom_args = raw_args.split()
+            else:
+                custom_args = raw_args.split()
             cmd.extend(custom_args)
         
         return cmd
@@ -286,64 +417,135 @@ class EncodingJob:
         return []
     
     def _build_filter_args(self) -> list:
-        """Build auto-detect video filter arguments."""
+        """Video filter arguments from the profile: "filters" is deinterlace
+        + auto-crop; denoise is its own option because NLMeans is costly —
+        measured on a 1080p clip here, 229 s with it vs 85 s without (the
+        output was ~15% smaller, since denoised video compresses better)."""
         filters = []
-        
-        # Comb detection + decomb (for interlaced content)
-        filters.extend(['--comb-detect', '--decomb'])
-        
-        # Light denoise (safe for all content)
-        filters.append('--nlmeans=light')
-        
-        # Auto crop (remove black bars)
-        filters.append('--crop-mode=auto')
-        
+        if self.profile.get('enable_filters'):
+            # Comb detection + decomb (for interlaced content)
+            filters.extend(['--comb-detect', '--decomb'])
+        if self.profile.get('denoise'):
+            filters.append('--nlmeans=light')
+        if self.profile.get('enable_filters'):
+            # Auto crop (remove black bars)
+            filters.append('--crop-mode=auto')
         return filters
     
     def _get_hw_encoder(self, current_encoder: str) -> Optional[str]:
-        """Try to map a software encoder to a hardware encoder.
-        
-        Conservative approach: only map codecs that are reliably supported
-        across all GPUs for each vendor. AV1 hardware encoding requires
-        specific GPU generations (NVIDIA RTX 40+, Intel Arc) that we
-        cannot reliably detect from HandBrake alone, so we skip those
-        and let the software encoder handle them.
+        """Map the profile's codec to a hardware encoder HandBrake offers.
+
+        HandBrake only lists a hardware encoder when the installed GPU can
+        actually run it (e.g. nvenc_av1 is absent on pre-RTX-40 cards), so
+        its encoder list is the authority — AV1 now goes to NVENC/QSV/VCN
+        on GPUs that support it. If the list couldn't be read, fall back to
+        the codecs every GPU generation supports (H.264/H.265).
         """
-        # Detect what's available
         hw = detect_hardware_acceleration()
-        
+        names = set(hw.get('encoder_names') or [])
         codec = self.profile.get('codec', 'av1')
-        
-        # NVIDIA: H.264/H.265 are safe on all NVENC GPUs.
-        # AV1 requires RTX 40+ (Ada Lovelace) — skip to avoid silent failures.
-        if hw.get('nvidia'):
-            safe_map = {'h264': 'nvenc_h264', 'h265': 'nvenc_h265'}
-            if codec in safe_map:
-                return safe_map[codec]
-        
-        # Intel QSV: H.264/H.265 are broadly supported.
-        # AV1 requires Arc GPUs — skip for safety.
-        if hw.get('intel'):
-            safe_map = {'h264': 'qsv_h264', 'h265': 'qsv_h265'}
-            if codec in safe_map:
-                return safe_map[codec]
-        
-        if hw.get('amd'):
-            safe_map = {'h264': 'vce_h264', 'h265': 'vce_h265'}
-            if codec in safe_map:
-                return safe_map[codec]
-        
-        if hw.get('apple'):
-            safe_map = {'h264': 'vt_h264', 'h265': 'vt_h265'}
-            if codec in safe_map:
-                return safe_map[codec]
-        
-        # No safe HW encoder for this codec — keep software encoder
+
+        for vendor, prefix in (('nvidia', 'nvenc'), ('intel', 'qsv'),
+                               ('amd', 'vce'), ('apple', 'vt')):
+            if not hw.get(vendor):
+                continue
+            candidate = f"{prefix}_{codec}"
+            if names:
+                if candidate in names:
+                    return candidate
+            elif codec in ('h264', 'h265'):
+                return candidate
+
+        # No hardware encoder for this codec — keep the software encoder
         return None
+
+    def source_video_info(self) -> Dict:
+        """Bit depth / HDR info for the ORIGINAL source (cached per job).
+
+        Scan-queued items carry it in current_specs; webhook/sync items only
+        have Sonarr/Radarr's codec+resolution, so probe once here.
+        """
+        if getattr(self, '_source_info', None) is not None:
+            return self._source_info
+        specs = self.queue_item.get('current_specs') or {}
+        if isinstance(specs, str):
+            import json as _json
+            try:
+                specs = _json.loads(specs)
+            except ValueError:
+                specs = {}
+        if 'bit_depth' in specs:
+            info = specs
+        else:
+            try:
+                from app.scanner import scanner
+                info = scanner.probe_video_color(self.queue_item['file_path'])
+            except Exception:
+                info = {}
+        self._source_info = info
+        return info
+
+    def select_encoder(self) -> str:
+        """Choose the HandBrake encoder name for this job.
+
+        1. Hardware encoder if the profile enables it and one exists.
+        2. 10-bit: when the source is HDR or >8-bit, use the encoder's
+           ``_10bit`` variant — an 8-bit encode of an HDR source drops the
+           HDR metadata and comes out washed out. H.264 is left alone (10-bit
+           H.264 barely plays anywhere and can't carry HDR anyway).
+        3. A ``*_10bit`` encoder HandBrake doesn't offer falls back to its
+           8-bit base rather than failing the encode.
+        """
+        encoder = self.profile['encoder']
+        if self.profile.get('hw_accel_enabled'):
+            encoder = self._get_hw_encoder(encoder) or encoder
+
+        names = set(detect_hardware_acceleration().get('encoder_names') or [])
+        base = encoder[:-6] if encoder.endswith('_10bit') else encoder
+        info = self.source_video_info()
+        wants_10bit = (encoder.endswith('_10bit') or bool(info.get('hdr'))
+                       or (info.get('bit_depth') or 8) > 8)
+        is_h264 = base == 'x264' or base.endswith('h264')
+
+        chosen = encoder
+        if wants_10bit and not is_h264:
+            ten = f"{base}_10bit"
+            if not names or ten in names:
+                chosen = ten
+            else:
+                chosen = base
+        if names and chosen not in names and chosen.endswith('_10bit'):
+            chosen = chosen[:-6]
+
+        if chosen != self.profile['encoder']:
+            reason = []
+            if info.get('hdr'):
+                reason.append('HDR source')
+            elif (info.get('bit_depth') or 8) > 8:
+                reason.append(f"{info.get('bit_depth')}-bit source")
+            if self.profile.get('hw_accel_enabled') and not chosen.startswith(
+                    self.profile['encoder'].replace('_10bit', '')):
+                reason.append('hardware acceleration')
+            try:
+                from app.logger import optimizarr_logger
+                optimizarr_logger.app_logger.info(
+                    "Encoder %s -> %s (%s)", self.profile['encoder'], chosen,
+                    ', '.join(reason) or 'availability')
+            except Exception:
+                pass
+        if info.get('hdr') and is_h264:
+            try:
+                from app.logger import optimizarr_logger
+                optimizarr_logger.app_logger.warning(
+                    "HDR source encoded with an H.264 profile — HDR will be lost: %s",
+                    self.queue_item.get('file_path'))
+            except Exception:
+                pass
+        return chosen
     
     def _monitor_resources(self):
         """Background thread to monitor resources and pause/resume if needed."""
-        print("  Starting resource monitoring thread...")
+        optimizarr_logger.app_logger.info("  Starting resource monitoring thread...")
         
         while not self.stop_monitoring and self.process and self.process.poll() is None:
             time.sleep(5)  # Check every 5 seconds
@@ -367,10 +569,10 @@ class EncodingJob:
             should_pause, reason = resource_throttler.should_pause_encoding(**throttle_kwargs)
             
             if should_pause and not self.is_paused:
-                print(f"\n⏸ Pausing encoding: {reason}")
+                optimizarr_logger.app_logger.info(f"\n⏸ Pausing encoding: {reason}")
                 self.pause(reason)
             elif not should_pause and self.is_paused:
-                print(f"\n▶ Resuming encoding (resources available)")
+                optimizarr_logger.app_logger.info(f"\n▶ Resuming encoding (resources available)")
                 self.resume()
             
             # Update resource usage in database
@@ -382,7 +584,206 @@ class EncodingJob:
                         current_cpu_percent=process_resources['cpu_percent'],
                         current_memory_mb=process_resources['memory_mb']
                     )
-    
+
+    def _note(self, text: str):
+        notes = self.__dict__.setdefault('_notices', [])
+        if text not in notes:
+            notes.append(text)
+
+    def _notice_text(self) -> Optional[str]:
+        return "; ".join(getattr(self, '_notices', None) or []) or None
+
+    def _unmet_targets(self) -> list:
+        """What the source falls short of in this profile (see
+        scanner.unmet_targets). Webhook/sync rows only carry Sonarr/Radarr's
+        summary, so missing framerate/bitrate is probed."""
+        import json as _json
+        from app.scanner import profile_targets, unmet_targets
+        specs = self.queue_item.get('current_specs') or {}
+        if isinstance(specs, str):
+            try:
+                specs = _json.loads(specs)
+            except ValueError:
+                specs = {}
+        if not specs.get('framerate') or not specs.get('bit_rate'):
+            try:
+                from app.scanner import scanner as _scanner
+                specs = {**specs, **(_scanner._probe_with_ffprobe(
+                    self.queue_item['file_path']) or {})}
+            except Exception:
+                pass
+        return unmet_targets(specs, profile_targets(self.profile))
+
+    def _refresh_stale_specs(self, source_path: str):
+        """Re-probe the source when the queued specs can't be trusted.
+
+        Bit depth/HDR, the low-bitrate skip and the truncation check all read
+        current_specs. Specs taken from embedded cover art (an older scan bug)
+        or from a file that has since been replaced would encode an HDR
+        source as 8-bit SDR or judge a good output truncated. The background
+        queue check fixes these too, but a job can start before it gets there.
+        """
+        from app.queue_maintenance import needs_reprobe
+        try:
+            size = os.path.getsize(source_path)
+            if not needs_reprobe(self.queue_item, size):
+                return
+            from app.scanner import scanner
+            specs = scanner.analyze_file(source_path)
+        except Exception:
+            return
+        if not specs or specs.get('codec', 'unknown') == 'unknown':
+            return
+        import json as _json
+        optimizarr_logger.app_logger.info(
+            "Queued specs for %s were stale — re-probed (%s %s)",
+            Path(source_path).name, specs.get('codec'), specs.get('resolution'))
+        self.queue_item['current_specs'] = specs
+        self.queue_item['file_size_bytes'] = size
+        self.queue_item['duration_seconds'] = specs.get('duration', 0)
+        self._source_info = None
+        db.update_queue_item(self.queue_item_id, current_specs=_json.dumps(specs),
+                             file_size_bytes=size,
+                             duration_seconds=specs.get('duration', 0))
+
+    def _source_already_at_target(self, input_path: str, upscale_plan: Dict) -> bool:
+        """True when the file on disk no longer needs the planned upscale.
+
+        The plan was decided at scan time from the queue row's specs, which
+        can be stale (file replaced since) or wrong (older scans read embedded
+        cover art as the video: a 1080p file queued as "960x540 png" spent a
+        projected 45 hours AI-upscaling to 4K). Re-probe the real stream and
+        apply the scanner's own eligibility rule before burning GPU days.
+        """
+        from app.upscaler import _get_video_info
+        height = _get_video_info(input_path).get('height', 0)
+        target = upscale_plan.get('target_height') or 0
+        if not height or not target or height < target * 0.85:
+            return False
+        optimizarr_logger.app_logger.warning(
+            "Skipping planned upscale of %s — source is already %dp (target %dp; "
+            "the queued specs were stale)", Path(input_path).name, height, target)
+        return True
+
+    def _run_target_quality(self) -> Optional[str]:
+        """Pick this file's encoder quality from the profile's VMAF target.
+
+        Sets self._tq_quality. Returns 'skip' when the samples predict the
+        encode won't shrink the file enough (item marked kept_original).
+        Any failure falls back to the profile's fixed quality.
+        """
+        from app.logger import optimizarr_logger
+        from app import target_quality as tq
+        target = float(self.profile.get('target_vmaf') or 0)
+        cached = self.queue_item.get('tq_quality')
+        if cached:
+            self._tq_quality = int(cached)
+            return None
+        hb_encoder = self.select_encoder()
+        if tq.quality_range(hb_encoder) is None:
+            return None
+        info = self.source_video_info()
+        if info.get('hdr'):
+            return None   # VMAF isn't meaningful for PQ/HLG
+        source = self.queue_item['file_path']
+        try:
+            from app.scanner import scanner as _scanner
+            specs = _scanner._probe_with_ffprobe(source) or {}
+        except Exception:
+            specs = {}
+        duration = float(specs.get('duration') or 0)
+        width, height = int(specs.get('width') or 0), int(specs.get('height') or 0)
+
+        def register(proc):
+            self.pipeline_process = proc
+
+        def encode_sample(ref, q, out):
+            cmd = self.build_command(input_override=str(ref), output_override=str(out),
+                                     quality_override=q, video_only=True)
+            proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                    stdin=subprocess.DEVNULL)
+            register(proc)
+            try:
+                return proc.wait() == 0
+            finally:
+                register(None)
+
+        db.update_queue_item(self.queue_item_id, phase='analyze', phase_progress=0.0,
+                             phase_eta_seconds=0)
+        result = tq.find_quality(
+            source=source, duration=duration, width=width, height=height,
+            hb_encoder=hb_encoder,
+            start_quality=learned_start_quality(
+                db, self.profile.get('id') or self.queue_item.get('profile_id'),
+                self.queue_item.get('content_type'), int(self.profile['quality'])),
+            target=target, encode_sample=encode_sample, register=register,
+            progress=lambda pct: db.update_queue_item(self.queue_item_id,
+                                                      phase_progress=round(pct, 1)),
+            # Must convert anyway (doesn't meet the profile)? Same target as
+            # every other file, whatever the size.
+            convert=bool(self._unmet))
+        if self._manually_stopped:
+            return None
+        if not result:
+            if duration >= tq.MIN_DURATION and width > 0:
+                self._note("Quality search failed — used the profile's fixed quality")
+            return None
+        self._tq_quality = int(result['quality'])
+        db.update_queue_item(self.queue_item_id, tq_quality=self._tq_quality,
+                             tq_vmaf=result['vmaf'], tq_xpsnr=result.get('xpsnr'))
+        if not result['met_target']:
+            how = ", best reachable"
+        else:
+            how = ""
+        optimizarr_logger.app_logger.info(
+            "Target VMAF %.1f: using quality %d (VMAF %.2f, XPSNR %s%s) for %s", target,
+            self._tq_quality, result['vmaf'] or 0,
+            f"{result['xpsnr']:.2f} dB" if result.get('xpsnr') else "n/a",
+            how, Path(source).name)
+
+        ratio = result.get('size_ratio')
+        min_pct = min_savings_percent()
+        if ratio is not None and ratio > 1 - min_pct / 100.0 and not self._unmet:
+            msg = (f"Skipped — at VMAF {target:g} the video would be {ratio * 100:.0f}% "
+                   f"of its current size (needs ≥{min_pct:g}% savings)")
+            db.update_queue_item(self.queue_item_id, status='kept_original', progress=0.0,
+                                 phase=None, phase_progress=0.0, error_message=msg)
+            optimizarr_logger.app_logger.info("%s: %s", Path(source).name, msg)
+            return 'skip'
+        return None
+
+    def _low_bitrate_skip_reason(self) -> Optional[str]:
+        """Reason to skip a plain encode of a low-bitrate source, else None."""
+        import json as _json
+        for key in ('upscale_plan', 'stereo_plan'):
+            raw = self.queue_item.get(key)
+            try:
+                plan = _json.loads(raw) if isinstance(raw, str) else (raw or {})
+            except ValueError:
+                plan = {}
+            if plan.get('enabled'):
+                return None
+        try:
+            min_bpp = float(db.get_setting('min_source_bpp', str(DEFAULT_MIN_SOURCE_BPP)))
+        except (TypeError, ValueError):
+            min_bpp = DEFAULT_MIN_SOURCE_BPP
+        if min_bpp <= 0:
+            return None
+        specs = self.queue_item.get('current_specs') or {}
+        if isinstance(specs, str):
+            try:
+                specs = _json.loads(specs)
+            except ValueError:
+                specs = {}
+        if source_bpp(specs) is None:
+            # Webhook/sync items only carry Sonarr/Radarr's summary — probe
+            try:
+                from app.scanner import scanner as _scanner
+                specs = _scanner._probe_with_ffprobe(self.queue_item['file_path']) or {}
+            except Exception:
+                return None
+        return low_bitrate_reason(specs, min_bpp)
+
     def start(self, progress_callback: Optional[Callable[[float], None]] = None):
         """
         Start the encoding job.
@@ -402,14 +803,121 @@ class EncodingJob:
         """
         import json as _json
 
-        db.update_queue_item(
-            self.queue_item_id,
-            status='processing',
-            started_at=datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
-        )
-
         from app.logger import optimizarr_logger
         from app.devlog import devlog
+
+        # ── Pre-flight: validate the source before committing any work ──────
+        # Files can vanish (deleted/moved after queueing) or be unreadable
+        # (incomplete downloads, corrupt sources). HandBrake fails identically
+        # for both ("unrecognized file type"), so catch them here instead of
+        # burning retries on a file that can never encode.
+        source_path = self.queue_item['file_path']
+        problem = preflight_source_check(source_path)
+        if problem == 'missing':
+            optimizarr_logger.app_logger.warning(
+                "Source file no longer exists — removing from queue: %s",
+                source_path)
+            devlog('enc_gone', id=self.queue_item_id, f=Path(source_path).name)
+            db.delete_queue_item(self.queue_item_id)
+            return False
+        if problem is not None:
+            # Non-invasive quarantine: the file stays exactly where it is;
+            # only the queue row is flagged. Re-check from the UI re-probes it.
+            optimizarr_logger.app_logger.warning(
+                "Quarantined (not encodable): %s — %s", source_path, problem)
+            devlog('enc_quarantine', id=self.queue_item_id,
+                   f=Path(source_path).name, why=problem[:120])
+            db.update_queue_item(
+                self.queue_item_id,
+                status='quarantined',
+                error_message=problem,
+                progress=0.0,
+                retry_after=None,
+            )
+            return False
+
+        # ── Pre-flight: the encode's file name must be able to exist ────────
+        # Long paths are handled (app.winpath), but NTFS still caps a single
+        # file name at 255 characters, and the temp output adds "_optimized".
+        # HandBrake would fail on it every retry; say why once instead.
+        _src = Path(source_path)
+        _ext = {'mkv': '.mkv', 'mp4': '.mp4', 'webm': '.webm'}.get(
+            self.profile.get('container', 'mkv'), '.mkv')
+        _temp_name = f"{_src.stem}_optimized{_ext}"
+        if len(_temp_name) > MAX_COMPONENT:
+            msg = (f"File name is too long to encode: the temporary output "
+                   f"{_temp_name[:40]}… would be {len(_temp_name)} characters, "
+                   f"over the {MAX_COMPONENT}-character limit for one file name. "
+                   f"Shorten the name by {len(_temp_name) - MAX_COMPONENT} "
+                   f"characters (rename the file) and re-queue.")
+            optimizarr_logger.app_logger.warning("Skipping %s — %s", _src.name, msg)
+            devlog('enc_name_too_long', id=self.queue_item_id, n=len(_temp_name))
+            db.update_queue_item(
+                self.queue_item_id, status='failed', progress=0.0,
+                phase=None, phase_progress=0.0, phase_eta_seconds=0,
+                error_message=msg, retry_after=None)
+            return False
+
+        self._refresh_stale_specs(source_path)
+        self._unmet = self._unmet_targets()
+        if self._unmet:
+            optimizarr_logger.app_logger.info(
+                "%s doesn't meet its profile (%s) — encoding regardless of savings",
+                Path(source_path).name, "; ".join(self._unmet))
+
+        # ── Pre-flight: is the source worth re-encoding at all? ────────────
+        # Low bits-per-pixel sources mostly come out the same size or bigger
+        # (see scanner.DEFAULT_MIN_SOURCE_BPP); skip them before spending an
+        # encode. Jobs that upscale/convert to 3D are exempt.
+        reason = None if self._unmet else self._low_bitrate_skip_reason()
+        if reason:
+            optimizarr_logger.app_logger.info("%s: %s", Path(source_path).name, reason)
+            devlog('enc_skip_bpp', id=self.queue_item_id, f=Path(source_path).name)
+            db.update_queue_item(
+                self.queue_item_id, status='kept_original', progress=0.0,
+                phase=None, phase_progress=0.0, phase_eta_seconds=0,
+                error_message=reason, retry_after=None)
+            return False
+
+        # ── Pre-flight: destination name must be free ───────────────────────
+        # When the profile changes container (.mp4 source → .mkv output) the
+        # encode has to land on a name we don't own. Catching a collision here
+        # costs a stat() instead of the hours of encoding it would take to hit
+        # the same wall in _finalize_encoding.
+        _src = Path(source_path)
+        _ext = {'mkv': '.mkv', 'mp4': '.mp4', 'webm': '.webm'}.get(
+            self.profile.get('container', 'mkv'), '.mkv')
+        _dest = _src.parent / f"{_src.stem}{_ext}"
+        if (os.path.normcase(str(_dest)) != os.path.normcase(str(_src))
+                and _dest.exists()):
+            msg = (f"Destination already exists: {_dest.name}. Another file "
+                   f"already occupies the encoded name — remove or rename it "
+                   f"(they are usually duplicates — see Duplicates) and "
+                   f"re-queue.")
+            optimizarr_logger.app_logger.warning(
+                "Skipping %s — destination %s already exists",
+                _src.name, _dest.name)
+            devlog('enc_collision', id=self.queue_item_id, f=_src.name,
+                   dest=_dest.name)
+            db.update_queue_item(
+                self.queue_item_id,
+                status='failed',
+                progress=0.0,
+                phase=None,
+                phase_progress=0.0,
+                phase_eta_seconds=0,
+                error_message=msg,
+                retry_after=None,
+            )
+            return False
+
+        db.update_queue_item(
+            self.queue_item_id,
+            status='processing', notice=None,
+            started_at=utc_now().strftime('%Y-%m-%d %H:%M:%S')
+        )
+
+        self._job_started_monotonic = time.monotonic()
         devlog('enc_start', id=self.queue_item_id,
                f=Path(self.queue_item['file_path']).name,
                c=self.profile.get('codec'))
@@ -419,6 +927,7 @@ class EncodingJob:
         encode_input   = original_input       # may be overridden below
         stereo_temp    = None                 # path to clean up after encode
         upscale_temp   = None                 # path to clean up after encode
+        upscale_info: Dict = {}               # filled by the upscale pipeline
 
         # ── Parse plans ──────────────────────────────────────────────────────
         stereo_plan_raw = self.queue_item.get('stereo_plan')
@@ -441,6 +950,20 @@ class EncodingJob:
 
         has_stereo  = stereo_plan.get('enabled', False)
         has_upscale = upscale_plan.get('enabled', False)
+        if has_upscale and self._source_already_at_target(original_input, upscale_plan):
+            has_upscale = False
+        self._preprocessed = bool(has_stereo or has_upscale)
+
+        # ── A finished encode from an earlier run: use it ────────────────────
+        if not self._preprocessed and self._finished_output_on_disk():
+            optimizarr_logger.app_logger.info(
+                "%s: a complete encode from an earlier run is already on disk "
+                "— finalizing it instead of encoding again",
+                Path(original_input).name)
+            devlog('enc_adopt', id=self.queue_item_id, f=Path(original_input).name)
+            self._adopted = True
+            self._finalize_encoding()
+            return True
 
         # ── Calculate progress ranges per phase ──────────────────────────────
         # Three phases: stereo → upscale → handbrake
@@ -476,10 +999,17 @@ class EncodingJob:
 
             s_range = stereo_end - stereo_start
 
-            def _stereo_progress(pct: float):
+            db.update_queue_item(self.queue_item_id, phase='stereo',
+                                 phase_progress=0.0, phase_eta_seconds=0)
+
+            def _stereo_progress(pct: float, eta: Optional[float] = None):
                 mapped = stereo_start + (pct / 100.0) * s_range
                 self.progress = mapped
-                db.update_queue_item(self.queue_item_id, progress=mapped)
+                db.update_queue_item(
+                    self.queue_item_id, progress=mapped, phase='stereo',
+                    phase_progress=pct,
+                    phase_eta_seconds=int(eta) if eta and eta > 0 else 0,
+                )
                 if progress_callback:
                     progress_callback(mapped)
 
@@ -504,6 +1034,14 @@ class EncodingJob:
                     "Stereo conversion failed for %s — encoding original file instead",
                     original_input,
                 )
+                self._note("3D conversion failed — encoded without it")
+
+        if self._manually_stopped:
+            # Stopped during the stereo phase — don't start an upscale/encode
+            if stereo_temp:
+                from app.stereo import cleanup_stereo_workdir
+                cleanup_stereo_workdir(stereo_temp)
+            return False
 
         # ── Upscale phase ────────────────────────────────────────────────────
         if has_upscale:
@@ -512,19 +1050,46 @@ class EncodingJob:
             upscaler_key = upscale_plan.get('upscaler_key', 'realesrgan')
             model        = upscale_plan.get('model', 'realesrgan-x4plus')
             factor       = upscale_plan.get('factor', 2)
+            if upscaler_key == 'auto':
+                # "Auto per file": animated -> Real-CUGAN Pro, live -> RTX VSR
+                # (or the engines chosen in Settings -> Content Detection)
+                from app import content_classifier as cc
+                ctype = cc.ensure_classified(self.queue_item)
+                upscaler_key, model = cc.auto_choice(ctype)
+                optimizarr_logger.app_logger.info(
+                    "Auto upscaler: %s is %s -> %s %s", Path(encode_input).name,
+                    ctype or "unclassified", upscaler_key, model)
+                if ctype in (None, 'uncertain'):
+                    self._note(f"Content type {'unknown' if ctype is None else 'uncertain'} "
+                               f"— auto upscaler used the live-action engine ({upscaler_key})")
 
             optimizarr_logger.app_logger.info(
                 "Upscale phase: %s (×%d, model=%s)", encode_input, factor, model
             )
 
             u_range = upscale_end - upscale_start
+            db.update_queue_item(self.queue_item_id, phase='upscale',
+                                 phase_progress=0.0, phase_eta_seconds=0,
+                                 current_fps=0, eta_seconds=0)
 
-            def _upscale_progress(pct: float):
+            def _upscale_progress(pct: float, eta: Optional[float] = None):
                 mapped = upscale_start + (pct / 100.0) * u_range
                 self.progress = mapped
-                db.update_queue_item(self.queue_item_id, progress=mapped)
+                # eta_seconds is the row's overall "time left" figure. During
+                # the upscale that IS the upscale's ETA plus the encode still
+                # to come; the encode part is unknowable until HandBrake
+                # starts, so report the AI time and let the phase bar label it.
+                db.update_queue_item(
+                    self.queue_item_id, progress=mapped, phase='upscale',
+                    phase_progress=pct,
+                    phase_eta_seconds=int(eta) if eta and eta > 0 else 0,
+                    eta_seconds=int(eta) if eta and eta > 0 else 0,
+                )
                 if progress_callback:
                     progress_callback(mapped)
+
+            def _register_pipeline_proc(proc):
+                self.pipeline_process = proc
 
             upscaled_path = run_upscale_pipeline(
                 input_path=encode_input,
@@ -532,11 +1097,26 @@ class EncodingJob:
                 model=model,
                 factor=factor,
                 progress_callback=_upscale_progress,
+                register_process=_register_pipeline_proc,
+                result_info=upscale_info,
             )
+
+            if self._manually_stopped:
+                # Stopped mid-upscale — don't fall through and encode anyway
+                if stereo_temp:
+                    from app.stereo import cleanup_stereo_workdir
+                    cleanup_stereo_workdir(stereo_temp)
+                return False
 
             if upscaled_path:
                 encode_input  = upscaled_path
                 upscale_temp  = upscaled_path
+                try:
+                    from app.scanner import upscale_work_mpf
+                    self._upscale_work_mpf = upscale_work_mpf(
+                        self.queue_item.get('current_specs'), upscale_plan)
+                except Exception:
+                    self._upscale_work_mpf = 0.0
                 optimizarr_logger.app_logger.info(
                     "Upscale complete — encoding from temp: %s", upscaled_path
                 )
@@ -545,12 +1125,24 @@ class EncodingJob:
                     "Upscale failed for %s — encoding original file instead",
                     original_input,
                 )
+                self._note(f"AI upscale ({upscaler_key} {model}) failed — encoded without "
+                           f"upscaling; see the log")
+
+        # ── Target quality: choose --quality from a VMAF goal (plain encodes) ─
+        if not self._preprocessed and float(self.profile.get('target_vmaf') or 0) > 0:
+            if self._run_target_quality() == 'skip':
+                return False
 
         # ── Build HandBrake command (encode_input may be stereo/upscaled) ────
-        cmd = self.build_command(input_override=encode_input)
+        cmd = self.build_command(input_override=encode_input,
+                                 size_override=upscale_info.get('target_size'))
         optimizarr_logger.log_handbrake_start(original_input, cmd)
 
         try:
+            self._hb_started_monotonic = time.monotonic()
+            db.update_queue_item(self.queue_item_id, phase='encode',
+                                 phase_progress=0.0, phase_eta_seconds=0,
+                                 eta_seconds=0)
             self.process = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
@@ -575,6 +1167,7 @@ class EncodingJob:
 
             last_lines = []  # Keep last 20 lines for diagnostics
             last_db_write = 0.0
+            json_stream = HBJsonStream()
 
             for line in self.process.stdout:
                 line_stripped = line.rstrip()
@@ -584,7 +1177,15 @@ class EncodingJob:
                         last_lines.pop(0)
                     optimizarr_logger.log_handbrake_output(line_stripped)
 
-                parsed = parse_hb_progress(line)
+                # Primary: structured --json Progress blocks. Fallback: the
+                # legacy "Encoding: task…" regex (older HandBrake or a custom
+                # build without JSON output).
+                parsed = None
+                block = json_stream.feed(line_stripped)
+                if block:
+                    parsed = parse_hb_json_progress(block[0], block[1])
+                if parsed is None:
+                    parsed = parse_hb_progress(line)
                 if parsed:
                     hb_pct, fps, hb_eta = parsed
                     # Remap HandBrake 0-100 → hb_start to hb_start+hb_range
@@ -596,16 +1197,18 @@ class EncodingJob:
                     now = time.monotonic()
                     if now - last_db_write >= 2.0:
                         last_db_write = now
-                        fields = {'progress': self.progress}
+                        fields = {'progress': self.progress,
+                                  'phase': 'encode',
+                                  'phase_progress': hb_pct}
                         if fps is not None:
                             fields['current_fps'] = fps
                         if hb_eta is not None:
                             fields['eta_seconds'] = hb_eta
+                            fields['phase_eta_seconds'] = hb_eta
                         db.update_queue_item(self.queue_item_id, **fields)
 
                     if progress_callback:
                         progress_callback(self.progress)
-                    print(f"  Progress: {self.progress:.1f}%", end='\r')
 
             return_code = self.process.wait()
 
@@ -658,22 +1261,135 @@ class EncodingJob:
                 from app.upscaler import cleanup_upscale_workdir
                 cleanup_upscale_workdir(upscale_temp)
     
+    def _diagnose_short_output(self, input_path, out_duration: float,
+                               source_duration: float, tolerance: float):
+        """Work out WHY the encode came out shorter than the source's duration.
+
+        A container's duration is the length of its longest track, not the
+        length of its picture. WEB-DL mkvs routinely carry a subtitle track
+        that runs a minute past the last video frame, so a perfectly complete
+        encode reads as "88s short" against the container. Failing those threw
+        away good encodes and left whole seasons stuck.
+
+        So instead of trusting the declared duration, ask the source directly
+        whether it holds any picture past the point the encode ends:
+
+          'ok'          — it does not. The encode is complete; the container
+                          duration was simply counting a longer sidecar track.
+          'bad_source'  — it does not, but the source's own VIDEO stream
+                          claimed it should. The source file is damaged or
+                          incomplete (truncated download): no encode of it can
+                          ever be whole.
+          'truncated'   — it does. HandBrake stopped early (disk full mid-mux,
+                          bad source tail), or we could not verify either way.
+                          Keep the original.
+
+        Returns (verdict, message).
+        """
+        from app.scanner import probe_last_video_pts, probe_declared_video_duration
+
+        short_by = source_duration - out_duration
+        # Start a little before the output ends so a stream whose final packet
+        # lands just shy of the reported duration still registers.
+        real_end = probe_last_video_pts(
+            str(input_path), start_seconds=out_duration - 10)
+
+        if real_end is None:
+            return 'truncated', (
+                f"Output duration {out_duration:.0f}s is shorter than source "
+                f"{source_duration:.0f}s and the source could not be re-probed "
+                f"to confirm — output kept out of the library and original "
+                f"file kept")
+
+        if real_end > out_duration + tolerance:
+            return 'truncated', (
+                f"Output duration {out_duration:.0f}s is shorter than source "
+                f"{source_duration:.0f}s — the source really does hold video "
+                f"through {real_end:.0f}s, so the encode stopped "
+                f"{real_end - out_duration:.0f}s early; original file kept")
+
+        declared = probe_declared_video_duration(str(input_path))
+        if declared and real_end < declared - tolerance:
+            return 'bad_source', (
+                f"Source file is damaged: its video stream declares "
+                f"{declared:.0f}s but the file only contains picture through "
+                f"{real_end:.0f}s. The encode is not at fault — re-download "
+                f"this file. Original left untouched.")
+
+        return 'ok', (
+            f"source container claims {source_duration:.0f}s but its video "
+            f"ends at {real_end:.0f}s (a longer subtitle/metadata track "
+            f"inflates the container duration); encode is complete at "
+            f"{out_duration:.0f}s, {short_by:.0f}s of the claim was never "
+            f"picture")
+
+    def _source_duration(self) -> float:
+        """The source's runtime in seconds from its queued specs, 0 if unknown."""
+        specs = self.queue_item.get('current_specs')
+        if isinstance(specs, str):
+            try:
+                import json as _cjson
+                specs = _cjson.loads(specs)
+            except (ValueError, TypeError):
+                specs = {}
+        duration = 0.0
+        if isinstance(specs, dict):
+            duration = float(specs.get('duration') or 0)
+        return duration or float(self.queue_item.get('duration_seconds') or 0)
+
+    def _finished_output_on_disk(self) -> bool:
+        """Whether {stem}_optimized from an earlier run is a whole encode on
+        this profile. Finalize used to miss outputs past 260 characters and
+        fail the row, leaving the finished encode behind. Anything partial
+        or off-profile is left for HandBrake to overwrite."""
+        from app.scanner import scanner as _probe_scanner, profile_targets, unmet_targets
+        src = Path(self.queue_item['file_path'])
+        ext = {'mkv': '.mkv', 'mp4': '.mp4', 'webm': '.webm'}.get(
+            self.profile.get('container', 'mkv'), '.mkv')
+        out_fs = Path(fs_path(src.parent / f"{src.stem}_optimized{ext}"))
+        source_duration = self._source_duration()
+        if source_duration <= 0 or not out_fs.exists():
+            return False
+        try:
+            specs = _probe_scanner.analyze_file(str(out_fs)) or {}
+        except Exception:
+            return False
+        out_duration = float(specs.get('duration') or 0)
+        # Same tolerance as finalize's truncation check
+        tolerance = max(5.0, source_duration * 0.02)
+        if out_duration <= 0 or abs(out_duration - source_duration) > tolerance:
+            return False
+        return not unmet_targets(specs, profile_targets(self.profile))
+
     def _finalize_encoding(self):
         """Replace original file with encoded version and update database."""
         from app.logger import optimizarr_logger
+        from app.devlog import devlog
 
         input_path = Path(self.queue_item['file_path'])
+
+        # Finalizing is its own phase, and not a quick one: it re-probes the
+        # output with ffprobe and moves a multi-GB file. Without a marker the
+        # row just sat at 100% looking hung.
+        db.update_queue_item(self.queue_item_id, phase='finalize',
+                             phase_progress=0.0, phase_eta_seconds=0,
+                             current_fps=0, eta_seconds=0)
 
         # Determine output extension based on container format
         container = self.profile.get('container', 'mkv')
         ext_map = {'mkv': '.mkv', 'mp4': '.mp4', 'webm': '.webm'}
         output_ext = ext_map.get(container, '.mkv')
         output_path = input_path.parent / f"{input_path.stem}_optimized{output_ext}"
+        # File operations use the long-path form (app.winpath): past 260
+        # characters a plain exists() is False for a file that is there.
+        # The plain paths stay for the database, logs and messages.
+        src_fs = Path(fs_path(input_path))
+        out_fs = Path(fs_path(output_path))
 
-        if not output_path.exists():
+        if not out_fs.exists():
             # Diagnostic: list files in the directory that match the stem
             try:
-                nearby = [f.name for f in input_path.parent.iterdir()
+                nearby = [f.name for f in src_fs.parent.iterdir()
                           if input_path.stem in f.name and f.name != input_path.name]
             except Exception:
                 nearby = []
@@ -695,37 +1411,207 @@ class EncodingJob:
             return
 
         # Get file sizes
-        original_size = input_path.stat().st_size
-        new_size = output_path.stat().st_size
+        original_size = src_fs.stat().st_size
+        new_size = out_fs.stat().st_size
         savings = original_size - new_size
 
-        # Calculate encoding duration
-        encoding_time = 0
-        started_at = self.queue_item.get('started_at')
-        if started_at:
+        # ── Sanity-check the output BEFORE deleting the original ──────────
+        # HandBrake can exit 0 with a truncated file (disk full mid-mux, bad
+        # source tail). Deleting the original is irreversible, so compare
+        # durations first. A shorter output is only a SUSPICION — container
+        # durations lie — so _diagnose_short_output re-probes the source
+        # before anything is thrown away.
+        source_duration = self._source_duration()
+        if source_duration > 0:
             try:
-                start_dt = datetime.strptime(started_at, '%Y-%m-%d %H:%M:%S')
-                encoding_time = int((datetime.utcnow() - start_dt).total_seconds())
-            except (ValueError, TypeError):
-                encoding_time = 0
+                from app.scanner import scanner as _probe_scanner
+                out_specs = _probe_scanner.analyze_file(str(out_fs)) or {}
+                out_duration = float(out_specs.get('duration') or 0)
+            except Exception:
+                out_duration = 0.0
+            # Tolerance: 5s or 2% of runtime, whichever is larger. Only fail
+            # when we could actually measure the output (ffprobe available).
+            tolerance = max(5.0, source_duration * 0.02)
+            if out_duration > 0 and out_duration < source_duration - tolerance:
+                verdict, msg = self._diagnose_short_output(
+                    input_path, out_duration, source_duration, tolerance)
+
+                if verdict == 'ok':
+                    # Container duration was overstated; the encode holds
+                    # everything the source actually had. Carry on.
+                    optimizarr_logger.app_logger.info(
+                        "Short output accepted for %s: %s", input_path.name, msg)
+                    devlog('enc_shortok', id=self.queue_item_id,
+                           f=input_path.name, out=round(out_duration),
+                           claimed=round(source_duration))
+                else:
+                    optimizarr_logger.app_logger.error(
+                        "%s for %s: %s",
+                        'Damaged source' if verdict == 'bad_source'
+                        else 'Truncated output',
+                        input_path.name, msg)
+                    try:
+                        out_fs.unlink()
+                    except OSError:
+                        pass
+                    db.update_queue_item(
+                        self.queue_item_id,
+                        # A damaged source can never encode fully, so retrying
+                        # it is wasted GPU time — quarantine keeps the file
+                        # untouched and takes it out of rotation instead.
+                        status=('quarantined' if verdict == 'bad_source'
+                                else 'failed'),
+                        phase=None,
+                        phase_progress=0.0,
+                        phase_eta_seconds=0,
+                        retry_after=None,
+                        error_message=msg,
+                    )
+                    optimizarr_logger.log_handbrake_error(str(input_path), msg)
+                    return
+
+        # ── Keep the original if the encode isn't worth it ─────────────────
+        # A source that already meets its profile is only replaced when the
+        # encode is meaningfully smaller: low-bitrate sources often come out
+        # LARGER at a fixed CRF (this install's history: 899 of ~5,000 plain
+        # encodes grew, +94 GB). A source that DOESN'T meet it (wrong codec,
+        # over a resolution/framerate/bitrate ceiling) is replaced even if it
+        # grew: the goal is every file on the profile's codec and quality, and
+        # holding conversions to "don't grow" left the leanest sources either
+        # unconverted or encoded worse than the rest. Only an implausible
+        # blow-up (CONVERSION_SANITY_RATIO) is discarded as a broken encode.
+        # Upscale/3D jobs are exempt — growth is the point there.
+        if not self._preprocessed and original_size > 0:
+            change = (new_size - original_size) / original_size * 100
+            if self._unmet:
+                rejected = new_size > original_size * CONVERSION_SANITY_RATIO
+                rule = (f"doesn't meet the profile ({'; '.join(self._unmet)}), but more "
+                        f"than {CONVERSION_SANITY_RATIO:g}x its size means the encode "
+                        f"went wrong")
+            else:
+                min_pct = min_savings_percent()
+                rejected = savings < original_size * (min_pct / 100.0)
+                rule = f"already meets the profile, so needs ≥{min_pct:g}% savings"
+            if rejected:
+                try:
+                    out_fs.unlink()
+                except OSError:
+                    pass
+                msg = (f"Kept original — re-encode was {change:+.1f}% "
+                       f"({new_size / 1024**2:.0f} MB vs {original_size / 1024**2:.0f} MB); "
+                       f"source {rule}")
+                db.update_queue_item(
+                    self.queue_item_id, status='kept_original', progress=100.0,
+                    phase=None, phase_progress=0.0, phase_eta_seconds=0,
+                    eta_seconds=0, current_fps=0, error_message=msg,
+                    notice=self._notice_text(),
+                    completed_at=utc_now().strftime('%Y-%m-%d %H:%M:%S'))
+                optimizarr_logger.app_logger.info("%s: %s", input_path.name, msg)
+                from app.devlog import devlog
+                devlog('kept_original', id=self.queue_item_id, pct=round(change, 1))
+                return
+
+        # Calculate encoding duration for the speed learner, minus thermal
+        # pauses.Plain encodes: HandBrake phase only. Preprocessed jobs
+        # (upscale/stereo): the whole pipeline — their true cost IS the
+        # multi-hour AI phase, and they're learned as a separate group so
+        # they can't pollute the plain-encode ratios.
+        encoding_time = 0
+        phase_start = (getattr(self, '_job_started_monotonic', None)
+                       if self._preprocessed else self._hb_started_monotonic)
+        if phase_start is not None:
+            paused = self._paused_seconds
+            if self._paused_at_monotonic is not None:
+                paused += time.monotonic() - self._paused_at_monotonic
+            encoding_time = max(0, int(time.monotonic() - phase_start - paused))
+        else:
+            # Fallback (shouldn't happen): legacy wall-clock from started_at
+            started_at = self.queue_item.get('started_at')
+            if started_at:
+                try:
+                    start_dt = datetime.strptime(started_at, '%Y-%m-%d %H:%M:%S')
+                    encoding_time = int((utc_now() - start_dt).total_seconds())
+                except (ValueError, TypeError):
+                    encoding_time = 0
+        if getattr(self, '_adopted', False):
+            encoding_time = 0   # encoded in an earlier run: no speed sample
+
+        final_path = input_path.parent / f"{input_path.stem}{output_ext}"
+        final_fs = Path(fs_path(final_path))
+        # Same name as the source when the container didn't change.
+        # normcase because Windows paths are case-insensitive.
+        in_place = (os.path.normcase(str(final_path))
+                    == os.path.normcase(str(input_path)))
+
+        # A container change lands the encode on a name we don't own. If a
+        # DIFFERENT file already holds it — typically the same title already
+        # present as .mkv next to the .mp4 — claiming it would destroy a file
+        # nobody asked us to touch. Refuse, and keep the source: the old order
+        # (unlink source, THEN rename) had already deleted the original by
+        # this point, so the failed rename left only the _optimized temp,
+        # which the orphan sweeper then deleted as well. That path lost files.
+        if not in_place and final_fs.exists():
+            msg = (f"Destination already exists: {final_path.name}. Another "
+                   f"file already occupies the encoded name, so the original "
+                   f"was kept and nothing was overwritten. Remove or rename "
+                   f"the existing file (they are usually duplicates — see "
+                   f"Duplicates) and re-queue.")
+            optimizarr_logger.app_logger.error(
+                "Destination collision for %s: %s already exists — original kept",
+                input_path.name, final_path.name)
+            # Our own output is redundant now; the source is still intact.
+            self._cleanup_partial_output()
+            db.update_queue_item(
+                self.queue_item_id,
+                status='failed',
+                phase=None,
+                phase_progress=0.0,
+                phase_eta_seconds=0,
+                error_message=msg,
+            )
+            optimizarr_logger.log_handbrake_error(str(input_path), msg)
+            return
 
         try:
-            # Remove original file
-            input_path.unlink()
-
-            # Rename encoded file to original stem with (possibly new) extension
-            final_path = input_path.parent / f"{input_path.stem}{output_ext}"
-            output_path.rename(final_path)
+            if in_place:
+                # Atomic overwrite of the source — no window in which neither
+                # the original nor the encode exists.
+                os.replace(out_fs, final_fs)
+            else:
+                # Move the encode into place FIRST, drop the source only once
+                # it is safely there. rename() (not replace()) so a file that
+                # appeared since the check above still can't be clobbered.
+                out_fs.rename(final_fs)
+                try:
+                    src_fs.unlink()
+                except OSError as unlink_err:
+                    # Encode is in place and correct; only the old container
+                    # lingers. Worth a warning, not a failure.
+                    optimizarr_logger.app_logger.warning(
+                        "Encoded %s but could not remove the original %s: %s",
+                        final_path.name, input_path.name, unlink_err)
 
             # Update queue item
             db.update_queue_item(
                 self.queue_item_id,
                 status='completed',
+                notice=self._notice_text(),
                 progress=100.0,
                 current_fps=0,
                 eta_seconds=0,
-                completed_at=datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')
+                phase=None,
+                phase_progress=0.0,
+                phase_eta_seconds=0,
+                completed_at=utc_now().strftime('%Y-%m-%d %H:%M:%S')
             )
+
+            # Tell Sonarr/Radarr the file changed (size, codec, maybe its
+            # extension) so they rescan instead of showing stale info.
+            try:
+                from app.arr_paths import refresh_in_background
+                refresh_in_background(str(final_path))
+            except Exception as e:
+                optimizarr_logger.app_logger.warning("Arr refresh not started: %s", e)
 
             # Add to history — use db.add_history so all fields are populated
             # Extract video duration from current_specs for encode speed tracking
@@ -748,9 +1634,10 @@ class EncodingJob:
                 codec=self.profile.get('codec'),
                 container=container,
                 duration_seconds=video_duration,
+                preprocessed=self._preprocessed,
+                pre_work_mpf=self._upscale_work_mpf,
             )
 
-            from app.devlog import devlog
             devlog('enc_done', id=self.queue_item_id, f=final_path.name,
                    s=encoding_time, sv=savings)
 
@@ -806,6 +1693,7 @@ class EncodingJob:
 
                 self.is_paused = True
                 self.paused_reason = reason
+                self._paused_at_monotonic = time.monotonic()
 
                 db.update_queue_item(
                     self.queue_item_id,
@@ -814,9 +1702,9 @@ class EncodingJob:
                 )
                 from app.devlog import devlog
                 devlog('throttle', a='pause', why=(reason or '')[:80])
-                print(f"⏸ Paused: {reason}")
+                optimizarr_logger.app_logger.info(f"⏸ Paused: {reason}")
             except Exception as e:
-                print(f"✗ Error pausing: {e}")
+                optimizarr_logger.app_logger.error(f"✗ Error pausing: {e}")
 
     def resume(self):
         """Resume a paused encoding job."""
@@ -836,6 +1724,9 @@ class EncodingJob:
 
                 self.is_paused = False
                 self.paused_reason = None
+                if self._paused_at_monotonic is not None:
+                    self._paused_seconds += time.monotonic() - self._paused_at_monotonic
+                    self._paused_at_monotonic = None
 
                 db.update_queue_item(
                     self.queue_item_id,
@@ -844,9 +1735,9 @@ class EncodingJob:
                 )
                 from app.devlog import devlog
                 devlog('throttle', a='resume')
-                print(f"▶ Resumed encoding")
+                optimizarr_logger.app_logger.info(f"▶ Resumed encoding")
             except Exception as e:
-                print(f"✗ Error resuming: {e}")
+                optimizarr_logger.app_logger.error(f"✗ Error resuming: {e}")
     
     def _cleanup_partial_output(self):
         """Remove the partial _optimized.* output file if it exists.
@@ -859,7 +1750,8 @@ class EncodingJob:
             container = self.profile.get('container', 'mkv')
             ext_map = {'mkv': '.mkv', 'mp4': '.mp4', 'webm': '.webm'}
             output_ext = ext_map.get(container, '.mkv')
-            temp_out = original_path.parent / f"{original_path.stem}_optimized{output_ext}"
+            temp_out = Path(fs_path(
+                original_path.parent / f"{original_path.stem}_optimized{output_ext}"))
             if not temp_out.exists():
                 return
             # Windows doesn't release the file handle the instant the process
@@ -868,15 +1760,15 @@ class EncodingJob:
             for attempt in range(5):
                 try:
                     temp_out.unlink()
-                    print(f"🗑 Removed partial output: {temp_out.name}")
+                    optimizarr_logger.app_logger.info(f"🗑 Removed partial output: {temp_out.name}")
                     return
                 except PermissionError:
                     time.sleep(0.5)
                 except FileNotFoundError:
                     return
-            print(f"⚠ Could not remove partial output (still locked): {temp_out.name}")
+            optimizarr_logger.app_logger.warning(f"⚠ Could not remove partial output (still locked): {temp_out.name}")
         except Exception as e:
-            print(f"⚠ Could not remove partial output: {e}")
+            optimizarr_logger.app_logger.warning(f"⚠ Could not remove partial output: {e}")
 
     def _handle_failure(self, error_message: str) -> str:
         """Apply retry logic on encode failure.
@@ -905,7 +1797,7 @@ class EncodingJob:
             # Exponential backoff so a transient failure doesn't burn every
             # retry in seconds: 60s, 120s, 240s … capped at 30 min.
             delay = min(60 * (2 ** (new_count - 1)), 1800)
-            retry_at = (datetime.utcnow() + timedelta(seconds=delay)).strftime(
+            retry_at = (utc_now() + timedelta(seconds=delay)).strftime(
                 '%Y-%m-%d %H:%M:%S')
             db.update_queue_item(
                 self.queue_item_id,
@@ -915,6 +1807,9 @@ class EncodingJob:
                 progress=0.0,
                 current_fps=0,
                 eta_seconds=0,
+                phase=None,
+                phase_progress=0.0,
+                phase_eta_seconds=0,
                 error_message=f"Retry {new_count}/{max_retries} in {delay}s: {error_message[:180]}",
             )
             optimizarr_logger.app_logger.warning(
@@ -930,6 +1825,9 @@ class EncodingJob:
             status='failed',
             current_fps=0,
             eta_seconds=0,
+            phase=None,
+            phase_progress=0.0,
+            phase_eta_seconds=0,
             error_message=error_message[:500],
         )
         optimizarr_logger.app_logger.error(
@@ -957,6 +1855,27 @@ class EncodingJob:
         if self.monitoring_thread and self.monitoring_thread.is_alive():
             self.monitoring_thread.join(timeout=2)
 
+        # Kill any pre-phase subprocess (ffmpeg extraction/reassembly or the
+        # AI upscaler). Without this, stopping during the upscale phase left
+        # the upscaler running as a GPU-burning orphan — there is no HandBrake
+        # process yet at that point, so the block below had nothing to kill.
+        pipeline_proc = self.pipeline_process
+        if pipeline_proc is not None and pipeline_proc.poll() is None:
+            try:
+                import psutil as _psutil
+                try:
+                    parent = _psutil.Process(pipeline_proc.pid)
+                    for child in parent.children(recursive=True):
+                        child.kill()
+                    parent.kill()
+                except _psutil.NoSuchProcess:
+                    pass
+            except Exception:
+                try:
+                    pipeline_proc.kill()
+                except Exception:
+                    pass
+
         if self.process:
             try:
                 import psutil as _psutil
@@ -978,7 +1897,7 @@ class EncodingJob:
                     self.process.wait(timeout=5)
                 except Exception:
                     pass
-                print(f"⚠ psutil kill failed, used terminate(): {e}")
+                optimizarr_logger.app_logger.warning(f"⚠ psutil kill failed, used terminate(): {e}")
 
         self._cleanup_partial_output()
 
@@ -988,336 +1907,20 @@ class EncodingJob:
                 status='cancelled',
                 current_fps=0,
                 eta_seconds=0,
+                phase=None,
+                phase_progress=0.0,
+                phase_eta_seconds=0,
                 error_message='Manually stopped'
             )
             from app.devlog import devlog
             devlog('enc_cancel', id=self.queue_item_id)
-            print("⏹ Encoding cancelled")
+            optimizarr_logger.app_logger.info("⏹ Encoding cancelled")
         else:
-            print("⏹ Encoding interrupted (will resume on next start)")
+            optimizarr_logger.app_logger.info("⏹ Encoding interrupted (will resume on next start)")
 
 
-class EncoderPool:
-    """Manages a pool of encoding jobs."""
-    
-    def __init__(self, max_concurrent: int = 1):
-        self.max_concurrent = max_concurrent
-        self.active_jobs: list[EncodingJob] = []
-        self.is_running = False
-        # Guards the single running loop. Multiple near-simultaneous triggers
-        # (boot auto-start, BURSTY webhooks — Radarr fires Download+Test in the
-        # same second — the scheduler, manual Start) must not each spawn a
-        # process_queue loop: that ran many concurrent HandBrakeCLI processes
-        # that stop() couldn't fully track ("wouldn't close, stop didn't work").
-        self._lifecycle_lock = threading.Lock()
-        self._last_temp_check = 0.0
-        self._effective_cache = None
-
-    def process_queue(self):
-        """Process the encoding queue. Exactly one controller loop runs.
-
-        max_concurrent_jobs (schedule setting) governs parallelism. ==1 (the
-        default) takes the simple blocking single-job path — byte-for-byte the
-        proven behavior. >1 enables temperature-gated parallel encoding.
-        """
-        # Atomically claim the single controller slot (prevents the runaway
-        # multi-loop bug regardless of how many things try to start us).
-        with self._lifecycle_lock:
-            if self.is_running:
-                print("Encoder already running — ignoring duplicate start")
-                return
-            self.is_running = True
-
-        print("Starting encoder pool...")
-        try:
-            max_concurrent = self._load_max_concurrent()
-            if max_concurrent <= 1:
-                self._run_serial()
-            else:
-                print(f"Encoder pool: up to {max_concurrent} concurrent jobs (temperature-gated)")
-                self._run_parallel(max_concurrent)
-        finally:
-            # Always release the slot, even on an unexpected error, so the
-            # encoder can be started again (and isn't wedged "running").
-            self.is_running = False
-            print("Encoder pool stopped")
-            # Encoder is idle now — sweep any leftover _optimized temp files.
-            try:
-                from app.scanner import cleanup_orphaned_outputs
-                cleanup_orphaned_outputs()
-            except Exception:
-                pass
-
-    def _run_serial(self):
-        """Single job at a time (default). Unchanged proven behavior."""
-        while self.is_running:
-            if len(self.active_jobs) < 1:
-                item = db.get_next_pending_item()
-                if item:
-                    profile = db.get_profile(item['profile_id'])
-                    if profile:
-                        resource_limits = self._load_resource_settings()
-                        job = EncodingJob(item['id'], profile, resource_limits)
-                        self.active_jobs.append(job)
-                        try:
-                            job.start()  # blocking
-                        finally:
-                            if job in self.active_jobs:
-                                self.active_jobs.remove(job)
-                    else:
-                        # Profile gone — fail the item so we don't spin on it
-                        db.update_queue_item(item['id'], status='failed',
-                                             error_message='Profile not found')
-                elif db.count_pending() == 0:
-                    print("✓ Queue is empty")
-                    try:
-                        from app.notifications import notify_queue_empty
-                        notify_queue_empty()
-                    except Exception:
-                        pass
-                    break
-                # else: pending items all waiting on retry backoff — keep looping
-            time.sleep(1)
-
-    def _run_parallel(self, max_concurrent: int):
-        """Run up to N jobs at once, gated by temperature headroom.
-
-        Each job runs in its own thread; the controller reaps finished ones,
-        dispatches new ones up to the (temp-limited) effective concurrency,
-        and never dispatches an item already in flight (exclude_ids).
-        """
-        while self.is_running:
-            # Reap finished job threads
-            for job in list(self.active_jobs):
-                th = getattr(job, '_thread', None)
-                if th is not None and not th.is_alive():
-                    self.active_jobs.remove(job)
-
-            effective = self._effective_concurrency(max_concurrent)
-
-            # Dispatch up to capacity
-            while self.is_running and len(self.active_jobs) < effective:
-                exclude = [j.queue_item_id for j in self.active_jobs]
-                item = db.get_next_pending_item(exclude_ids=exclude)
-                if not item:
-                    break
-                profile = db.get_profile(item['profile_id'])
-                if not profile:
-                    db.update_queue_item(item['id'], status='failed',
-                                         error_message='Profile not found')
-                    continue
-                resource_limits = self._load_resource_settings()
-                job = EncodingJob(item['id'], profile, resource_limits)
-                th = threading.Thread(target=self._run_job, args=(job,), daemon=True)
-                job._thread = th
-                self.active_jobs.append(job)
-                th.start()
-
-            # Termination: nothing running and nothing left to run
-            if not self.active_jobs and db.count_pending() == 0:
-                print("✓ Queue is empty")
-                try:
-                    from app.notifications import notify_queue_empty
-                    notify_queue_empty()
-                except Exception:
-                    pass
-                break
-
-            time.sleep(1)
-
-        # Wait for any in-flight jobs to finish/stop before releasing the slot
-        for job in list(self.active_jobs):
-            th = getattr(job, '_thread', None)
-            if th is not None and th.is_alive():
-                th.join(timeout=30)
-
-    def _run_job(self, job: 'EncodingJob'):
-        """Worker-thread wrapper around a single blocking job.start()."""
-        try:
-            job.start()
-        except Exception as e:
-            print(f"⚠ Encoding job error: {e}")
-        finally:
-            if job in self.active_jobs:
-                try:
-                    self.active_jobs.remove(job)
-                except ValueError:
-                    pass
-
-    def _load_max_concurrent(self) -> int:
-        """Read the configured max concurrent jobs (schedule table), 1..8."""
-        try:
-            with db.get_read_connection() as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT max_concurrent_jobs FROM schedule LIMIT 1")
-                row = cur.fetchone()
-                if row and row[0]:
-                    return max(1, min(8, int(row[0])))
-        except Exception:
-            pass
-        return 1
-
-    def _effective_concurrency(self, max_concurrent: int) -> int:
-        """How many jobs may run right now given thermal headroom.
-
-        Returns max_concurrent when the GPU/CPU are comfortably below their
-        pause thresholds (a 10°C buffer), else 1 — so we don't pile on a
-        second encode that would immediately trip the per-job pause logic.
-        Temps are read at most every 15s (pynvml is not free). If temps
-        can't be read, stay conservative (1).
-        """
-        if max_concurrent <= 1:
-            return 1
-        now = time.monotonic()
-        if self._effective_cache is not None and now - self._last_temp_check < 15:
-            return self._effective_cache
-        self._last_temp_check = now
-        allowed = max_concurrent
-        try:
-            limits = self._load_resource_settings()
-            margin = 10.0
-            res = resource_monitor.get_all_resources()
-            gpu_temp = (res.get('gpu') or {}).get('temperature_c')
-            cpu_temp = (res.get('cpu') or {}).get('temperature_c')
-            if gpu_temp is not None and gpu_temp >= limits['gpu_temp_threshold'] - margin:
-                allowed = 1
-            if cpu_temp is not None and cpu_temp >= limits['cpu_temp_threshold'] - margin:
-                allowed = 1
-        except Exception:
-            allowed = 1
-        self._effective_cache = allowed
-        return allowed
-    
-    def _load_resource_settings(self) -> Dict:
-        """Load resource management settings from database."""
-        try:
-            with db.get_connection() as conn:
-                cursor = conn.cursor()
-                cursor.execute("""
-                    SELECT key, value FROM settings 
-                    WHERE key LIKE 'resource_%'
-                """)
-                settings = {row[0]: row[1] for row in cursor.fetchall()}
-            
-            # Parse settings with defaults — temperature-first model
-            return {
-                'enable_throttling': settings.get('resource_enable_throttling', 'true').lower() == 'true',
-                'nice_level': int(settings.get('resource_nice_level', '10')),
-                # Primary triggers (temperature)
-                'pause_on_cpu_temp': settings.get('resource_pause_on_cpu_temp', 'true').lower() == 'true',
-                'cpu_temp_threshold': float(settings.get('resource_cpu_temp_threshold', '85.0')),
-                'pause_on_gpu_temp': settings.get('resource_pause_on_gpu_temp', 'true').lower() == 'true',
-                'gpu_temp_threshold': float(settings.get('resource_gpu_temp_threshold', '83.0')),
-                # Secondary triggers (optional)
-                'pause_on_memory': settings.get('resource_pause_on_memory', 'false').lower() == 'true',
-                'memory_threshold': float(settings.get('resource_memory_threshold', '85.0')),
-                'pause_on_cpu_usage': settings.get('resource_pause_on_cpu_usage', 'false').lower() == 'true',
-                'cpu_usage_threshold': float(settings.get('resource_cpu_usage_threshold', '95.0')),
-            }
-        except Exception as e:
-            print(f"⚠️ Error loading resource settings: {e}")
-            # Return defaults
-            return {
-                'enable_throttling': True,
-                'nice_level': 10,
-                'pause_on_cpu_temp': True,
-                'cpu_temp_threshold': 85.0,
-                'pause_on_gpu_temp': True,
-                'gpu_temp_threshold': 83.0,
-                'pause_on_memory': False,
-                'memory_threshold': 85.0,
-                'pause_on_cpu_usage': False,
-                'cpu_usage_threshold': 95.0,
-            }
-    
-    def stop(self, mark_cancelled: bool = True, graceful: bool = False):
-        """Stop the encoder pool.
-
-        Args:
-            mark_cancelled: Forwarded to each job's stop(). True for a manual
-                stop (items → 'cancelled'); False for server shutdown (items
-                left for startup recovery to re-queue).
-            graceful: When True, stop accepting NEW jobs but let the active
-                encode finish on its own — process_queue() exits after the
-                current job because is_running is now False. Used at a
-                schedule-window boundary when "finish current encode" is on.
-        """
-        self.is_running = False
-
-        if graceful:
-            return  # leave the running job alone; loop ends when it completes
-
-        # Iterate a copy — process_queue() mutates active_jobs concurrently
-        for job in list(self.active_jobs):
-            job.stop(mark_cancelled=mark_cancelled)
-
-
-def detect_hardware_acceleration() -> Dict:
-    """Detect available hardware encoders by querying HandBrakeCLI."""
-    available = {
-        "nvidia": False,
-        "amd": False,
-        "intel": False,
-        "apple": False,
-        "encoders": [],
-        "details": {}
-    }
-    
-    try:
-        result = subprocess.run(
-            ["HandBrakeCLI", "--help"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            encoding='utf-8',
-            errors='replace'
-        )
-        
-        output = result.stdout.lower() + result.stderr.lower()
-        
-        if "nvenc" in output:
-            available["nvidia"] = True
-            available["encoders"].append("NVENC (NVIDIA)")
-            available["details"]["nvidia"] = {
-                "h264": "nvenc_h264" in output,
-                "h265": "nvenc_h265" in output,
-                "av1": "nvenc_av1" in output,
-            }
-        
-        if "vce" in output:
-            available["amd"] = True
-            available["encoders"].append("VCE (AMD)")
-            available["details"]["amd"] = {
-                "h264": "vce_h264" in output,
-                "h265": "vce_h265" in output,
-            }
-        
-        if "qsv" in output:
-            available["intel"] = True
-            available["encoders"].append("QuickSync (Intel)")
-            available["details"]["intel"] = {
-                "h264": "qsv_h264" in output,
-                "h265": "qsv_h265" in output,
-                "av1": "qsv_av1" in output,
-            }
-        
-        if "videotoolbox" in output or "vt_h" in output:
-            available["apple"] = True
-            available["encoders"].append("VideoToolbox (Apple)")
-            available["details"]["apple"] = {
-                "h264": "vt_h264" in output,
-                "h265": "vt_h265" in output,
-            }
-        
-    except FileNotFoundError:
-        available["error"] = "HandBrakeCLI not found"
-    except subprocess.TimeoutExpired:
-        available["error"] = "HandBrakeCLI timed out"
-    except Exception as e:
-        available["error"] = str(e)
-    
-    return available
-
+# EncoderPool lives in app.encoder_pool (imported last: it needs EncodingJob)
+from app.encoder_pool import EncoderPool  # noqa: E402
 
 # Global encoder pool instance
 encoder_pool = EncoderPool(max_concurrent=1)

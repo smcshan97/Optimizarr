@@ -14,8 +14,11 @@ from typing import Optional, List, Dict
 class OptimizarrLogger:
     """Centralized logging for application, HandBrake, errors, and statistics."""
     
-    def __init__(self, log_dir: str = "logs"):
-        self.log_dir = Path(log_dir)
+    def __init__(self, log_dir: str = ""):
+        from app.config import project_path
+        # OPTIMIZARR_LOG_DIR lets the test suite log to a temp folder — it
+        # used to write fake failures into the real logs/ (and statistics).
+        self.log_dir = project_path(log_dir or os.environ.get("OPTIMIZARR_LOG_DIR") or "logs")
         self.log_dir.mkdir(parents=True, exist_ok=True)
         
         # Log file paths

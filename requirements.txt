@@ -2,10 +2,9 @@
 fastapi==0.115.0
 uvicorn[standard]==0.32.0
 python-multipart==0.0.12
-jinja2==3.1.4
 
-# Authentication
-passlib[bcrypt]==1.7.4
+# Authentication (bcrypt used directly — passlib was never imported)
+bcrypt>=4.1
 pyjwt==2.9.0
 
 # Scheduling

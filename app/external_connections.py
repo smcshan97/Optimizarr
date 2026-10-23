@@ -9,6 +9,7 @@ Manages Sonarr and Radarr API integrations.
 """
 import base64
 import hashlib
+import re
 import requests
 from typing import Dict, List, Optional, Any
 from datetime import datetime
@@ -47,13 +48,39 @@ CODEC_MAP: Dict[str, str] = {
 _REQUEST_TIMEOUT = 10
 
 
+def parse_height(resolution) -> int:
+    """Best-effort pixel height from Sonarr/Radarr resolution strings.
+
+    Accepts '1920x1080', '1080p', '1080', 2160, … Returns 0 when unparseable.
+    Feeds the upscale-eligibility check, which needs a numeric height.
+    """
+    if not resolution:
+        return 0
+    s = str(resolution).lower().strip()
+    if 'x' in s:
+        s = s.split('x')[-1]
+    m = re.search(r'(\d{3,4})', s)
+    return int(m.group(1)) if m else 0
+
+
 # ---------------------------------------------------------------------------
 # Encryption helpers
 # ---------------------------------------------------------------------------
 
+class MissingDependency(RuntimeError):
+    """A required Python package isn't installed in the server's Python."""
+
+
 def _get_fernet():
     """Return a Fernet instance keyed from settings.SECRET_KEY."""
-    from cryptography.fernet import Fernet
+    try:
+        from cryptography.fernet import Fernet
+    except ImportError:
+        import sys
+        raise MissingDependency(
+            "The Python package 'cryptography' isn't installed, so API keys can't be "
+            f"stored. Run: \"{sys.executable}\" -m pip install \"cryptography>=42\" "
+            "— then try again (no restart needed).")
     # SHA-256 of the secret key → 32 bytes → urlsafe base64 → valid Fernet key
     key_bytes = hashlib.sha256(settings.secret_key.encode()).digest()
     return Fernet(base64.urlsafe_b64encode(key_bytes))
@@ -99,6 +126,23 @@ def public_connection(conn: Dict) -> Dict:
 # ExternalConnectionManager
 # ---------------------------------------------------------------------------
 
+def normalize_base_url(url: str) -> str:
+    """Tidy a user-entered Sonarr/Radarr/Stash address.
+
+    Adds http:// when there's no scheme (requests rejects "localhost:7878"
+    with "No scheme supplied"), drops a trailing slash and a pasted API
+    suffix (".../api/v3"), so the app's address works however it's typed.
+    """
+    url = (url or "").strip()
+    if url and "://" not in url:
+        url = "http://" + url
+    url = url.rstrip("/")
+    for suffix in ("/api/v3", "/api", "/graphql"):
+        if url.lower().endswith(suffix):
+            url = url[: -len(suffix)]
+    return url.rstrip("/")
+
+
 class ExternalConnectionManager:
     """
     Handles all communication with Sonarr / Radarr instances.
@@ -117,8 +161,8 @@ class ExternalConnectionManager:
         return {"X-Api-Key": plaintext, "Accept": "application/json"}
 
     def _base(self, conn: Dict) -> str:
-        """Return the base URL without trailing slash."""
-        return conn["base_url"].rstrip("/")
+        """Return the base URL, normalised (see normalize_base_url)."""
+        return normalize_base_url(conn["base_url"])
 
     def _get(self, conn: Dict, path: str, params: Dict = None) -> Any:
         url = f"{self._base(conn)}/api/v3{path}"
@@ -134,6 +178,17 @@ class ExternalConnectionManager:
     def _post(self, conn: Dict, path: str, body: Dict) -> Any:
         url = f"{self._base(conn)}/api/v3{path}"
         resp = requests.post(
+            url,
+            headers={**self._headers(conn), "Content-Type": "application/json"},
+            json=body,
+            timeout=_REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def _put(self, conn: Dict, path: str, body: Dict) -> Any:
+        url = f"{self._base(conn)}/api/v3{path}"
+        resp = requests.put(
             url,
             headers={**self._headers(conn), "Content-Type": "application/json"},
             json=body,
@@ -170,7 +225,12 @@ class ExternalConnectionManager:
         except requests.exceptions.HTTPError as e:
             if e.response is not None and e.response.status_code == 401:
                 return {"ok": False, "error": "Invalid API key (401 Unauthorized)"}
-            return {"ok": False, "error": f"HTTP {e.response.status_code if e.response else 'error'}"}
+            # (a Response is falsy for 4xx/5xx, so test it against None)
+            code = e.response.status_code if e.response is not None else None
+            if code == 404:
+                return {"ok": False, "error": "HTTP 404 — the URL should be the app's address "
+                                              "only, e.g. http://localhost:7878 (no page path)"}
+            return {"ok": False, "error": f"HTTP {code or 'error'}"}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -325,6 +385,7 @@ class ExternalConnectionManager:
                 "current_specs": {
                     "codec": codec,
                     "resolution": resolution,
+                    "height": parse_height(resolution),
                     "bit_rate": bitrate,
                     "source": "radarr",
                     "radarr_movie_id": movie.get("id"),
@@ -367,6 +428,7 @@ class ExternalConnectionManager:
                     "current_specs": {
                         "codec": codec,
                         "resolution": resolution,
+                        "height": parse_height(resolution),
                         "bit_rate": bitrate,
                         "source": "sonarr",
                         "sonarr_series_id": series_id,
@@ -375,33 +437,105 @@ class ExternalConnectionManager:
                 })
         return items
 
-    def register_webhook(self, conn: Dict, optimizarr_url: str) -> Dict:
+    @staticmethod
+    def _optimizarr_webhooks(notifications: List[Dict], app_type: str) -> List[Dict]:
+        """Sonarr/Radarr notifications that point at our webhook route."""
+        marker = f"/api/webhooks/{app_type}"
+        found = []
+        for n in notifications or []:
+            if n.get("implementation") != "Webhook":
+                continue
+            url = next((f.get("value") for f in n.get("fields", [])
+                        if f.get("name") == "url"), "") or ""
+            if marker in url or n.get("name") == "Optimizarr":
+                found.append(n)
+        return found
+
+    @staticmethod
+    def _set_url_field(notification: Dict, url: str) -> Dict:
+        for f in notification.get("fields", []):
+            if f.get("name") == "url":
+                f["value"] = url
+                return notification
+        notification.setdefault("fields", []).append({"name": "url", "value": url})
+        return notification
+
+    def register_webhook(self, conn: Dict, optimizarr_url: str, secret: str) -> Dict:
         """
         Register Optimizarr as a webhook notification in Sonarr or Radarr.
-        The webhook URL will be: {optimizarr_url}/api/webhooks/{app_type}
+        The webhook URL is {optimizarr_url}/api/webhooks/{app_type}?key=<secret>.
+        An existing Optimizarr notification is updated in place rather than
+        duplicated, so re-registering (e.g. after a URL change) is safe.
         """
         app_type = conn["app_type"]
-        webhook_url = f"{optimizarr_url.rstrip('/')}/api/webhooks/{app_type}"
+        webhook_url = with_webhook_key(
+            f"{optimizarr_url.rstrip('/')}/api/webhooks/{app_type}", secret)
 
-        payload = {
-            "name": "Optimizarr",
-            "implementation": "Webhook",
-            "configContract": "WebhookSettings",
-            "fields": [
-                {"name": "url", "value": webhook_url},
-                {"name": "method", "value": 1},  # 1 = POST
-            ],
-            "onDownload": True,
-            "onUpgrade": True,
-            "onRename": False,
-            "onDelete": False,
-            "tags": [],
-        }
         try:
+            existing = self._optimizarr_webhooks(
+                self._get(conn, "/notification"), app_type)
+            if existing:
+                n = self._set_url_field(existing[0], webhook_url)
+                result = self._put(conn, f"/notification/{n['id']}", n)
+                return {"ok": True, "webhook_id": result.get("id"),
+                        "url": redact_webhook_key(webhook_url), "updated": True}
+
+            payload = {
+                "name": "Optimizarr",
+                "implementation": "Webhook",
+                "configContract": "WebhookSettings",
+                "fields": [
+                    {"name": "url", "value": webhook_url},
+                    {"name": "method", "value": 1},  # 1 = POST
+                ],
+                "onDownload": True,
+                "onUpgrade": True,
+                "onRename": False,
+                "onDelete": False,
+                "tags": [],
+            }
             result = self._post(conn, "/notification", payload)
-            return {"ok": True, "webhook_id": result.get("id"), "url": webhook_url}
+            return {"ok": True, "webhook_id": result.get("id"),
+                    "url": redact_webhook_key(webhook_url), "updated": False}
         except Exception as e:
             return {"ok": False, "error": str(e)}
+
+    def upgrade_webhook_secret(self, conn: Dict, secret: str) -> int:
+        """Add/refresh ?key=<secret> on existing Optimizarr webhooks.
+
+        Webhooks registered before the receiver required a key would
+        otherwise start failing. Only notifications that already point at
+        /api/webhooks/{app_type} are touched; the host part is kept as-is.
+        Returns the number of notifications updated. Raises on HTTP errors.
+        """
+        app_type = conn["app_type"]
+        updated = 0
+        for n in self._optimizarr_webhooks(self._get(conn, "/notification"), app_type):
+            url = next((f.get("value") for f in n.get("fields", [])
+                        if f.get("name") == "url"), "") or ""
+            if f"/api/webhooks/{app_type}" not in url:
+                continue
+            new_url = with_webhook_key(url, secret)
+            if new_url == url:
+                continue
+            self._put(conn, f"/notification/{n['id']}", self._set_url_field(n, new_url))
+            updated += 1
+        return updated
+
+
+def with_webhook_key(url: str, secret: str) -> str:
+    """Return ``url`` with its ``key`` query parameter set to ``secret``."""
+    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+    parts = urlsplit(url)
+    query = [(k, v) for k, v in parse_qsl(parts.query, keep_blank_values=True)
+             if k != "key"]
+    query.append(("key", secret))
+    return urlunsplit(parts._replace(query=urlencode(query)))
+
+
+def redact_webhook_key(url: str) -> str:
+    """Mask the webhook key in a URL for display/logging."""
+    return re.sub(r"(key=)[^&]+", r"\g<1>****", url)
 
 
 

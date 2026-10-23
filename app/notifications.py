@@ -7,7 +7,6 @@ Supports Discord, Slack, and generic JSON webhooks.
 import json
 import threading
 from typing import Dict, List, Optional
-from datetime import datetime
 
 try:
     import requests
@@ -15,6 +14,8 @@ except ImportError:
     requests = None
 
 from app.database import db
+from app.timeutil import utc_now
+from app.logger import optimizarr_logger
 
 
 def _format_size(bytes_val: int) -> str:
@@ -52,7 +53,7 @@ def _get_enabled_webhooks(event: str) -> List[Dict]:
 def _send_webhook(webhook: Dict, payload: Dict):
     """Send a payload to a webhook URL. Runs in a background thread."""
     if not requests:
-        print("⚠ 'requests' library not installed — cannot send notifications")
+        optimizarr_logger.app_logger.warning("⚠ 'requests' library not installed — cannot send notifications")
         return
 
     url = webhook.get('webhook_url', '')
@@ -68,9 +69,9 @@ def _send_webhook(webhook: Dict, payload: Dict):
 
         resp = requests.post(url, json=body, timeout=10)
         if resp.status_code >= 400:
-            print(f"⚠ Webhook '{webhook.get('name', '?')}' returned {resp.status_code}")
+            optimizarr_logger.app_logger.warning(f"⚠ Webhook '{webhook.get('name', '?')}' returned {resp.status_code}")
     except Exception as e:
-        print(f"⚠ Webhook '{webhook.get('name', '?')}' failed: {e}")
+        optimizarr_logger.app_logger.warning(f"⚠ Webhook '{webhook.get('name', '?')}' failed: {e}")
 
 
 def _format_discord(payload: Dict) -> Dict:
@@ -85,7 +86,7 @@ def _format_discord(payload: Dict) -> Dict:
         "title": payload.get('title', 'Optimizarr'),
         "description": payload.get('message', ''),
         "color": color_map.get(event, 0x95a5a6),
-        "timestamp": datetime.utcnow().isoformat(),
+        "timestamp": utc_now().isoformat(),
         "footer": {"text": "Optimizarr"},
     }
     fields = payload.get('fields')
@@ -158,6 +159,18 @@ def notify_encode_failed(file_path: str, error: str, profile_name: str = ''):
             'Profile': profile_name or 'Unknown',
             'Error': error[:200],
         }
+    }
+    _fire('encode_failed', payload)
+
+
+def notify_engine_failed(engine: str, error: str):
+    """An engine's self-test went from passing to failing. Sent on the
+    encode_failed channel: jobs needing it will fall back or fail."""
+    payload = {
+        'event': 'encode_failed',
+        'title': '⚠️ Engine Self-Test Failed',
+        'message': f"**{engine}** failed its self-test — jobs using it will fall back or fail.",
+        'fields': {'Engine': engine, 'Error': error[:200]},
     }
     _fire('encode_failed', payload)
 

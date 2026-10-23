@@ -10,6 +10,8 @@ import threading
 import time
 from typing import Optional, Dict
 from app.database import db
+from app.timeutil import utc_now
+from app.logger import optimizarr_logger
 
 
 class ScheduleManager:
@@ -24,12 +26,12 @@ class ScheduleManager:
     def start(self):
         if not self.scheduler.running:
             self.scheduler.start()
-            print("✓ Scheduler started")
+            optimizarr_logger.app_logger.info("✓ Scheduler started")
     
     def stop(self):
         if self.scheduler.running:
             self.scheduler.shutdown(wait=False)
-            print("✓ Scheduler stopped")
+            optimizarr_logger.app_logger.info("✓ Scheduler stopped")
     
     def load_schedule(self) -> Optional[Dict]:
         """Load schedule configuration from database."""
@@ -80,7 +82,7 @@ class ScheduleManager:
                     conn.commit()
                     return self.load_schedule()
         except Exception as e:
-            print(f"⚠ Error loading schedule: {e}")
+            optimizarr_logger.app_logger.error(f"⚠ Error loading schedule: {e}")
             return None
     
     def save_schedule(self, config: Dict) -> bool:
@@ -132,7 +134,7 @@ class ScheduleManager:
             self.setup_schedule_check()
             return True
         except Exception as e:
-            print(f"✗ Error saving schedule: {e}")
+            optimizarr_logger.app_logger.error(f"✗ Error saving schedule: {e}")
             return False
 
     # ------------------------------------------------------------------
@@ -167,7 +169,7 @@ class ScheduleManager:
                 "rest_end_str": f"{int(active_start):02d}:00",
             }
         except Exception as e:
-            print(f"⚠ Could not read Windows Active Hours: {e}")
+            optimizarr_logger.app_logger.warning(f"⚠ Could not read Windows Active Hours: {e}")
             return None
 
     # ------------------------------------------------------------------
@@ -238,7 +240,7 @@ class ScheduleManager:
             id='schedule_check',
             replace_existing=True
         )
-        print("✓ Schedule check configured (runs every minute)")
+        optimizarr_logger.app_logger.info("✓ Schedule check configured (runs every minute)")
 
     def setup_sync_check(self):
         """Recurring auto-sync tick for external connections (Patch 37).
@@ -254,7 +256,7 @@ class ScheduleManager:
             id='auto_sync_check',
             replace_existing=True,
         )
-        print("✓ Auto-sync check configured (every 15 minutes)")
+        optimizarr_logger.app_logger.info("✓ Auto-sync check configured (every 15 minutes)")
 
     def check_auto_sync(self):
         """Sync every enabled connection whose sync interval has elapsed."""
@@ -262,13 +264,13 @@ class ScheduleManager:
             connections = db.get_external_connections()
         except Exception:
             return
-        now = datetime.utcnow()
+        now = utc_now()
         for conn in connections:
             if not _sync_due(conn, now):
                 continue
             from app.api.connection_routes import _sync_connection_task
             from app.devlog import devlog
-            print(f"⏰ Auto-sync: {conn['name']} (every {conn['sync_interval_hours']}h)")
+            optimizarr_logger.app_logger.info(f"⏰ Auto-sync: {conn['name']} (every {conn['sync_interval_hours']}h)")
             devlog('auto_sync', name=conn['name'],
                    ivl=conn['sync_interval_hours'])
             t = threading.Thread(
@@ -292,13 +294,13 @@ class ScheduleManager:
         is_scheduled = self.is_within_schedule()
         is_running = encoder_pool.is_running
         if is_scheduled and not is_running:
-            print("⏰ Schedule active — Starting encoding")
+            optimizarr_logger.app_logger.info("⏰ Schedule active — Starting encoding")
             t = threading.Thread(target=encoder_pool.process_queue, daemon=True)
             t.start()
         elif not is_scheduled and is_running:
             # Hard stop unless the user opted to let the current encode finish
             graceful = bool((self.schedule_config or {}).get('finish_before_stop'))
-            print(f"⏰ Outside schedule window — Stopping encoding"
+            optimizarr_logger.app_logger.info(f"⏰ Outside schedule window — Stopping encoding"
                   f"{' after current job' if graceful else ''}")
             encoder_pool.stop(graceful=graceful)
     
@@ -315,11 +317,11 @@ class ScheduleManager:
 
     def enable_manual_override(self):
         self.manual_override = True
-        print("✓ Manual override enabled")
+        optimizarr_logger.app_logger.info("✓ Manual override enabled")
     
     def disable_manual_override(self):
         self.manual_override = False
-        print("✓ Manual override disabled")
+        optimizarr_logger.app_logger.info("✓ Manual override disabled")
     
     def get_status(self) -> Dict:
         windows_hours = None
@@ -366,9 +368,9 @@ def initialize_scheduler():
     schedule_manager.setup_sync_check()
     if schedule_manager.is_enabled:
         schedule_manager.setup_schedule_check()
-        print("✓ Scheduler initialized and enabled")
+        optimizarr_logger.app_logger.info("✓ Scheduler initialized and enabled")
     else:
-        print("✓ Scheduler initialized (disabled)")
+        optimizarr_logger.app_logger.info("✓ Scheduler initialized (disabled)")
 
 
 def shutdown_scheduler():

@@ -1,25 +1,93 @@
 """External connections (Sonarr, Radarr, Stash) and webhook routes."""
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
-from typing import List
+
+import hmac
+import os
+import secrets
+
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks, Header
+from typing import List, Optional
 
 from app.api.models import MessageResponse
 from app.api.dependencies import get_current_user, get_current_admin_user
 from app.database import db
 from app.logger import optimizarr_logger
+from app.timeutil import utc_now
 
 router = APIRouter()
 
 
+def get_webhook_secret() -> str:
+    """The shared secret Sonarr/Radarr must send with webhook calls.
+
+    Generated on first use and kept in the settings table. Sent as the
+    ``key`` query parameter (works with every Sonarr/Radarr version) or the
+    ``X-Optimizarr-Key`` header.
+    """
+    secret = db.get_setting('webhook_secret')
+    if not secret:
+        secret = secrets.token_urlsafe(32)
+        db.set_setting('webhook_secret', secret)
+    return secret
+
+
+def _path_in_scan_roots(file_path: str) -> bool:
+    """True if ``file_path`` lies inside an enabled scan root.
+
+    Webhook payloads name the file to encode — and an encode REPLACES the
+    original — so only files inside a configured library are accepted.
+    """
+    try:
+        target = os.path.normcase(os.path.abspath(file_path))
+    except (TypeError, ValueError):
+        return False
+    for root in db.get_scan_roots(enabled_only=True):
+        base = os.path.normcase(os.path.abspath(root['path']))
+        try:
+            if os.path.commonpath([target, base]) == base:
+                return True
+        except ValueError:  # different drives on Windows
+            continue
+    return False
+
+
+def upgrade_registered_webhooks() -> int:
+    """Startup migration: add the secret key to webhooks registered before
+    the receiver required one. Returns how many notifications were updated."""
+    from app.external_connections import connection_manager
+    secret = get_webhook_secret()
+    total = 0
+    for conn in db.get_external_connections():
+        if conn.get('app_type') not in ('sonarr', 'radarr') or not conn.get('enabled'):
+            continue
+        try:
+            total += connection_manager.upgrade_webhook_secret(conn, secret)
+        except Exception as e:
+            optimizarr_logger.app_logger.warning(
+                "Could not update webhook secret on %s: %s", conn.get('name'), e)
+    return total
+
+
 @router.get("/connections")
-async def list_connections(current_user: dict = Depends(get_current_user)):
+def list_connections(current_user: dict = Depends(get_current_user)):
     """List all external connections (API keys are masked)."""
     from app.external_connections import public_connection
     conns = db.get_external_connections()
     return [public_connection(c) for c in conns]
 
 
+def _require_crypto():
+    """Fail with a readable reason, not a bare 500, when the encryption
+    package is missing (a system-Python install without cryptography made
+    every connection save crash silently)."""
+    from app.external_connections import _get_fernet, MissingDependency
+    try:
+        _get_fernet()
+    except MissingDependency as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @router.post("/connections", status_code=status.HTTP_201_CREATED)
-async def create_connection(
+def create_connection(
     data: dict,
     current_user: dict = Depends(get_current_admin_user),
 ):
@@ -31,6 +99,7 @@ async def create_connection(
     from app.external_connections import (
         encrypt_api_key, public_connection, connection_manager
     )
+    _require_crypto()
 
     app_type = data.get("app_type", "").lower()
     if app_type not in ("sonarr", "radarr", "stash"):
@@ -43,7 +112,8 @@ async def create_connection(
     if not raw_key:
         raise HTTPException(status_code=400, detail="api_key is required")
 
-    base_url = data.get("base_url", "").strip()
+    from app.external_connections import normalize_base_url
+    base_url = normalize_base_url(data.get("base_url", ""))
     if not base_url:
         raise HTTPException(status_code=400, detail="base_url is required")
 
@@ -64,7 +134,14 @@ async def create_connection(
             detail=f"Connection test failed: {result['error']}",
         )
 
+    from app.arr_paths import validate_mappings
+    try:
+        mappings_json = validate_mappings(data.get("path_mappings") or [])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
     conn_id = db.create_external_connection(
+        path_mappings=mappings_json,
         name=name,
         app_type=app_type,
         base_url=base_url,
@@ -77,7 +154,7 @@ async def create_connection(
     # Stamp last_tested
     db.update_external_connection(
         conn_id,
-        last_tested=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        last_tested=utc_now().strftime("%Y-%m-%d %H:%M:%S"),
     )
 
     conn = db.get_external_connection(conn_id)
@@ -89,8 +166,37 @@ async def create_connection(
     }
 
 
+@router.post("/connections/test")
+def test_connection_settings(data: dict, current_user: dict = Depends(get_current_admin_user)):
+    """Test an unsaved connection (the form's Test button) — nothing is
+    saved. The button used to POST to create, which saved a connection
+    named "_test_" whenever the test passed."""
+    from app.external_connections import (
+        connection_manager, encrypt_api_key, normalize_base_url)
+    _require_crypto()
+    app_type = (data or {}).get("app_type", "").lower()
+    base_url = normalize_base_url((data or {}).get("base_url", ""))
+    raw_key = ((data or {}).get("api_key") or "").strip()
+    if app_type not in ("sonarr", "radarr", "stash") or not base_url or not raw_key:
+        raise HTTPException(status_code=400, detail="app_type, base_url and api_key are required")
+    return connection_manager.test_connection(
+        {"app_type": app_type, "base_url": base_url,
+         "api_key_encrypted": encrypt_api_key(raw_key)})
+
+
+@router.post("/connections/detect-mappings")
+def detect_path_mappings(data: dict, current_user: dict = Depends(get_current_admin_user)):
+    """Suggest remote->local path mappings from the Docker container that
+    publishes this URL's port (Sonarr/Radarr usually run in Docker)."""
+    from app.arr_paths import detect_docker_mappings
+    base_url = (data or {}).get("base_url", "").strip()
+    if not base_url:
+        raise HTTPException(status_code=400, detail="base_url is required")
+    return detect_docker_mappings(base_url)
+
+
 @router.put("/connections/{conn_id}")
-async def update_connection(
+def update_connection(
     conn_id: int,
     data: dict,
     current_user: dict = Depends(get_current_admin_user),
@@ -110,12 +216,22 @@ async def update_connection(
     for field in ("name", "base_url", "enabled", "show_in_stats", "app_type"):
         if field in data:
             update_kwargs[field] = data[field]
+    if "base_url" in update_kwargs:
+        from app.external_connections import normalize_base_url
+        update_kwargs["base_url"] = normalize_base_url(update_kwargs["base_url"])
     if "sync_interval_hours" in data:
         update_kwargs["sync_interval_hours"] = int(data["sync_interval_hours"] or 0)
+    if "path_mappings" in data:
+        from app.arr_paths import validate_mappings
+        try:
+            update_kwargs["path_mappings"] = validate_mappings(data["path_mappings"] or [])
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
 
     # Only re-encrypt if a new key was actually supplied
     new_key = data.get("api_key", "").strip()
     if new_key:
+        _require_crypto()
         update_kwargs["api_key_encrypted"] = encrypt_api_key(new_key)
 
     db.update_external_connection(conn_id, **update_kwargs)
@@ -124,7 +240,7 @@ async def update_connection(
 
 
 @router.delete("/connections/{conn_id}")
-async def delete_connection(
+def delete_connection(
     conn_id: int,
     current_user: dict = Depends(get_current_admin_user),
 ):
@@ -138,7 +254,7 @@ async def delete_connection(
 
 
 @router.post("/connections/{conn_id}/test")
-async def test_connection(
+def test_connection(
     conn_id: int,
     current_user: dict = Depends(get_current_user),
 ):
@@ -154,13 +270,13 @@ async def test_connection(
     # Update last_tested regardless of result
     db.update_external_connection(
         conn_id,
-        last_tested=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        last_tested=utc_now().strftime("%Y-%m-%d %H:%M:%S"),
     )
     return result
 
 
 @router.post("/connections/{conn_id}/sync")
-async def sync_connection(
+def sync_connection(
     conn_id: int,
     background_tasks: BackgroundTasks,
     current_user: dict = Depends(get_current_admin_user),
@@ -201,6 +317,9 @@ def _sync_connection_task(conn_id: int):
             items = connection_manager.fetch_stash_library(conn)
         else:
             return
+        from app.arr_paths import to_local
+        for item in items:
+            item["file_path"] = to_local(conn, item["file_path"])
     except Exception as e:
         optimizarr_logger.app_logger.error("Sync failed for %s: %s", conn["name"], e)
         return
@@ -232,7 +351,7 @@ def _sync_connection_task(conn_id: int):
         return
 
     # Build set of already-queued paths
-    existing_paths = {item["file_path"] for item in db.get_queue_items()}
+    existing_paths = db.get_queue_file_paths()
 
     added = 0
     skipped = 0
@@ -243,11 +362,8 @@ def _sync_connection_task(conn_id: int):
             continue
 
         current_specs = item.get("current_specs", {})
-        target_specs = {
-            "codec": profile["codec"],
-            "resolution": profile.get("resolution", ""),
-            "audio_codec": profile["audio_codec"],
-        }
+        from app.scanner import profile_targets
+        target_specs = profile_targets(profile)
 
         # Skip if already at target codec
         if not scanner._needs_encoding(current_specs, target_specs):
@@ -259,26 +375,10 @@ def _sync_connection_task(conn_id: int):
 
         # Evaluate upscale eligibility: linked scan root > profile fallback
         import json as _json
-        upscale_plan   = None
+        from app.scanner import upscale_plan_for, upscale_source_for
         linked_root    = db.get_scan_root(root_id) if root_id else None
-        upscale_source = None
-        if linked_root and linked_root.get("upscale_enabled"):
-            upscale_source = linked_root
-        elif profile.get("upscale_enabled"):
-            upscale_source = profile
-        if upscale_source:
-            src_h   = current_specs.get("height", 0) or 0
-            trigger = upscale_source.get("upscale_trigger_below", 720)
-            t_h     = upscale_source.get("upscale_target_height", 1080)
-            if src_h > 0 and src_h < trigger and src_h < (t_h * 0.85):
-                upscale_plan = _json.dumps({
-                    "enabled":       True,
-                    "upscaler_key":  upscale_source.get("upscale_key", "realesrgan"),
-                    "model":         upscale_source.get("upscale_model", "realesrgan-x4plus"),
-                    "factor":        upscale_source.get("upscale_factor", 2),
-                    "source_height": src_h,
-                    "target_height": t_h,
-                })
+        upscale_plan   = upscale_plan_for(upscale_source_for(linked_root, profile),
+                                          current_specs.get("height", 0))
 
         # Evaluate stereo eligibility: linked scan root > profile fallback
         stereo_plan    = None
@@ -322,7 +422,7 @@ def _sync_connection_task(conn_id: int):
 
     db.update_external_connection(
         conn_id,
-        last_synced=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        last_synced=utc_now().strftime("%Y-%m-%d %H:%M:%S"),
     )
     optimizarr_logger.app_logger.info(
         "Sync complete: %s — %d added, %d skipped", conn["name"], added, skipped
@@ -330,14 +430,14 @@ def _sync_connection_task(conn_id: int):
 
 
 @router.post("/connections/{conn_id}/register-webhook")
-async def register_webhook(
+def register_webhook(
     conn_id: int,
     data: dict,
     current_user: dict = Depends(get_current_admin_user),
 ):
     """
     Register Optimizarr as a webhook in Sonarr/Radarr.
-    Body: { optimizarr_url: "http://your-optimizarr:5000" }
+    Body: { optimizarr_url: "http://your-optimizarr:5757" }
     """
     from app.external_connections import connection_manager
 
@@ -349,7 +449,7 @@ async def register_webhook(
     if not optimizarr_url:
         raise HTTPException(status_code=400, detail="optimizarr_url is required")
 
-    result = connection_manager.register_webhook(conn, optimizarr_url)
+    result = connection_manager.register_webhook(conn, optimizarr_url, get_webhook_secret())
     if not result["ok"]:
         raise HTTPException(status_code=400, detail=f"Webhook registration failed: {result['error']}")
     return result
@@ -359,12 +459,25 @@ async def register_webhook(
 # WEBHOOKS — Receive download events from Sonarr / Radarr
 # ============================================================
 
+@router.get("/webhooks/info")
+def webhook_info(current_user: dict = Depends(get_current_admin_user)):
+    """Webhook URL paths (with key) to paste into Sonarr/Radarr manually."""
+    secret = get_webhook_secret()
+    return {app: f"/api/webhooks/{app}?key={secret}" for app in ("sonarr", "radarr")}
+
+
 @router.post("/webhooks/{app_type}")
-async def receive_webhook(app_type: str, payload: dict):
+def receive_webhook(
+    app_type: str,
+    payload: dict,
+    key: Optional[str] = None,
+    x_optimizarr_key: Optional[str] = Header(None),
+):
     """
     Receive download completion events from Sonarr or Radarr.
-    No authentication — the caller is on the local network.
-    Files are queued as pending (respects scheduler rest hours).
+    Requires the webhook secret (``?key=`` or ``X-Optimizarr-Key``) — an
+    unauthenticated caller could otherwise get any file re-encoded and its
+    original replaced. Files are queued as pending (respects scheduler rest hours).
 
     Dead-letter pattern (Patch 34): the raw event is persisted BEFORE any
     processing, so a webhook that arrives mid-restart or dies on an
@@ -372,7 +485,14 @@ async def receive_webhook(app_type: str, payload: dict):
     """
     import json as _json
 
+    supplied = key or x_optimizarr_key or ''
+    if not hmac.compare_digest(supplied.encode(), get_webhook_secret().encode()):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Missing or invalid webhook key")
+
     app_type = app_type.lower()
+    if app_type not in ("sonarr", "radarr"):
+        raise HTTPException(status_code=400, detail=f"Unsupported app_type: {app_type}")
     event_id = db.add_webhook_event(app_type, _json.dumps(payload))
 
     try:
@@ -441,6 +561,21 @@ def process_webhook_payload(app_type: str, payload: dict) -> dict:
     if not file_path:
         return {"ok": False, "message": "No file path in webhook payload"}
 
+    # Sonarr/Radarr name files by their (usually Docker) path — translate
+    from app.arr_paths import to_local
+    for c in db.get_external_connections():
+        if c.get("app_type") == app_type and c.get("enabled"):
+            mapped = to_local(c, file_path)
+            if mapped != file_path:
+                file_path = mapped
+                break
+
+    if not _path_in_scan_roots(file_path):
+        optimizarr_logger.app_logger.warning(
+            "Webhook: rejected %s — not inside any enabled scan root", file_path)
+        return {"ok": False,
+                "message": "File is not inside an enabled scan root — add its library folder first"}
+
     codec = CODEC_MAP.get(raw_codec.lower(), raw_codec.lower() or "unknown")
 
     # Find a connection of this app_type and a linked scan root
@@ -470,41 +605,23 @@ def process_webhook_payload(app_type: str, payload: dict) -> dict:
         return {"ok": False, "message": "Profile not found"}
 
     # Skip if already queued
-    existing = {item["file_path"] for item in db.get_queue_items()}
-    if file_path in existing:
+    if db.is_queued(file_path):
         return {"ok": True, "message": "File already in queue"}
 
-    current_specs = {"codec": codec, "resolution": resolution, "bit_rate": 0}
-    target_specs = {
-        "codec": profile["codec"],
-        "resolution": profile.get("resolution", ""),
-        "audio_codec": profile["audio_codec"],
-    }
+    from app.external_connections import parse_height
+    current_specs = {"codec": codec, "resolution": resolution,
+                     "height": parse_height(resolution), "bit_rate": 0}
+    from app.scanner import profile_targets
+    target_specs = profile_targets(profile)
 
     perm_status, _ = scanner.check_file_permissions(file_path)
 
     # Evaluate upscale eligibility: linked scan root > profile fallback
     import json as _json
-    upscale_plan   = None
+    from app.scanner import upscale_plan_for, upscale_source_for
     linked_root    = db.get_scan_root(root_id) if root_id else None
-    upscale_source = None
-    if linked_root and linked_root.get("upscale_enabled"):
-        upscale_source = linked_root
-    elif profile.get("upscale_enabled"):
-        upscale_source = profile
-    if upscale_source:
-        src_h   = current_specs.get("height", 0) or 0
-        trigger = upscale_source.get("upscale_trigger_below", 720)
-        t_h     = upscale_source.get("upscale_target_height", 1080)
-        if src_h > 0 and src_h < trigger and src_h < (t_h * 0.85):
-            upscale_plan = _json.dumps({
-                "enabled":       True,
-                "upscaler_key":  upscale_source.get("upscale_key", "realesrgan"),
-                "model":         upscale_source.get("upscale_model", "realesrgan-x4plus"),
-                "factor":        upscale_source.get("upscale_factor", 2),
-                "source_height": src_h,
-                "target_height": t_h,
-            })
+    upscale_plan   = upscale_plan_for(upscale_source_for(linked_root, profile),
+                                      current_specs.get("height", 0))
 
     # Evaluate stereo eligibility: linked scan root > profile fallback
     stereo_plan    = None
@@ -523,7 +640,8 @@ def process_webhook_payload(app_type: str, payload: dict) -> dict:
             "depth_model": stereo_source.get("stereo_depth_model", "Any_V2_S"),
         })
 
-    db.add_to_queue(
+    queued_id = db.add_to_queue(
+        skip_if_queued=True,
         file_path=file_path,
         root_id=root_id,
         profile_id=profile_id,
@@ -541,6 +659,8 @@ def process_webhook_payload(app_type: str, payload: dict) -> dict:
         upscale_plan=upscale_plan,
         stereo_plan=stereo_plan,
     )
+    if queued_id is None:  # lost a race with another event for this file
+        return {"ok": True, "message": "File already in queue"}
 
     # Wake the encoder if it's not already running and the schedule permits.
     # (Was importing a non-existent `encoding_scheduler` → ImportError swallowed

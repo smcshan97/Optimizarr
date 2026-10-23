@@ -21,13 +21,15 @@ Event vocabulary (keep it small and stable):
 Never raises — a broken devlog must not break the app.
 """
 import json
+import os
 import sys
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
 
 _LOCK = threading.Lock()
-_FILE = Path("logs") / "devlog.jsonl"
+_FILE = (Path(os.environ["OPTIMIZARR_LOG_DIR"]) if os.environ.get("OPTIMIZARR_LOG_DIR")
+         else Path(__file__).resolve().parent.parent / "logs") / "devlog.jsonl"
 _MAX_BYTES = 1_000_000  # rotate to .1 past this; one backup kept
 _TS_FMT = "%m-%d %H:%M:%S"
 

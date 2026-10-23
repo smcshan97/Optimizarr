@@ -31,6 +31,14 @@ UPSCALERS = {
         "binary_win": "realesrgan-ncnn-vulkan.exe",
         "models": ["realesrgan-x4plus", "realesrgan-x4plus-anime", "realesr-animevideov3"],
         "default_model": "realesrgan-x4plus",
+        # Scales each model was trained for. realesrgan-ncnn-vulkan only
+        # appends -x<scale> to the file name for animevideov3; the x4plus
+        # models are 4x-only and "-s 2" just mis-sizes the output buffer.
+        "model_scales": {
+            "realesrgan-x4plus": [4],
+            "realesrgan-x4plus-anime": [4],
+            "realesr-animevideov3": [2, 3, 4],
+        },
         "scale_options": [2, 3, 4],
         "default_scale": 2,
         "github_owner": "xinntao",
@@ -48,6 +56,11 @@ UPSCALERS = {
         "binary_win": "realcugan-ncnn-vulkan.exe",
         "models": ["models-se", "models-pro", "models-nose"],
         "default_model": "models-se",
+        "model_scales": {
+            "models-se": [2, 3, 4],
+            "models-pro": [2, 3],
+            "models-nose": [2],
+        },
         "scale_options": [2, 3, 4],
         "default_scale": 2,
         "github_owner": "nihui",
@@ -65,6 +78,10 @@ UPSCALERS = {
         "binary_win": "waifu2x-ncnn-vulkan.exe",
         "models": ["models-cunet", "models-upconv_7_anime_style_art_rgb"],
         "default_model": "models-cunet",
+        "model_scales": {
+            "models-cunet": [1, 2],
+            "models-upconv_7_anime_style_art_rgb": [1, 2],
+        },
         "scale_options": [1, 2],
         "default_scale": 2,
         "github_owner": "nihui",
@@ -74,7 +91,102 @@ UPSCALERS = {
         "best_for": "Anime, Illustrations",
         "url": "https://github.com/nihui/waifu2x-ncnn-vulkan/releases",
     },
+    "upscayl": {
+        "name": "Upscayl",
+        "description": ("Upscayl's ncnn engine and model set. Upscayl Lite is built for "
+                        "speed — about 12x faster than Real-ESRGAN x4plus on a 540p frame, "
+                        "with close to the same detail. Resizes to the target factor itself."),
+        "icon": "🆙",
+        "binary_linux": "upscayl-bin",
+        "binary_win": "upscayl-bin.exe",
+        # 4x model; -s resizes the output to the requested factor. Only Lite:
+        # benchmarked 540p->1080p against true 1080p (RTX 2060 Super), the
+        # bigger models were 4-10x slower and scored lower — Standard VMAF
+        # 85 vs Lite 96 on live action; digital-art lost on 2D and 3D anime.
+        "models": ["upscayl-lite-4x"],
+        "default_model": "upscayl-lite-4x",
+        "model_scales": {},
+        "scale_options": [2, 3, 4],
+        "default_scale": 2,
+        "outputs_at_factor": True,
+        "github_owner": "upscayl",
+        "github_repo": "upscayl-ncnn",
+        "asset_pattern_win": r"^upscayl-bin-.*-windows\.zip$",
+        "asset_pattern_linux": r"^upscayl-bin-.*-linux\.zip$",
+        # The release ships only the binary; models live in the app repo
+        "models_url": "https://raw.githubusercontent.com/upscayl/upscayl/main/resources/models/",
+        "models_api": "https://api.github.com/repos/upscayl/upscayl/contents/resources/models",
+        "best_for": "Fast live-action upscaling; sharper models when time allows",
+        "url": "https://github.com/upscayl/upscayl",
+    },
+    "rtxvsr": {
+        "name": "NVIDIA RTX Video Super Resolution",
+        "description": ("NVIDIA's RTX VSR model via the official VFX SDK — trained on "
+                        "compressed video, so it cleans up blocking while it upscales. "
+                        "Runs on Tensor Cores: dozens of times faster than Real-ESRGAN. "
+                        "Needs an RTX 20-series or newer GPU (~550 MB runtime)."),
+        "icon": "🟩",
+        "binary_linux": "python",
+        "binary_win": "python.exe",
+        # "Models" are VSR quality levels (HIGHBITRATE_* for clean sources)
+        "models": ["ULTRA", "HIGH", "MEDIUM", "LOW", "HIGHBITRATE_ULTRA", "HIGHBITRATE_HIGH"],
+        "default_model": "ULTRA",
+        "scale_options": [2, 3, 4],
+        "default_scale": 2,
+        "best_for": "TV, DVD and web rips — fast, artifact-aware",
+        "url": "https://docs.nvidia.com/maxine/vfx-python/latest/",
+        "runtime": "rtxvsr",   # installed as a Python runtime, not a GitHub binary
+    },
 }
+
+# Processing engines — installed/updated like upscalers but not selectable as
+# a profile's upscaler. Video2X runs the Real-ESRGAN/Real-CUGAN models above
+# as a streaming pipeline (see app.video2x).
+ENGINES = {
+    "video2x": {
+        "name": "Video2X (streaming engine)",
+        "description": ("Runs Real-ESRGAN / Real-CUGAN on the GPU straight from the "
+                        "video — no frame extraction, no hundreds of GB of temp PNGs. "
+                        "Used automatically when installed."),
+        "icon": "🚀",
+        "binary_linux": "Video2X-x86_64.AppImage",
+        "binary_win": "video2x.exe",
+        "github_owner": "k4yt3x",
+        "github_repo": "video2x",
+        "asset_pattern_win": r"^video2x-windows-amd64\.zip$",
+        "asset_pattern_linux": r"^Video2X-x86_64\.AppImage$",
+        "best_for": "Faster upscaling with little temp disk",
+        "url": "https://github.com/k4yt3x/video2x/releases",
+    },
+    "handbrake": {
+        "name": "HandBrakeCLI",
+        "description": ("The encoder itself. Installing here keeps an Optimizarr-managed "
+                        "copy (no admin rights needed) that takes precedence over the one "
+                        "on PATH; new versions go in their own folder, so an update never "
+                        "touches a binary that's mid-encode. Used from the next encode."),
+        "icon": "🎞️",
+        "binary_linux": "HandBrakeCLI",
+        "binary_win": "HandBrakeCLI.exe",
+        "github_owner": "HandBrake",
+        "github_repo": "HandBrake",
+        "asset_pattern_win": r"^HandBrakeCLI-[\d.]+-win-x86_64\.zip$",
+        "asset_pattern_linux": None,   # HandBrake ships no Linux CLI build (Flatpak only)
+        "best_for": "Newer encoders (SVT-AV1 4.x, AMD AV1 10-bit) without waiting on a package manager",
+        "url": "https://github.com/HandBrake/HandBrake/releases",
+        "prefer_managed": True,
+        "versioned_install": True,
+        "version_args": ["--version"],
+    },
+}
+
+
+def _spec(key: str) -> Dict:
+    return UPSCALERS.get(key) or ENGINES[key]
+
+
+def is_installable(key: str) -> bool:
+    return key in UPSCALERS or key in ENGINES
+
 
 # ---------------------------------------------------------------------------
 # In-memory download state (key → status dict)
@@ -97,29 +209,61 @@ def _upscaler_install_dir() -> Path:
 
 
 def _binary_name(key: str) -> str:
-    upscaler = UPSCALERS[key]
+    upscaler = _spec(key)
     is_win = platform.system() == "Windows"
     return upscaler["binary_win"] if is_win else upscaler["binary_linux"]
 
 
+def _version_key(name: str):
+    return tuple(int(x) for x in re.findall(r"\d+", name)) or (0,)
+
+
+def _find_managed(key: str, binary: str) -> Optional[str]:
+    """Binary inside Optimizarr's install dir (newest version folder first)."""
+    sub = _upscaler_install_dir() / key
+    if not sub.exists():
+        return None
+    if _spec(key).get("versioned_install"):
+        for vdir in sorted((d for d in sub.iterdir() if d.is_dir()),
+                           key=lambda d: _version_key(d.name), reverse=True):
+            hit = next(vdir.rglob(binary), None)
+            if hit:
+                return str(hit)
+        return None
+    return next((str(p) for p in sub.rglob(binary)), None)
+
+
 def _find_binary(key: str) -> Optional[str]:
     """Return path to installed binary or None."""
+    if _spec(key).get("runtime") == "rtxvsr":
+        from app import rtx_vsr
+        return str(rtx_vsr.runtime_python()) if rtx_vsr.installed_info() else None
     binary = _binary_name(key)
+    if _spec(key).get("prefer_managed"):
+        managed = _find_managed(key, binary)
+        if managed:
+            return managed
     # 1. System PATH
     found = shutil.which(binary)
     if found:
         return found
-    # 2. Optimizarr install dir
+    # 2. Optimizarr install dir (legacy flat layout)
     local = _upscaler_install_dir() / binary
     if local.exists():
         return str(local)
+    # 3. Per-upscaler subdirectory — downloads extract the full release tree
+    #    here so the binary keeps its required models/ directory beside it
+    sub = _upscaler_install_dir() / key
+    if sub.exists():
+        for p in sub.rglob(binary):
+            return str(p)
     return None
 
 
-def _get_binary_version(binary_path: str) -> str:
+def _get_binary_version(binary_path: str, args: Optional[List[str]] = None) -> str:
     try:
         result = subprocess.run(
-            [binary_path, "--help"],
+            [binary_path, *(args or ["--help"])],
             capture_output=True, text=True, timeout=5,
             encoding='utf-8', errors='replace'
         )
@@ -190,7 +334,7 @@ def _fetch_latest_release(owner: str, repo: str) -> Optional[Dict]:
             if release.get("assets"):
                 release["_fetched_at"] = time.time()
                 _update_cache[cache_key] = release
-                print(f"  ℹ Using release {release.get('tag_name')} (latest tag had no assets)")
+                optimizarr_logger.app_logger.info(f"  ℹ Using release {release.get('tag_name')} (latest tag had no assets)")
                 return release
 
     # 3. Nothing found
@@ -200,7 +344,7 @@ def _fetch_latest_release(owner: str, repo: str) -> Optional[Dict]:
         msg = f"No releases with binary assets found for {owner}/{repo}."
     else:
         msg = f"GitHub API returned HTTP {resp.status_code}"
-    print(f"⚠ {msg}")
+    optimizarr_logger.app_logger.warning(f"⚠ {msg}")
     return {"_error": "not_found", "_message": msg}
 
 
@@ -226,7 +370,7 @@ def download_upscaler(key: str) -> Dict:
     Start downloading the upscaler binary in a background thread.
     Returns immediately with the initial state dict.
     """
-    if key not in UPSCALERS:
+    if not is_installable(key):
         return {"error": f"Unknown upscaler: {key}"}
 
     # If already downloading, return current state
@@ -248,8 +392,21 @@ def download_upscaler(key: str) -> Dict:
 
 
 def _download_worker(key: str):
-    upscaler = UPSCALERS[key]
+    upscaler = _spec(key)
     state = _download_state[key]
+    if upscaler.get("runtime") == "rtxvsr":
+        state["status"] = "downloading"
+        try:
+            from app import rtx_vsr
+            rtx_vsr.install(state)
+            state.update(status="installed", progress=100,
+                         message=f"✓ {upscaler['name']} ready ({state.get('version')})")
+            from app.engine_health import test_in_background
+            test_in_background([key])
+        except Exception as e:
+            state.update(status="error", error=str(e), message=f"Install failed: {e}")
+            optimizarr_logger.app_logger.error("RTX VSR install failed: %s", e)
+        return
     is_win = platform.system() == "Windows"
     install_dir = _upscaler_install_dir()
 
@@ -267,6 +424,9 @@ def _download_worker(key: str):
         tag = release.get("tag_name", "unknown")
         assets = release.get("assets", [])
         pattern = upscaler["asset_pattern_win"] if is_win else upscaler["asset_pattern_linux"]
+        if pattern is None:
+            raise RuntimeError(f"{upscaler['name']} has no download for this OS — "
+                               "install it with your package manager")
         asset = _find_asset(assets, pattern)
 
         if not asset:
@@ -301,47 +461,73 @@ def _download_worker(key: str):
                         if total_size:
                             state["progress"] = min(90, int(downloaded / total_size * 90))
 
+        # GitHub publishes a sha256 digest per release asset — verify it so
+        # a truncated or tampered download is never extracted and run.
+        digest = (asset.get("digest") or "")
+        if digest.startswith("sha256:"):
+            import hashlib
+            h = hashlib.sha256()
+            with open(archive_path, "rb") as fh:
+                for block in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(block)
+            if h.hexdigest().lower() != digest.split(":", 1)[1].lower():
+                archive_path.unlink(missing_ok=True)
+                raise RuntimeError(f"Checksum mismatch for {asset_name} — download discarded")
+
         state["progress"] = 90
         state["message"] = "Extracting archive…"
 
-        # 3. Extract
+        # 3. Extract the FULL archive tree. The ncnn-vulkan upscalers need
+        #    their models/ directory (and bundled DLLs on Windows) next to
+        #    the executable — extracting the bare binary produced an install
+        #    that immediately failed with "models not found".
         binary_name = _binary_name(key)
-        if asset_name.endswith(".zip"):
+        extract_dir = install_dir / key
+        if upscaler.get("versioned_install"):
+            # One folder per version: an update never overwrites a binary
+            # that a running encode has open (Windows would refuse anyway).
+            extract_dir = extract_dir / tag
+        if asset_name.endswith(".AppImage"):
+            # Single self-contained executable — nothing to extract
+            extract_dir.mkdir(parents=True, exist_ok=True)
+            import shutil as _sh
+            _sh.move(str(archive_path), str(extract_dir / binary_name))
+        elif asset_name.endswith(".zip"):
             with zipfile.ZipFile(archive_path, "r") as zf:
-                # Find the binary inside the zip
-                names = zf.namelist()
-                target = next((n for n in names if Path(n).name == binary_name), None)
-                if target is None:
-                    # Just extract everything
-                    zf.extractall(install_dir / key)
-                    # Try to find binary in extracted tree
-                    for p in (install_dir / key).rglob(binary_name):
-                        p.rename(install_dir / binary_name)
-                        break
-                else:
-                    data = zf.read(target)
-                    dest = install_dir / binary_name
-                    with open(dest, "wb") as bf:
-                        bf.write(data)
+                zf.extractall(extract_dir)
         elif asset_name.endswith((".tar.gz", ".tgz")):
             with tarfile.open(archive_path, "r:gz") as tf:
-                for member in tf.getmembers():
-                    if Path(member.name).name == binary_name:
-                        f_obj = tf.extractfile(member)
-                        if f_obj:
-                            dest = install_dir / binary_name
-                            with open(dest, "wb") as bf:
-                                bf.write(f_obj.read())
-                        break
+                tf.extractall(extract_dir)
+        else:
+            raise RuntimeError(f"Unsupported archive format: {asset_name}")
+
+        # Remove a stale flat-layout binary so _find_binary can't return an
+        # old version from the install-dir root over the fresh tree.
+        legacy = install_dir / binary_name
+        if legacy.exists():
+            try:
+                legacy.unlink()
+            except OSError:
+                pass
+
+        binary_path = next(extract_dir.rglob(binary_name), None)
+        if binary_path is None:
+            raise RuntimeError(
+                f"Archive extracted but '{binary_name}' was not found inside it"
+            )
 
         # 4. Make binary executable on Linux/macOS
-        binary_path = install_dir / binary_name
-        if binary_path.exists() and not is_win:
+        if not is_win:
             binary_path.chmod(0o755)
+
+        # 4b. Models shipped separately from the binary (Upscayl)
+        if upscaler.get("models_url"):
+            _download_models(key, binary_path.parent / "models", state)
 
         # 5. Clean up archive
         try:
-            archive_path.unlink()
+            if archive_path.exists():
+                archive_path.unlink()
         except Exception:
             pass
 
@@ -350,12 +536,61 @@ def _download_worker(key: str):
         state["version"] = tag
         state["message"] = f"✓ {upscaler['name']} {tag} installed to {install_dir}"
         optimizarr_logger.app_logger.info("Upscaler installed: %s %s", key, tag)
+        from app.engine_health import test_in_background
+        test_in_background([key])
 
     except Exception as e:
         state["status"] = "error"
         state["error"] = str(e)
         state["message"] = f"Download failed: {e}"
         optimizarr_logger.app_logger.error("Upscaler download failed: %s — %s", key, e)
+
+
+def _model_sizes(spec: Dict) -> Dict[str, int]:
+    """{file name: byte size} from the GitHub contents API, or {} if it
+    can't be reached (rate limit) — downloads then go unverified."""
+    if not spec.get("models_api"):
+        return {}
+    try:
+        r = requests.get(spec["models_api"], timeout=30,
+                         headers={"Accept": "application/vnd.github+json"})
+        r.raise_for_status()
+        return {e["name"]: int(e.get("size") or 0) for e in r.json()}
+    except Exception:
+        return {}
+
+
+def _download_models(key: str, models_dir: Path, state: Dict):
+    """Fetch a spec's .param/.bin model pairs into ``models_dir``.
+
+    Sizes are checked against the repo listing — not Content-Length, which
+    raw.githubusercontent.com reports for the gzipped transfer. Files
+    already present at full size are skipped, so re-running an install
+    (or an update) only fetches what's missing.
+    """
+    spec = _spec(key)
+    models_dir.mkdir(parents=True, exist_ok=True)
+    sizes = _model_sizes(spec)
+    names = [f"{m}.{ext}" for m in spec["models"] for ext in ("param", "bin")]
+    for i, name in enumerate(names, 1):
+        dest = models_dir / name
+        expected = sizes.get(name, 0)
+        state["message"] = f"Downloading model {name} ({i}/{len(names)})…"
+        state["progress"] = 90 + int(9 * i / len(names))
+        if dest.exists() and dest.stat().st_size and (
+                not expected or dest.stat().st_size == expected):
+            continue
+        tmp = dest.with_suffix(dest.suffix + ".part")
+        with requests.get(spec["models_url"] + name, stream=True, timeout=120) as r:
+            r.raise_for_status()
+            with open(tmp, "wb") as f:
+                for chunk in r.iter_content(chunk_size=65536):
+                    if chunk:
+                        f.write(chunk)
+        if expected and tmp.stat().st_size != expected:
+            tmp.unlink(missing_ok=True)
+            raise RuntimeError(f"Model {name} download was truncated")
+        tmp.replace(dest)
 
 
 def _format_size(size_bytes: int) -> str:
@@ -376,7 +611,12 @@ def detect_upscalers() -> Dict:
     for key, upscaler in UPSCALERS.items():
         found_path = _find_binary(key)
         if found_path:
-            version = _get_binary_version(found_path)
+            if upscaler.get("runtime") == "rtxvsr":
+                from app import rtx_vsr
+                info = rtx_vsr.installed_info() or {}
+                version = f"nvidia-vfx {info.get('nvidia-vfx', '?')} on {info.get('gpu', '?')}"
+            else:
+                version = _get_binary_version(found_path)
             results["available"].append(key)
             results["details"][key] = {
                 "name": upscaler["name"],
@@ -395,6 +635,18 @@ def detect_upscalers() -> Dict:
                 "download_url": upscaler["url"],
                 "download_state": _download_state.get(key),
             }
+    results["engines"] = {}
+    for key, engine in ENGINES.items():
+        found_path = _find_binary(key)
+        results["engines"][key] = {
+            "name": engine["name"],
+            "installed": bool(found_path),
+            "path": found_path,
+            "version": (_get_binary_version(found_path, engine.get("version_args"))
+                        if found_path else None),
+            "download_url": engine["url"],
+            "download_state": _download_state.get(key),
+        }
     return results
 
 
@@ -404,7 +656,9 @@ def check_for_updates() -> Dict:
     Returns a dict of key → {current, latest, update_available}.
     """
     results = {}
-    for key, upscaler in UPSCALERS.items():
+    for key, upscaler in {**UPSCALERS, **ENGINES}.items():
+        if upscaler.get("runtime"):
+            continue
         found = _find_binary(key)
         if not found:
             continue
@@ -412,7 +666,7 @@ def check_for_updates() -> Dict:
         if not release:
             continue
         latest_tag = release.get("tag_name", "")
-        current_ver = _get_binary_version(found)
+        current_ver = _get_binary_version(found, upscaler.get("version_args"))
         results[key] = {
             "name": upscaler["name"],
             "current_version": current_ver,
@@ -430,7 +684,24 @@ def get_download_status(key: str) -> Dict:
 
 def get_upscaler_info() -> Dict:
     """Get full upscaler information for the UI."""
+    detection = detect_upscalers()
+    try:
+        from app.database import db as _db
+        engine_pref = _db.get_setting("upscale_engine", "auto")
+    except Exception:
+        engine_pref = "auto"
+    from app.engine_health import load as _health
     return {
+        "engine_pref": engine_pref,
+        "health": _health(),
+        "engines": {k: {
+            "name": v["name"],
+            "description": v["description"],
+            "icon": v["icon"],
+            "best_for": v["best_for"],
+            "download_url": v["url"],
+            **detection["engines"].get(k, {}),
+        } for k, v in ENGINES.items()},
         "definitions": {k: {
             "name": v["name"],
             "description": v["description"],
@@ -442,10 +713,11 @@ def get_upscaler_info() -> Dict:
             "default_scale": v["default_scale"],
             "download_url": v["url"],
         } for k, v in UPSCALERS.items()},
-        "detection": detect_upscalers(),
+        "detection": detection,
         "workflow_note": (
-            "AI upscaling extracts frames, upscales each with AI, then reassembles "
-            "before HandBrake encoding. This is VERY slow (~2-5 min/frame) and GPU-intensive."
+            "AI upscaling runs before HandBrake encoding and is slow and GPU-intensive. "
+            "With Video2X installed, Real-ESRGAN/Real-CUGAN stream straight from the "
+            "video; otherwise every frame is extracted to temp PNGs first."
         ),
     }
 
@@ -488,13 +760,62 @@ def _check_disk_space(path: str, required_bytes: int) -> bool:
         return True  # if we can't check, proceed and let ffmpeg fail naturally
 
 
+def model_scale_for(upscaler_key: str, model: str, factor: int) -> int:
+    """Scale to run ``model`` at so the result can reach ``factor``.
+
+    The requested factor when the model supports it; otherwise the smallest
+    supported scale above it (the pipeline then downscales to the target),
+    or the largest one available.
+    """
+    scales = (UPSCALERS.get(upscaler_key, {}).get("model_scales", {})
+              .get(model))
+    if not scales or factor in scales:
+        return factor
+    above = [s for s in scales if s > factor]
+    return min(above) if above else max(scales)
+
+
+# ffprobe color_space -> swscale colour-matrix name
+_SWS_MATRIX = {
+    "bt709": "bt709", "smpte170m": "smpte170m", "bt470bg": "bt470",
+    "bt601": "bt601", "smpte240m": "smpte240m", "fcc": "fcc",
+    "bt2020nc": "bt2020", "bt2020c": "bt2020",
+}
+
+
+def _color_matrix(info: Dict) -> str:
+    """swscale matrix for the source: its tag, else the HD/SD convention.
+
+    Untagged sources made ffmpeg assume BT.601 for the YUV<->RGB round trip
+    through PNG, shifting colours on HD content.
+    """
+    return _SWS_MATRIX.get(info.get("color_space") or "",
+                           "bt709" if (info.get("height") or 0) >= 720 else "smpte170m")
+
+
+def _fps_value(raw: str, default: float = 0.0) -> float:
+    try:
+        num, den = str(raw).split("/")
+        return float(num) / float(den) if float(den) else default
+    except Exception:
+        try:
+            return float(raw)
+        except Exception:
+            return default
+
+
 def _get_video_info(input_path: str) -> Dict:
-    """Use ffprobe to get width, height, fps, duration of a video."""
+    """Use ffprobe to get width, height, fps, duration, colour info of a video.
+
+    ``fps`` is the rate frames are extracted/reassembled at: the nominal
+    r_frame_rate for constant-frame-rate sources, the average rate for
+    variable-frame-rate ones (``vfr``).
+    """
     try:
         result = subprocess.run(
             [
                 "ffprobe", "-v", "quiet", "-print_format", "json",
-                "-show_streams", "-select_streams", "v:0", input_path,
+                "-show_streams", "-show_format", "-select_streams", "V:0", input_path,
             ],
             capture_output=True, text=True, timeout=30,
             encoding='utf-8', errors='replace',
@@ -511,11 +832,44 @@ def _get_video_info(input_path: str) -> Dict:
             fps = float(num) / float(den)
         except Exception:
             fps = 24.0
-        duration = float(stream.get("duration", 0))
-        return {"width": width, "height": height, "fps": fps, "duration": duration}
+        duration = float(stream.get("duration", 0) or 0)
+        if not duration:
+            duration = float((data.get("format") or {}).get("duration", 0) or 0)
+        avg = _fps_value(stream.get("avg_frame_rate", ""), 0.0)
+        vfr = bool(avg) and abs(avg - fps) / max(fps, 1e-6) > 0.01
+        if vfr:
+            fps = avg
+        from app.scanner import video_color_info
+        info = {"width": width, "height": height, "fps": fps, "duration": duration,
+                "vfr": vfr, "codec": stream.get("codec_name", "")}
+        info.update(video_color_info(stream))
+        return info
     except Exception as e:
         optimizarr_logger.app_logger.warning("ffprobe failed: %s", e)
-        return {"width": 0, "height": 0, "fps": 24.0, "duration": 0}
+        return {"width": 0, "height": 0, "fps": 24.0, "duration": 0, "vfr": False}
+
+
+def _color_setparams(info: Dict, matrix: str) -> str:
+    """``setparams`` filter that tags the reassembled video with the source's
+    colour description, so HandBrake doesn't have to guess (and mis-guess).
+
+    Done in the filter graph because output flags (-color_trc etc.) are
+    overridden by frame properties: left untagged, the PNG frames' sRGB
+    transfer (iec61966-2-1) leaked into the video.
+    """
+    def known(v):
+        return v and v not in ("unknown", "reserved", "unspecified")
+
+    # Defaults for untagged sources, matching the matrix chosen for them.
+    tag_space, default_prim, default_trc = {
+        "bt709": ("bt709", "bt709", "bt709"),
+        "bt470": ("bt470bg", "bt470bg", "smpte170m"),
+        "bt2020": ("bt2020nc", "bt2020", "bt2020-10"),
+    }.get(matrix, (matrix, "smpte170m", "smpte170m"))
+    space = info["color_space"] if known(info.get("color_space")) else tag_space
+    prim = info["color_primaries"] if known(info.get("color_primaries")) else default_prim
+    trc = info["color_transfer"] if known(info.get("color_transfer")) else default_trc
+    return f"setparams=colorspace={space}:color_primaries={prim}:color_trc={trc}:range=tv"
 
 
 def run_upscale_pipeline(
@@ -524,6 +878,8 @@ def run_upscale_pipeline(
     model: str,
     factor: int,
     progress_callback=None,
+    register_process=None,
+    result_info: Optional[Dict] = None,
 ) -> Optional[str]:
     """
     Run the full AI upscale pipeline on *input_path*.
@@ -536,11 +892,18 @@ def run_upscale_pipeline(
       5. Reassemble: upscaled frames + original audio → temp MKV
       6. Return path to the temp MKV (caller must delete it)
 
+    ``register_process`` (optional) is called with each subprocess Popen as it
+    starts and with None when it ends, so the caller can kill the currently
+    active process on stop/shutdown — without it, an in-flight upscaler
+    outlives the server as a GPU-burning orphan.
+
     Returns the path to the upscaled video file on success, or None on failure.
 
-    Progress callback receives values 0–100 across the whole pipeline:
+    Progress callback receives ``(pct, eta_seconds)`` where pct is 0–100
+    across the whole pipeline and eta_seconds is the estimated remaining
+    upscale time (None while it can't yet be measured):
       0-10%  : extraction
-      10-90% : upscaling (per-frame progress from upscaler stderr)
+      10-90% : upscaling (frames finished / total, with a measured ETA)
       90-100%: reassembly
     """
     import tempfile
@@ -559,12 +922,37 @@ def run_upscale_pipeline(
         )
         return None
 
-    def _progress(pct: float):
+    def _progress(pct: float, eta_seconds: Optional[float] = None):
         if progress_callback:
             try:
-                progress_callback(min(100.0, max(0.0, pct)))
+                progress_callback(min(100.0, max(0.0, pct)), eta_seconds)
             except Exception:
                 pass
+
+    def _register(proc):
+        if register_process:
+            try:
+                register_process(proc)
+            except Exception:
+                pass
+
+    def _run_ffmpeg(cmd, timeout):
+        """Run an ffmpeg step as a registered (killable) subprocess.
+
+        Returns (returncode, stderr_text)."""
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, encoding='utf-8', errors='replace',
+        )
+        _register(proc)
+        try:
+            _, err = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            _, err = proc.communicate()
+        finally:
+            _register(None)
+        return proc.returncode, err or ''
 
     input_p = Path(input_path)
     if not input_p.exists():
@@ -579,14 +967,34 @@ def run_upscale_pipeline(
         optimizarr_logger.app_logger.error("Could not determine video dimensions: %s", input_path)
         return None
 
+    # Frames pass through 8-bit RGB PNGs, which would flatten HDR to a
+    # washed-out SDR picture — refuse; the caller encodes the original.
+    if info.get("hdr"):
+        optimizarr_logger.app_logger.warning(
+            "Skipping upscale of HDR source %s — the frame pipeline is 8-bit SDR",
+            input_p.name)
+        return None
+
     out_w = src_w * factor
     out_h = src_h * factor
+    model_scale = model_scale_for(upscaler_key, model, factor)
+    if UPSCALERS.get(upscaler_key, {}).get("outputs_at_factor"):
+        model_scale = factor  # the binary resizes to the target itself
+    if model_scale != factor:
+        optimizarr_logger.app_logger.info(
+            "Model %s runs at x%d; downscaling its output to x%d",
+            model, model_scale, factor)
+    if info.get("vfr"):
+        optimizarr_logger.app_logger.info(
+            "Variable frame rate source — extracting at a constant %.3f fps "
+            "so audio stays in sync", fps)
+    matrix = _color_matrix(info)
 
     # Estimate frame count and disk requirement
-    # PNG at out_h resolution: rough estimate ~3 bytes/pixel (pre-compression, but
+    # PNG at the model's output size: rough estimate ~3 bytes/pixel (pre-compression, but
     # PNG tends to compress well; we use a conservative 1.5 bytes/pixel for estimate)
     frame_count_approx = int(fps * duration) if duration > 0 else 2000
-    bytes_per_frame_approx = int(out_w * out_h * 1.5)
+    bytes_per_frame_approx = int(src_w * model_scale * src_h * model_scale * 1.5)
     # Source + output frames + reassembly buffer
     required_bytes = (frame_count_approx * bytes_per_frame_approx * 2) + (500 * 1024 * 1024)
 
@@ -596,6 +1004,34 @@ def run_upscale_pipeline(
         input_p.name, src_w, src_h, out_w, out_h, factor,
         frame_count_approx, _format_size(required_bytes),
     )
+
+    # Streaming engine? Needs only its compressed output on disk (~0.08
+    # bytes/pixel at CRF 12), not two full sets of PNG frames.
+    v2x_binary = None
+    from app.video2x import video2x_model
+    if video2x_model(upscaler_key, model):
+        try:
+            from app.database import db as _db
+            engine_pref = _db.get_setting("upscale_engine", "auto")
+        except Exception:
+            engine_pref = "auto"
+        from app.video2x import supports_source
+        if engine_pref != "frames" and not supports_source(info.get("codec")):
+            optimizarr_logger.app_logger.info(
+                "Video2X can't read %s sources — using the frame pipeline",
+                info.get("codec"))
+        elif engine_pref != "frames":
+            v2x_binary = _find_binary("video2x")
+    use_rtxvsr = upscaler_key == "rtxvsr"
+    if use_rtxvsr:
+        from app.rtx_vsr import MAX_FACTOR
+        if factor > MAX_FACTOR:
+            optimizarr_logger.app_logger.error("RTX VSR upscales at most x%d", MAX_FACTOR)
+            return None
+        model_scale = factor  # VSR outputs any size directly
+    if v2x_binary or use_rtxvsr:
+        required_bytes = int(frame_count_approx * src_w * model_scale
+                             * src_h * model_scale * 0.08) + (500 * 1024 * 1024)
 
     # ── Stage 2: disk space guard ───────────────────────────────────────────
     tmp_base = Path(tempfile.gettempdir())
@@ -608,97 +1044,260 @@ def run_upscale_pipeline(
         )
         return None
 
-    # Work directory — unique per job
-    work_dir = tmp_base / f"optimizarr_upscale_{input_p.stem}_{int(time.time())}"
+    # Work directory — DETERMINISTIC per (input, upscaler, model, factor) so
+    # an interrupted job RESUMES instead of redoing hours/days of GPU work.
+    # (The old time.time() suffix meant every restart started from zero —
+    # one server restart threw away 25 hours of upscaling.)
+    import hashlib
+    job_key = hashlib.md5(
+        f"{input_path}|{upscaler_key}|{model}|{factor}|x{model_scale}|cfr".encode('utf-8', 'replace')
+    ).hexdigest()[:12]
+    safe_stem = re.sub(r'[^\w.-]+', '_', input_p.stem)[:40]
+    work_dir = tmp_base / f"optimizarr_upscale_{safe_stem}_{job_key}"
     frames_in  = work_dir / "frames_in"
     frames_out = work_dir / "frames_out"
-    frames_in.mkdir(parents=True)
-    frames_out.mkdir(parents=True)
+    extract_marker = work_dir / "extract_done"
+    frames_in.mkdir(parents=True, exist_ok=True)
+    frames_out.mkdir(parents=True, exist_ok=True)
     output_path = work_dir / f"{input_p.stem}_upscaled.mkv"
+    pipeline_succeeded = False
+
+    if use_rtxvsr:
+        from app.rtx_vsr import run_vsr
+        vsr_out = work_dir / f"{input_p.stem}_upscaled_vsr.mkv"
+        ok = run_vsr(
+            input_path, str(vsr_out), in_w=src_w, in_h=src_h, out_w=out_w, out_h=out_h,
+            fps=fps, quality=model, matrix=matrix,
+            setparams=_color_setparams(info, matrix), total_frames=frame_count_approx,
+            progress=lambda pct, eta: _progress(2 + pct * 0.97, eta),
+            register=_register,
+        )
+        if ok:
+            _progress(100)
+            return str(vsr_out)
+        try:
+            vsr_out.unlink()
+        except OSError:
+            pass
+        return None
+
+    if v2x_binary:
+        from app.video2x import run_video2x
+        optimizarr_logger.app_logger.info(
+            "Upscaling %s with Video2X (%s x%d, streaming)…",
+            input_p.name, model, model_scale)
+        v2x_out = work_dir / f"{input_p.stem}_upscaled_v2x.mkv"
+        ok = run_video2x(
+            v2x_binary, input_path, str(v2x_out), upscaler_key, model, model_scale,
+            progress=lambda pct, eta: _progress(2 + pct * 0.97, eta),
+            register=_register,
+        )
+        if ok:
+            # Video2X can't resize after the model; when the model's native
+            # scale overshoots the requested factor, HandBrake scales down.
+            if result_info is not None and model_scale != factor:
+                result_info["target_size"] = (out_w, out_h)
+            _progress(100)
+            return str(v2x_out)
+        try:
+            v2x_out.unlink()
+        except OSError:
+            pass
+        optimizarr_logger.app_logger.warning(
+            "Video2X failed — falling back to the frame-extraction pipeline")
 
     try:
-        # ── Stage 3: extract frames ─────────────────────────────────────────
-        _progress(3)
-        optimizarr_logger.app_logger.info("Extracting frames from %s…", input_p.name)
-        extract_cmd = [
-            "ffmpeg", "-i", input_path,
-            "-vf", "fps=fps=source_fps",   # extract all frames at native fps
-            "-q:v", "1",                   # maximum PNG quality
-            str(frames_in / "%08d.png"),
-            "-y",
-        ]
-        # Use actual fps value rather than the literal placeholder
-        extract_cmd = [
-            "ffmpeg", "-i", input_path,
-            "-vsync", "0",
-            str(frames_in / "%08d.png"),
-            "-y",
-        ]
-        result = subprocess.run(
-            extract_cmd, capture_output=True, text=True, timeout=3600,
-            encoding='utf-8', errors='replace'
-        )
-        if result.returncode != 0:
-            optimizarr_logger.app_logger.error(
-                "ffmpeg frame extraction failed: %s", result.stderr[-500:]
-            )
-            return None
+        # ── Stage 3: extract frames (skipped when a completed extraction
+        #    from an interrupted run is already on disk) ────────────────────
+        total_frames = 0
+        if extract_marker.exists():
+            try:
+                total_frames = int(extract_marker.read_text().strip() or 0)
+            except (ValueError, OSError):
+                total_frames = 0
 
-        actual_frames = sorted(frames_in.glob("*.png"))
-        if not actual_frames:
-            optimizarr_logger.app_logger.error("No frames extracted from %s", input_path)
-            return None
+        if total_frames > 0:
+            optimizarr_logger.app_logger.info(
+                "Resuming upscale of %s — %d frames already extracted",
+                input_p.name, total_frames)
+        else:
+            # No completion marker: any frames present are from a partial
+            # extraction and can't be trusted — start clean.
+            _shutil.rmtree(frames_in, ignore_errors=True)
+            frames_in.mkdir(parents=True, exist_ok=True)
+            _progress(3)
+            optimizarr_logger.app_logger.info("Extracting frames from %s…", input_p.name)
+            extract_cmd = [
+                "ffmpeg", "-i", input_path,
+                "-map", "0:V:0",  # V: never the cover art
+                # Constant frame rate: the frames are reassembled at a single
+                # rate, so a VFR source extracted frame-for-frame (the old
+                # -vsync 0) drifted out of sync with its audio. The fps FILTER
+                # with nearest rounding, not "-fps_mode cfr -r": MKV stores
+                # millisecond timestamps and the muxer-side cfr inserted a
+                # duplicate frame into plain 24 fps files, shifting every
+                # later frame by one (verified: 121 frames from 120).
+                "-fps_mode", "passthrough",
+                "-vf", f"fps=fps={fps_str}:round=near,"
+                       f"scale=in_color_matrix={matrix}:in_range=auto,format=rgb24",
+                str(frames_in / "%08d.png"),
+                "-y",
+            ]
+            rc, err = _run_ffmpeg(extract_cmd, timeout=3600)
+            if rc != 0:
+                optimizarr_logger.app_logger.error(
+                    "ffmpeg frame extraction failed: %s", err[-500:]
+                )
+                return None
 
-        total_frames = len(actual_frames)
-        optimizarr_logger.app_logger.info("Extracted %d frames", total_frames)
+            actual_frames = sorted(frames_in.glob("*.png"))
+            if not actual_frames:
+                optimizarr_logger.app_logger.error("No frames extracted from %s", input_path)
+                return None
+
+            total_frames = len(actual_frames)
+            extract_marker.write_text(str(total_frames))
+            optimizarr_logger.app_logger.info("Extracted %d frames", total_frames)
         _progress(10)
 
         # ── Stage 4: upscale frames ─────────────────────────────────────────
+        # Resume support: frames already upscaled by an interrupted run are
+        # removed from the input set so the binary only processes what's left.
+        existing_out = list(frames_out.glob("*.png"))
+        if existing_out:
+            # The newest output may be a partial write from the kill — redo it
+            newest = max(existing_out, key=lambda p: p.stat().st_mtime)
+            try:
+                newest.unlink()
+                existing_out.remove(newest)
+            except OSError:
+                pass
+            for out_frame in existing_out:
+                stale_in = frames_in / out_frame.name
+                if stale_in.exists():
+                    try:
+                        stale_in.unlink()
+                    except OSError:
+                        pass
+            if existing_out:
+                optimizarr_logger.app_logger.info(
+                    "Resuming upscale: %d/%d frames already done",
+                    len(existing_out), total_frames)
+
+        if UPSCALERS[upscaler_key].get("outputs_at_factor"):
+            # Upscayl: -z is the model's native scale, -s the output scale —
+            # it resizes to the target itself, so no lanczos pass later.
+            scale_args = ["-z", "4", "-s", str(factor),
+                          "-m", str(Path(binary_path).parent / "models")]
+        else:
+            scale_args = ["-s", str(model_scale)]
         upscale_cmd = [
             binary_path,
             "-i", str(frames_in),
             "-o", str(frames_out),
             "-n", model,
-            "-s", str(factor),
+            *scale_args,
             "-f", "png",
+            # load:proc:save threads. Default 1:2:2 starves the GPU on small
+            # video frames — single-threaded PNG decode can't feed it. 4:4:4
+            # is the upstream recommendation for many small images.
+            "-j", "4:4:4",
         ]
         optimizarr_logger.app_logger.info(
             "Upscaling %d frames with %s (model=%s ×%d)…",
-            total_frames, upscaler_key, model, factor,
+            total_frames - len(existing_out), upscaler_key, model, factor,
         )
 
-        upscale_proc = subprocess.Popen(
-            upscale_cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-            encoding='utf-8',
-            errors='replace',
-        )
-
-        # Parse per-frame progress from upscaler output
-        # Real-ESRGAN / CUGAN print lines like:  "1/43200"
-        frame_re = re.compile(r'(\d+)/(\d+)')
-        for line in upscale_proc.stdout:
-            m = frame_re.search(line)
-            if m:
-                done  = int(m.group(1))
-                total = int(m.group(2))
-                if total > 0:
-                    # Map frame progress to 10-90% range
-                    _progress(10 + (done / total) * 80)
-
-        upscale_proc.wait()
-        if upscale_proc.returncode != 0:
-            optimizarr_logger.app_logger.error(
-                "Upscaler exited with code %d", upscale_proc.returncode
+        frames_remaining = sum(1 for _ in frames_in.glob("*.png"))
+        if frames_remaining > 0:
+            upscale_proc = subprocess.Popen(
+                upscale_cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                encoding='utf-8',
+                errors='replace',
             )
-            return None
+            _register(upscale_proc)
 
-        upscaled_frames = sorted(frames_out.glob("*.png"))
-        if not upscaled_frames:
-            optimizarr_logger.app_logger.error("No upscaled frames produced")
+            # Progress comes from counting finished frames in frames_out, not
+            # from parsing the binary's output: the ncnn-vulkan tools print
+            # per-image tile percentages ("25.00%"), which say nothing about
+            # batch progress — the old "N/total" regex never matched, so the
+            # UI froze for the whole (possibly day-long) upscale.
+            stop_poll = threading.Event()
+
+            # Baseline for the ETA: frames already on disk from a resumed run
+            # cost this run nothing, so rate must be measured from the frames
+            # produced SINCE the poller started, not from zero.
+            poll_t0 = time.monotonic()
+            poll_done0 = len(existing_out)
+
+            def _poll_frames():
+                while not stop_poll.wait(5):
+                    try:
+                        done = sum(1 for _ in frames_out.glob("*.png"))
+                    except OSError:
+                        continue
+                    if total_frames <= 0:
+                        continue
+                    elapsed = time.monotonic() - poll_t0
+                    produced = done - poll_done0
+                    eta = None
+                    if produced > 0 and elapsed > 0:
+                        rate = produced / elapsed          # frames per second
+                        remaining = max(0, total_frames - done)
+                        eta = remaining / rate
+                    _progress(10 + (done / total_frames) * 80, eta)
+
+            poller = threading.Thread(target=_poll_frames, daemon=True,
+                                      name="upscale-progress")
+            poller.start()
+
+            # Drain stdout and keep a tail for diagnostics — a crash with no
+            # captured output ("exited with code 3221226505") is undebuggable.
+            last_lines: List[str] = []
+            try:
+                for line in upscale_proc.stdout:
+                    line = line.strip()
+                    if line:
+                        last_lines.append(line)
+                        if len(last_lines) > 20:
+                            last_lines.pop(0)
+            finally:
+                stop_poll.set()
+
+            upscale_proc.wait()
+            _register(None)
+            if upscale_proc.returncode != 0:
+                tail = ' | '.join(last_lines[-8:]) if last_lines else '(no output captured)'
+                hint = ''
+                # 0xC0000409 = Windows fail-fast abort: broken install (missing
+                # models/ beside the exe) or a GPU/Vulkan driver problem.
+                if upscale_proc.returncode in (3221226505, -1073740791):
+                    hint = (" — the upscaler crashed at startup (0xC0000409); this "
+                            "usually means a broken install (missing models/) or a "
+                            "GPU/Vulkan driver issue. Try re-downloading it in "
+                            "Settings → AI Upscalers.")
+                optimizarr_logger.app_logger.error(
+                    "Upscaler exited with code %d%s Output tail: %s",
+                    upscale_proc.returncode, hint, tail
+                )
+                return None
+        else:
+            optimizarr_logger.app_logger.info(
+                "All %d frames already upscaled — skipping to reassembly",
+                total_frames)
+
+        # Strict completeness check: ffmpeg's %08d input stops at the first
+        # gap in the sequence, so a missing frame would silently truncate the
+        # reassembled video rather than fail.
+        upscaled_count = sum(1 for _ in frames_out.glob("*.png"))
+        if upscaled_count < total_frames:
+            optimizarr_logger.app_logger.error(
+                "Upscaler produced %d of %d frames — refusing to reassemble a "
+                "truncated video", upscaled_count, total_frames)
             return None
 
         _progress(90)
@@ -713,6 +1312,12 @@ def run_upscale_pipeline(
             "-map", "0:v:0",             # upscaled video
             "-map", "1:a?",              # all audio from original (? = optional)
             "-map", "1:s?",              # subtitle streams (? = optional)
+            # Back to YUV with the SAME matrix used on the way in (and down to
+            # the target size when the model ran at a larger native scale)
+            "-vf", ",".join(
+                ([f"scale={out_w}:{out_h}:flags=lanczos"] if model_scale != factor else [])
+                + [f"scale=out_color_matrix={matrix}:out_range=tv", "format=yuv420p",
+                   _color_setparams(info, matrix)]),
             "-c:v", "ffv1",              # lossless intermediate — HandBrake re-encodes
             "-c:a", "copy",
             "-c:s", "copy",
@@ -720,13 +1325,10 @@ def run_upscale_pipeline(
             str(output_path),
             "-y",
         ]
-        result = subprocess.run(
-            reassemble_cmd, capture_output=True, text=True, timeout=3600,
-            encoding='utf-8', errors='replace'
-        )
-        if result.returncode != 0:
+        rc, err = _run_ffmpeg(reassemble_cmd, timeout=3600)
+        if rc != 0:
             optimizarr_logger.app_logger.error(
-                "ffmpeg reassembly failed: %s", result.stderr[-500:]
+                "ffmpeg reassembly failed: %s", err[-500:]
             )
             return None
 
@@ -739,6 +1341,7 @@ def run_upscale_pipeline(
             "Upscale pipeline complete → %s (%s)",
             output_path.name, _format_size(output_path.stat().st_size)
         )
+        pipeline_succeeded = True
         return str(output_path)
 
     except Exception as e:
@@ -746,12 +1349,16 @@ def run_upscale_pipeline(
         return None
 
     finally:
-        # Always clean up source frames immediately (output frames cleaned by caller)
-        try:
-            _shutil.rmtree(frames_in, ignore_errors=True)
-            _shutil.rmtree(frames_out, ignore_errors=True)
-        except Exception:
-            pass
+        # On SUCCESS, free the (potentially tens of GB of) frame PNGs right
+        # away — only the reassembled MKV is needed for the encode. On
+        # failure or kill the frames MUST survive: they're the resume
+        # checkpoint the next attempt picks up from.
+        if pipeline_succeeded:
+            try:
+                _shutil.rmtree(frames_in, ignore_errors=True)
+                _shutil.rmtree(frames_out, ignore_errors=True)
+            except Exception:
+                pass
 
 
 def cleanup_upscale_workdir(upscaled_path: str):
@@ -763,3 +1370,43 @@ def cleanup_upscale_workdir(upscaled_path: str):
             _shutil.rmtree(work_dir, ignore_errors=True)
     except Exception:
         pass
+
+
+def cleanup_stale_upscale_workdirs(min_age_seconds: float = 48 * 3600.0) -> int:
+    """Remove leftover optimizarr_upscale_* work directories from temp.
+
+    A crashed or killed encode never reaches cleanup_upscale_workdir, so its
+    workdir (potentially tens of GB of PNG frames) lingers in the temp dir
+    forever. Called when the encoder pool goes idle.
+
+    A dir is skipped when the dir itself or anything directly inside it was
+    modified within ``min_age_seconds``. The 48h default is deliberate:
+    workdirs double as RESUME CHECKPOINTS for interrupted upscales, so they
+    must survive a restart-and-retry cycle — only dirs untouched for two
+    days are treated as dead.
+
+    Returns the number of directories removed.
+    """
+    import tempfile
+    import shutil as _shutil
+
+    base = Path(tempfile.gettempdir())
+    now = time.time()
+    removed = 0
+    for d in base.glob("optimizarr_upscale_*"):
+        try:
+            if not d.is_dir():
+                continue
+            newest = d.stat().st_mtime
+            for child in d.iterdir():
+                newest = max(newest, child.stat().st_mtime)
+            if now - newest < min_age_seconds:
+                continue
+            _shutil.rmtree(d, ignore_errors=True)
+            removed += 1
+        except OSError:
+            continue
+    if removed:
+        optimizarr_logger.app_logger.info(
+            "Cleaned %d stale upscale work directorie(s)", removed)
+    return removed

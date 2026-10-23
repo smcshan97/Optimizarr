@@ -6,7 +6,7 @@ echo "Optimizarr API Test Suite"
 echo "======================================================"
 echo ""
 
-BASE_URL="http://localhost:5000/api"
+BASE_URL="http://localhost:5757/api"
 
 # Test 1: Health check (no auth required)
 echo "Test 1: Health Check"

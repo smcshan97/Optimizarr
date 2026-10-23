@@ -5,12 +5,14 @@ from typing import List, Optional
 from pathlib import Path
 import asyncio
 import os
+import string
 
 from app.api.models import MessageResponse
 from app.api.dependencies import get_current_user, get_current_admin_user
 from app.database import db
 from app.resources import resource_monitor
 from app.logger import optimizarr_logger
+from app.timeutil import utc_now
 
 router = APIRouter()
 
@@ -90,7 +92,7 @@ async def reinit_gpu(current_user: dict = Depends(get_current_user)):
 
 # Settings Endpoints
 @router.get("/settings/resources")
-async def get_resource_settings(current_user: dict = Depends(get_current_user)):
+def get_resource_settings(current_user: dict = Depends(get_current_user)):
     """Get resource management settings."""
     with db.get_read_connection() as conn:
         cursor = conn.cursor()
@@ -119,7 +121,7 @@ async def get_resource_settings(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/settings/resources")
-async def update_resource_settings(
+def update_resource_settings(
     settings: dict,
     current_user: dict = Depends(get_current_admin_user)
 ):
@@ -143,15 +145,18 @@ async def update_resource_settings(
 
 
 @router.get("/settings/encoding")
-async def get_encoding_settings(current_user: dict = Depends(get_current_user)):
+def get_encoding_settings(current_user: dict = Depends(get_current_user)):
     """Get general encoding settings (e.g. retry behavior)."""
     return {
         'max_retries': db.get_setting('max_retries', '3'),
+        'min_savings_percent': db.get_setting('min_savings_percent', '5'),
+        'min_source_bpp': db.get_setting('min_source_bpp', '0.03'),
+        'queue_check_interval_minutes': db.get_setting('queue_check_interval_minutes', '15'),
     }
 
 
 @router.post("/settings/encoding")
-async def update_encoding_settings(
+def update_encoding_settings(
     settings: dict,
     current_user: dict = Depends(get_current_admin_user)
 ):
@@ -162,12 +167,30 @@ async def update_encoding_settings(
         except (ValueError, TypeError):
             val = 3
         db.set_setting('max_retries', str(val))
+    if 'min_savings_percent' in settings:
+        try:
+            pct = max(0.0, min(90.0, float(settings['min_savings_percent'])))
+        except (ValueError, TypeError):
+            pct = 5.0
+        db.set_setting('min_savings_percent', f"{pct:g}")
+    if 'min_source_bpp' in settings:
+        try:
+            bpp = max(0.0, min(1.0, float(settings['min_source_bpp'])))
+        except (ValueError, TypeError):
+            bpp = 0.03
+        db.set_setting('min_source_bpp', f"{bpp:g}")
+    if 'queue_check_interval_minutes' in settings:
+        try:
+            mins = max(0, min(1440, int(settings['queue_check_interval_minutes'])))
+        except (ValueError, TypeError):
+            mins = 15
+        db.set_setting('queue_check_interval_minutes', str(mins))
     return MessageResponse(message="Encoding settings updated")
 
 
 # Directory Browser Endpoint
 @router.get("/browse")
-async def browse_directories(
+def browse_directories(
     path: str = Query("", description="Directory path to browse. Empty returns root drives/mount points."),
     current_user: dict = Depends(get_current_user)
 ):
@@ -231,7 +254,7 @@ async def browse_directories(
 
 
 @router.get("/library-types")
-async def get_library_types():
+def get_library_types():
     """Get all available library types with recommended settings."""
     from app.api.models import LIBRARY_TYPES
     return LIBRARY_TYPES
@@ -239,21 +262,21 @@ async def get_library_types():
 
 # Audio/Subtitle Strategy Endpoints
 @router.get("/audio-strategies")
-async def get_audio_strategies():
+def get_audio_strategies():
     """Get available audio handling strategies."""
     from app.api.models import AUDIO_STRATEGIES
     return AUDIO_STRATEGIES
 
 
 @router.get("/subtitle-strategies")
-async def get_subtitle_strategies():
+def get_subtitle_strategies():
     """Get available subtitle handling strategies."""
     from app.api.models import SUBTITLE_STRATEGIES
     return SUBTITLE_STRATEGIES
 
 
 @router.get("/video-filters")
-async def get_video_filters():
+def get_video_filters():
     """Get available video filter definitions."""
     from app.api.models import VIDEO_FILTERS
     return VIDEO_FILTERS
@@ -261,7 +284,7 @@ async def get_video_filters():
 
 # Hardware Acceleration Endpoint
 @router.get("/hardware-detect")
-async def detect_hardware(current_user: dict = Depends(get_current_user)):
+def detect_hardware(current_user: dict = Depends(get_current_user)):
     """Detect available hardware encoders (NVENC, QSV, VCE, VideoToolbox)."""
     from app.encoder import detect_hardware_acceleration
     return detect_hardware_acceleration()
@@ -269,7 +292,7 @@ async def detect_hardware(current_user: dict = Depends(get_current_user)):
 
 # Log Endpoints
 @router.get("/logs")
-async def get_logs(
+def get_logs(
     log_type: str = Query("app", description="Log type: app, handbrake, errors"),
     lines: int = Query(100, ge=1, le=1000, description="Number of lines to return"),
     level: str = Query("ALL", description="Filter by log level"),
@@ -281,7 +304,7 @@ async def get_logs(
 
 
 @router.get("/logs/statistics")
-async def get_log_statistics(
+def get_log_statistics(
     days: int = Query(7, ge=1, le=90, description="Number of days of statistics"),
     current_user: dict = Depends(get_current_user)
 ):
@@ -291,7 +314,7 @@ async def get_log_statistics(
 
 
 @router.post("/logs/clear")
-async def clear_logs(
+def clear_logs(
     log_type: str = Query("app", description="Log type to clear"),
     current_user: dict = Depends(get_current_admin_user)
 ):
@@ -332,7 +355,7 @@ def _get_tool_version(cmd: list, cache_key: str) -> Optional[str]:
 
 
 @router.get("/health")
-async def health_check():
+def health_check():
     """Comprehensive health check — no auth required."""
     import shutil
     import time
@@ -347,11 +370,12 @@ async def health_check():
     }
 
     # HandBrakeCLI check
-    hb_path = shutil.which("HandBrakeCLI")
+    from app.handbrake import handbrake_cli
+    hb_path = shutil.which(handbrake_cli())
     health["handbrake"] = {
         "installed": hb_path is not None,
         "path": hb_path or "not found",
-        "version": _get_tool_version([hb_path, "--version"], "handbrake") if hb_path else None,
+        "version": _get_tool_version([hb_path, "--version"], f"handbrake:{hb_path}") if hb_path else None,
     }
     
     # Database check
@@ -376,7 +400,8 @@ async def health_check():
     
     # Disk space for data directory
     try:
-        data_path = Path("data")
+        from app.config import settings as _settings
+        data_path = Path(_settings.db_path).parent
         if data_path.exists():
             usage = shutil.disk_usage(str(data_path))
             health["disk"] = {
@@ -462,10 +487,10 @@ async def health_check():
     # Scheduler status
     try:
         from app.scheduler import schedule_manager
-        sched = db.get_schedule()
+        sched = schedule_manager.schedule_config or {}
         health["scheduler"] = {
-            "enabled": sched.get("enabled", False),
-            "running": schedule_manager.running if schedule_manager else False,
+            "enabled": bool(sched.get("enabled", False)),
+            "running": schedule_manager.scheduler.running,
             "next_window": f"{sched.get('start_time','?')} – {sched.get('end_time','?')}",
         }
     except Exception:
@@ -521,7 +546,7 @@ async def health_check():
     return health
 
 @router.get("/backup")
-async def download_backup(current_user: dict = Depends(get_current_admin_user)):
+def download_backup(current_user: dict = Depends(get_current_admin_user)):
     """Download the full SQLite database as a backup file."""
     import shutil as _shutil
     from app.config import settings
@@ -548,7 +573,7 @@ async def download_backup(current_user: dict = Depends(get_current_admin_user)):
 
 
 @router.post("/restore")
-async def restore_backup(
+def restore_backup(
     current_user: dict = Depends(get_current_admin_user),
 ):
     """Use POST /restore-upload with multipart/form-data instead."""
@@ -577,6 +602,16 @@ async def restore_backup_upload(
         tmp.write(contents)
         tmp.close()
         _shutil.move(tmp.name, str(db_path))
+        # Remove stale WAL/SHM sidecars from the PREVIOUS database — left in
+        # place, SQLite would replay old WAL pages over the restored file on
+        # next open, silently corrupting the restore.
+        for suffix in ("-wal", "-shm"):
+            side = Path(str(db_path) + suffix)
+            try:
+                if side.exists():
+                    side.unlink()
+            except OSError:
+                pass
     except Exception as e:
         import os
         try: os.unlink(tmp.name)
@@ -596,8 +631,9 @@ _PROFILE_EXPORT_FIELDS = [
     "upscale_model", "upscale_factor", "upscale_key",
     "stereo_enabled", "stereo_mode", "stereo_format",
     "stereo_divergence", "stereo_convergence", "stereo_depth_model",
+    "film_grain", "target_vmaf", "max_bitrate_kbps", "denoise",
 ]
-# Scan-root columns. external_connection_id is intentionally omitted —
+# Scan-root columns.external_connection_id is intentionally omitted —
 # connection IDs are instance-specific and connections aren't imported.
 _SCANROOT_EXPORT_FIELDS = [
     "library_type", "enabled", "recursive", "show_in_stats",
@@ -605,11 +641,12 @@ _SCANROOT_EXPORT_FIELDS = [
     "upscale_model", "upscale_factor", "upscale_key",
     "stereo_enabled", "stereo_mode", "stereo_format",
     "stereo_divergence", "stereo_convergence", "stereo_depth_model",
+    "organize_companions",
 ]
 
 
 @router.get("/backup/json")
-async def export_config_json(current_user: dict = Depends(get_current_admin_user)):
+def export_config_json(current_user: dict = Depends(get_current_admin_user)):
     """Export profiles, scan roots, settings as human-readable JSON.
 
     Unlike the raw .db backup this is portable across instances: scan roots
@@ -647,16 +684,17 @@ async def export_config_json(current_user: dict = Depends(get_current_admin_user
     return {
         "optimizarr_config": True,
         "version": __version__,
-        "exported_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "exported_at": utc_now().strftime("%Y-%m-%d %H:%M:%S"),
         "profiles": export_profiles,
         "scan_roots": export_roots,
-        "settings": db.get_all_settings(),
+        "settings": {k: v for k, v in db.get_all_settings().items()
+                     if k != 'webhook_secret'},
         "connections": export_connections,
     }
 
 
 @router.post("/restore/json")
-async def import_config_json(
+def import_config_json(
     config: dict,
     current_user: dict = Depends(get_current_admin_user),
 ):
@@ -711,6 +749,8 @@ async def import_config_json(
 
     # ---- Settings (upsert by key) ----
     for key, value in (config.get("settings") or {}).items():
+        if key == 'webhook_secret':
+            continue  # per-instance secret; never imported
         db.set_setting(key, value)
         summary["settings_applied"] += 1
 
@@ -731,7 +771,7 @@ async def import_config_json(
 # ============================================================
 
 @router.get("/stats/dashboard")
-async def get_stats_dashboard(
+def get_stats_dashboard(
     days: int = Query(default=30, ge=1, le=365),
     current_user: dict = Depends(get_current_user)
 ):
@@ -748,14 +788,14 @@ async def get_stats_dashboard(
 
 
 @router.get("/watches/status")
-async def get_watcher_status(current_user: dict = Depends(get_current_user)):
+def get_watcher_status(current_user: dict = Depends(get_current_user)):
     """Get folder watcher status."""
     from app.watcher import folder_watcher
     return folder_watcher.get_status()
 
 
 @router.post("/watches/check")
-async def force_watcher_check(
+def force_watcher_check(
     watch_id: Optional[int] = None,
     current_user: dict = Depends(get_current_admin_user)
 ):
@@ -766,14 +806,14 @@ async def force_watcher_check(
 
 
 @router.get("/schedule")
-async def get_schedule(current_user: dict = Depends(get_current_user)):
+def get_schedule(current_user: dict = Depends(get_current_user)):
     """Get current schedule configuration."""
     from app.scheduler import schedule_manager
     return schedule_manager.get_status()
 
 
 @router.post("/schedule")
-async def update_schedule(
+def update_schedule(
     config: dict,
     current_user: dict = Depends(get_current_admin_user)
 ):
@@ -789,7 +829,7 @@ async def update_schedule(
 
 
 @router.post("/schedule/enable")
-async def enable_schedule(current_user: dict = Depends(get_current_admin_user)):
+def enable_schedule(current_user: dict = Depends(get_current_admin_user)):
     """Enable scheduled encoding (admin only)."""
     from app.scheduler import schedule_manager
     
@@ -805,7 +845,7 @@ async def enable_schedule(current_user: dict = Depends(get_current_admin_user)):
 
 
 @router.post("/schedule/disable")
-async def disable_schedule(current_user: dict = Depends(get_current_admin_user)):
+def disable_schedule(current_user: dict = Depends(get_current_admin_user)):
     """Disable scheduled encoding (admin only)."""
     from app.scheduler import schedule_manager
     
@@ -821,7 +861,7 @@ async def disable_schedule(current_user: dict = Depends(get_current_admin_user))
 
 
 @router.get("/schedule/windows-active-hours")
-async def get_windows_active_hours(current_user: dict = Depends(get_current_user)):
+def get_windows_active_hours(current_user: dict = Depends(get_current_user)):
     """
     Read Windows Active Hours from the registry (Windows only).
     Returns the detected rest window suitable for scheduled encoding.
@@ -842,10 +882,10 @@ async def get_windows_active_hours(current_user: dict = Depends(get_current_user
 # ============================================================
 
 @router.get("/notifications")
-async def list_notifications(current_user: dict = Depends(get_current_user)):
+def list_notifications(current_user: dict = Depends(get_current_user)):
     """List all notification webhooks."""
     import json as _json
-    with db.get_connection() as conn:
+    with db.get_read_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM notifications ORDER BY created_at DESC")
         cols = [d[0] for d in cursor.description]
@@ -856,7 +896,7 @@ async def list_notifications(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/notifications", status_code=201)
-async def create_notification(
+def create_notification(
     data: dict,
     current_user: dict = Depends(get_current_admin_user)
 ):
@@ -884,7 +924,7 @@ async def create_notification(
 
 
 @router.put("/notifications/{notif_id}")
-async def update_notification(
+def update_notification(
     notif_id: int,
     data: dict,
     current_user: dict = Depends(get_current_admin_user)
@@ -916,7 +956,7 @@ async def update_notification(
 
 
 @router.delete("/notifications/{notif_id}")
-async def delete_notification(
+def delete_notification(
     notif_id: int,
     current_user: dict = Depends(get_current_admin_user)
 ):
@@ -929,13 +969,13 @@ async def delete_notification(
 
 
 @router.post("/notifications/{notif_id}/test")
-async def test_notification(
+def test_notification(
     notif_id: int,
     current_user: dict = Depends(get_current_admin_user)
 ):
     """Send a test notification to verify webhook connectivity."""
     import json as _json
-    with db.get_connection() as conn:
+    with db.get_read_connection() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM notifications WHERE id = ?", (notif_id,))
         row = cursor.fetchone()

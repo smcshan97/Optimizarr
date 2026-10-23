@@ -61,6 +61,10 @@
                     <span class="nav-icon">📊</span>
                     <span class="nav-label">Statistics</span>
                 </a>
+                <a class="nav-item" onclick="switchTab('duplicates')" data-tab="duplicates">
+                    <span class="nav-icon">🪞</span>
+                    <span class="nav-label">Duplicates</span>
+                </a>
                 <a class="nav-item" onclick="switchTab('logs')" data-tab="logs">
                     <span class="nav-icon">📄</span>
                     <span class="nav-label">Logs</span>
@@ -197,6 +201,8 @@
                             <option value="paused">⏸️ Paused</option>
                             <option value="cancelled">⏹️ Cancelled</option>
                             <option value="permission_error">🔒 Permission Error</option>
+                            <option value="quarantined">☣️ Quarantined</option>
+                            <option value="kept_original">↩️ Kept Original</option>
                         </select>
                     </div>
                     <!-- Sort & Prioritize -->
@@ -215,6 +221,7 @@
                             ↑ Apply
                         </button>
                     </div>
+                    <span id="queueCheckStatus" style="font-size:12px;color:var(--text-muted)"></span>
                     <div>
                         <label class="flex items-center gap-2 text-sm">
                             <input type="checkbox" id="autoRefreshQueue" checked onchange="toggleAutoRefresh()">
@@ -446,7 +453,47 @@
                         <span style="font-size:13px;color:var(--text-muted)">Auto-retry a failed encode this many times before marking it failed (0 = no retry)</span>
                     </div>
                 </div>
+
+                <!-- Keep original unless the encode is smaller -->
+                <div style="margin-top:20px">
+                    <label style="font-size:14px;font-weight:500;color:var(--text-heading);display:block;margin-bottom:6px">
+                        Minimum Savings to Replace
+                    </label>
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <input type="number" id="minSavingsPercent" min="0" max="90" step="1" value="5"
+                            class="w-20 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center" style="font-size:14px">
+                        <span style="font-size:13px;color:var(--text-muted)">% — for files that already meet their profile (right codec, within its resolution/framerate/bitrate limits): if an encode doesn't shrink the file by at least this much, the new file is discarded and the original kept (upscale/3D jobs exempt)</span>
+                    </div>
+                </div>
+
+                <p style="margin-top:12px;font-size:13px;color:var(--text-muted)">
+                    Files that DON'T meet their profile (wrong codec, or over its resolution/framerate/bitrate limits) are always converted at the profile's quality, and the result is kept even if it's bigger — the aim is one codec and one quality level across the library, not the smallest files. Use the profile's bitrate limit to bound their size. They also skip the "already efficient" check below.
+                </p>
+
+                <!-- Skip already-efficient sources -->
+                <div style="margin-top:20px">
+                    <label style="font-size:14px;font-weight:500;color:var(--text-heading);display:block;margin-bottom:6px">
+                        Skip Sources Below (bits per pixel)
+                    </label>
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <input type="number" id="minSourceBpp" min="0" max="1" step="0.005" value="0.03"
+                            class="w-24 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center" style="font-size:14px">
+                        <span style="font-size:13px;color:var(--text-muted)">Files already this efficient are skipped before encoding (0.03 ≈ 1.5 Mbps for 1080p24 H.264; HEVC/VP9 need 1.5× this). In your history, 56–73% of files below 0.03 got <em>bigger</em>. 0 = off.</span>
+                    </div>
+                </div>
                 
+                <!-- Background queue check -->
+                <div style="margin-top:20px">
+                    <label style="font-size:14px;font-weight:500;color:var(--text-heading);display:block;margin-bottom:6px">
+                        Queue Check Interval (minutes)
+                    </label>
+                    <div style="display:flex;align-items:center;gap:8px">
+                        <input type="number" id="queueCheckInterval" min="0" max="1440" step="1" value="15"
+                            class="w-20 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center" style="font-size:14px">
+                        <span style="font-size:13px;color:var(--text-muted)">How often the queue is checked in the background: deleted files and duplicates removed, changed files re-probed, quarantined files re-tried, queued items kept in step with profile/upscale settings. It also runs after every encode. 0 = only after encodes.</span>
+                    </div>
+                </div>
+
                 <!-- Preset Buttons -->
                 <div class="mt-8 pt-6 border-t border-gray-700">
                     <h3 style="font-size:15px;font-weight:600;color:var(--text-heading);margin-bottom:14px">Quick Presets</h3>
@@ -488,6 +535,51 @@
                 </div>
                 <div id="upscalerStatus" class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4 mt-4">
                     <p class="text-gray-500 text-sm">Loading…</p>
+                </div>
+            </div>
+
+            <!-- Content Detection Section -->
+            <div class="card" style="margin-top:24px">
+                <div class="flex justify-between items-center mb-2">
+                    <div>
+                        <h2 class="page-title">🧠 Content Detection</h2>
+                        <p class="text-sm text-gray-400 mt-1">
+                            Tags each queued file as 2D animation, 3D animation or live action (CLIP model on 8 frames, CPU, ~4&nbsp;s per file in the background).
+                            Drives the <strong>Auto per file</strong> upscaler. Files the model isn't sure about keep their profile's settings.
+                        </p>
+                    </div>
+                    <button id="classifierQuizBtn" onclick="startClassifierQuiz()" class="btn btn-primary btn-sm" title="Label 50 files yourself to check how well the model agrees with you">
+                        ✅ Check the model (50 questions)
+                    </button>
+                </div>
+                <div id="classifierStatus" class="text-sm text-gray-300 mt-3">Loading…</div>
+                <div id="classifierSettings" class="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4 hidden">
+                    <label class="flex items-center gap-2 text-sm">
+                        <input type="checkbox" id="classifierEnabled"> Classify queued files in the background
+                    </label>
+                    <div class="text-sm">
+                        <label class="block mb-1">Confidence needed to act (%)</label>
+                        <input type="number" id="classifierThreshold" min="34" max="99" step="1"
+                            class="w-24 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center">
+                        <span class="text-xs text-gray-400 ml-2">Below this a file is "uncertain". 60% measured 98.5% accurate here.</span>
+                    </div>
+                    <div class="text-sm">
+                        <label class="block mb-1">Auto upscaler — animated (2D/3D)</label>
+                        <select id="classifierAutoAnimated" class="form-select w-full"></select>
+                    </div>
+                    <div class="text-sm">
+                        <label class="block mb-1">Auto upscaler — live action / uncertain</label>
+                        <select id="classifierAutoLive" class="form-select w-full"></select>
+                    </div>
+                    <div class="text-sm">
+                        <label class="block mb-1">Film grain for live action (SVT-AV1, 0 = off)</label>
+                        <input type="number" id="classifierFilmGrain" min="0" max="50" step="1"
+                            class="w-24 bg-gray-700 border border-gray-600 rounded px-3 py-1.5 text-white text-center">
+                        <span class="text-xs text-gray-400 ml-2">Only when the profile sets no grain of its own. Lean web sources have little grain left — test before enabling.</span>
+                    </div>
+                    <div class="flex items-end">
+                        <button onclick="saveClassifierSettings()" class="btn btn-secondary btn-sm">Save</button>
+                    </div>
                 </div>
             </div>
 
@@ -585,6 +677,34 @@
         </div>
 
         <!-- External Connection Modal -->
+        <!-- Content-detection quiz -->
+        <div id="classifierQuizModal" class="modal-backdrop hidden">
+            <div class="modal-panel" style="max-width:1340px">
+                <div class="modal-header">
+                    <h3 class="modal-title">Check the model — <span id="quizProgress">0 / 50</span></h3>
+                    <button onclick="closeClassifierQuiz()" class="modal-close">✕</button>
+                </div>
+                <div class="modal-body">
+                    <div id="quizQuestion">
+                        <p class="text-sm text-gray-400 mb-2">What is this video? Three frames from across the file. (The model's answer is shown only after you pick.)</p>
+                        <div style="min-height:240px;display:flex;align-items:center;justify-content:center;background:#000;border-radius:6px">
+                            <img id="quizStrip" alt="frames" style="max-width:100%;display:none">
+                            <span id="quizLoading" class="text-gray-500 text-sm">Loading frames…</span>
+                        </div>
+                        <p id="quizFile" class="text-xs text-gray-500 mt-1 truncate"></p>
+                        <div class="flex gap-2 mt-3 flex-wrap">
+                            <button class="btn btn-primary" onclick="answerQuiz('2d')">🎨 2D animation <span class="text-xs opacity-60">(1)</span></button>
+                            <button class="btn btn-primary" onclick="answerQuiz('3d')">🧊 3D animation <span class="text-xs opacity-60">(2)</span></button>
+                            <button class="btn btn-primary" onclick="answerQuiz('live')">🎥 Live action <span class="text-xs opacity-60">(3)</span></button>
+                            <button class="btn btn-secondary" onclick="answerQuiz('skip')">Skip / can't tell <span class="text-xs opacity-60">(S)</span></button>
+                        </div>
+                        <p id="quizFeedback" class="text-sm mt-3" style="min-height:1.5em"></p>
+                    </div>
+                    <div id="quizSummary" class="hidden"></div>
+                </div>
+            </div>
+        </div>
+
         <div id="connectionModal" class="modal-backdrop hidden">
             <div class="modal-panel" style="max-width:540px">
                 <div class="modal-header">
@@ -680,6 +800,18 @@
                         <p class="text-xs text-gray-500 mt-1">Files from this connection will use the linked scan root's profile</p>
                     </div>
 
+                    <!-- Path mappings (Docker) -->
+                    <div>
+                        <div class="flex items-center justify-between mb-2">
+                            <label class="block text-sm font-medium text-gray-300">Path Mappings <span class="text-gray-500 font-normal">(if it runs in Docker)</span></label>
+                            <button type="button" onclick="detectConnectionMappings()" class="text-xs text-blue-400 hover:text-blue-300">🐳 Detect from Docker</button>
+                        </div>
+                        <textarea id="connectionPathMappings" rows="3" spellcheck="false"
+                            placeholder="/tv => F:\tv shows&#10;/movies => F:\movies"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2 text-white font-mono text-xs"></textarea>
+                        <p class="text-xs text-gray-500 mt-1">One per line: <code>path inside the container =&gt; path on this PC</code>. Needed for webhooks, library sync and the post-encode rescan to find your files.</p>
+                    </div>
+
                     <!-- Test result banner -->
                     <div id="connectionTestResult" class="hidden rounded px-4 py-2 text-sm"></div>
                 </form>
@@ -733,15 +865,36 @@
                             <label class="block text-sm font-medium mb-2">Encoder *</label>
                             <select id="profileEncoder" required onchange="updatePresetOptions()"
                                 class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
-                                <option value="x264">x264 (CPU)</option>
-                                <option value="x265">x265 (CPU)</option>
-                                <option value="svt_av1" selected>SVT-AV1 (CPU) ⭐</option>
-                                <option value="nvenc_h264">NVENC H.264 (GPU)</option>
-                                <option value="nvenc_h265">NVENC H.265 (GPU)</option>
-                                <option value="nvenc_av1">NVENC AV1 (GPU)</option>
-                                <option value="qsv_h264">QuickSync H.264 (GPU)</option>
-                                <option value="qsv_h265">QuickSync H.265 (GPU)</option>
+                                <optgroup label="CPU">
+                                    <option value="svt_av1_10bit" selected>SVT-AV1 10-bit ⭐</option>
+                                    <option value="svt_av1">SVT-AV1 8-bit</option>
+                                    <option value="x265_10bit">x265 10-bit</option>
+                                    <option value="x265">x265 8-bit</option>
+                                    <option value="x264">x264</option>
+                                </optgroup>
+                                <optgroup label="NVIDIA (NVENC)">
+                                    <option value="nvenc_av1_10bit">NVENC AV1 10-bit</option>
+                                    <option value="nvenc_av1">NVENC AV1</option>
+                                    <option value="nvenc_h265_10bit">NVENC H.265 10-bit</option>
+                                    <option value="nvenc_h265">NVENC H.265</option>
+                                    <option value="nvenc_h264">NVENC H.264</option>
+                                </optgroup>
+                                <optgroup label="Intel (QuickSync)">
+                                    <option value="qsv_av1_10bit">QuickSync AV1 10-bit</option>
+                                    <option value="qsv_av1">QuickSync AV1</option>
+                                    <option value="qsv_h265_10bit">QuickSync H.265 10-bit</option>
+                                    <option value="qsv_h265">QuickSync H.265</option>
+                                    <option value="qsv_h264">QuickSync H.264</option>
+                                </optgroup>
+                                <optgroup label="AMD (VCN)">
+                                    <option value="vce_av1_10bit">AMD AV1 10-bit</option>
+                                    <option value="vce_av1">AMD AV1</option>
+                                    <option value="vce_h265_10bit">AMD H.265 10-bit</option>
+                                    <option value="vce_h265">AMD H.265</option>
+                                    <option value="vce_h264">AMD H.264</option>
+                                </optgroup>
                             </select>
+                            <p class="text-xs text-gray-400 mt-1">10-bit keeps HDR intact and reduces banding. 8-bit profiles switch to 10-bit automatically for HDR / 10-bit sources. Encoders your HandBrake can't run are greyed out.</p>
                         </div>
                     </div>
                     
@@ -776,12 +929,30 @@
                         </div>
                     </div>
                     
+                    <div>
+                        <label class="block text-sm font-medium mb-2">Target Quality (VMAF)</label>
+                        <select id="profileTargetVmaf" class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                            <option value="0">Off — use the fixed Quality value below</option>
+                            <option value="93">93 — smaller files, slight softening on close inspection</option>
+                            <option value="95">95 — recommended: visually transparent for most viewing</option>
+                            <option value="97">97 — near-lossless, larger files</option>
+                        </select>
+                        <p class="text-xs text-gray-400 mt-1">Per file, encodes three 10-second samples, scores them against the original with VMAF and picks the most compression that still reaches this score. Adds a few minutes of analysis per file; files that wouldn't shrink are skipped. Not used for HDR sources or upscale/3D jobs.</p>
+                    </div>
+
+                    <div>
+                        <label class="block text-sm font-medium mb-2">Max Bitrate (Mbps)</label>
+                        <input type="number" id="profileMaxBitrate" min="0" max="500" step="0.5" value="0"
+                            class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
+                        <p class="text-xs text-gray-400 mt-1">0 = no cap. Files above this don't meet the profile and are always re-encoded; the output's video is capped to it (SVT-AV1, x264, x265).</p>
+                    </div>
+
                     <div class="grid grid-cols-2 gap-4">
                         <div>
                             <label class="block text-sm font-medium mb-2">Quality (CRF) *</label>
                             <input type="number" id="profileQuality" required min="18" max="51" value="28"
                                 class="w-full bg-gray-700 border border-gray-600 rounded px-4 py-2">
-                            <p class="text-xs text-gray-400 mt-1">Lower = better quality (18-28 recommended)</p>
+                            <p class="text-xs text-gray-400 mt-1">Lower = better quality (18-28 recommended). With a VMAF target this is only the search's starting point.</p>
                         </div>
                         
                         <div>
@@ -821,10 +992,15 @@
                     </div>
                     
                     <div>
-                        <label class="flex items-center">
-                            <input type="checkbox" id="profileTwoPass" class="mr-2">
-                            <span class="text-sm">Enable two-pass encoding (better quality, slower)</span>
-                        </label>
+                        <label class="block text-sm font-medium mb-2">Film grain</label>
+                        <div class="flex items-center gap-3">
+                            <input type="range" id="profileFilmGrain" min="0" max="50" step="1" value="0" class="flex-1"
+                                oninput="document.getElementById('profileFilmGrainValue').textContent = this.value === '0' ? 'Off' : this.value">
+                            <span id="profileFilmGrainValue" class="text-sm w-10 text-right">Off</span>
+                        </div>
+                        <p class="text-xs text-gray-400 mt-1">For grainy film sources. SVT-AV1 removes the grain and re-synthesises it on playback (8–15 is typical), saving a lot of space; x265 switches to its grain tune. Leave off for clean/animated content.</p>
+                        <!-- Two-pass has no effect on constant-quality encodes; kept hidden so saved profiles round-trip -->
+                        <input type="checkbox" id="profileTwoPass" class="hidden">
                     </div>
                     
                     <!-- Phase 2: Audio/Subtitle/Filters Section -->
@@ -865,7 +1041,14 @@
                                     <input type="checkbox" id="profileEnableFilters" class="mr-2">
                                     <span class="text-sm">Auto Filters</span>
                                 </label>
-                                <p class="text-xs text-gray-400 mt-1">Deinterlace, denoise, crop</p>
+                                <p class="text-xs text-gray-400 mt-1">Deinterlace, crop black bars</p>
+                            </div>
+                            <div>
+                                <label class="flex items-center">
+                                    <input type="checkbox" id="profileDenoise" class="mr-2">
+                                    <span class="text-sm">Denoise</span>
+                                </label>
+                                <p class="text-xs text-gray-400 mt-1">Smooths noise and grain; encodes take ~2.7× as long</p>
                             </div>
                             <div>
                                 <label class="flex items-center">
@@ -930,6 +1113,9 @@
                                         <option value="realesrgan">🎬 Real-ESRGAN — best for live action / films</option>
                                         <option value="realcugan">⚡ Real-CUGAN — fast, good for anime</option>
                                         <option value="waifu2x">🎌 Waifu2x NCNN — classic anime upscaler</option>
+                                        <option value="upscayl">🆙 Upscayl — Lite model is ~12× faster than Real-ESRGAN</option>
+                                        <option value="rtxvsr">🟩 NVIDIA RTX VSR — fast, cleans compression artifacts (RTX GPUs)</option>
+                                        <option value="auto">🧠 Auto per file — Real-CUGAN for animation, RTX VSR for live action (needs Content Detection)</option>
                                     </select>
                                 </div>
 
@@ -1140,6 +1326,16 @@
                         </label>
                     </div>
 
+                    <div>
+                        <label class="flex items-center gap-2">
+                            <input type="checkbox" id="scanRootOrganize" class="mr-1">
+                            <div>
+                                <span class="text-sm">Organize companion files</span>
+                                <p class="text-xs text-gray-400" id="scanRootOrganizeHint">On each scan, a loose video with files of the same name (funscripts, subtitles, artwork) is moved with them into a folder named after the video. Nothing is overwritten.</p>
+                            </div>
+                        </label>
+                    </div>
+
                     <!-- AI Upscale Settings (collapsible) -->
                     <div class="border border-gray-700 rounded-lg overflow-hidden">
                         <button type="button" onclick="toggleUpscaleSection()"
@@ -1173,6 +1369,9 @@
                                         <option value="realesrgan">🎬 Real-ESRGAN — best for live action / films</option>
                                         <option value="realcugan">⚡ Real-CUGAN — fast, good for anime</option>
                                         <option value="waifu2x">🎌 Waifu2x NCNN — classic anime upscaler</option>
+                                        <option value="upscayl">🆙 Upscayl — Lite model is ~12× faster than Real-ESRGAN</option>
+                                        <option value="rtxvsr">🟩 NVIDIA RTX VSR — fast, cleans compression artifacts (RTX GPUs)</option>
+                                        <option value="auto">🧠 Auto per file — Real-CUGAN for animation, RTX VSR for live action (needs Content Detection)</option>
                                     </select>
                                 </div>
 
@@ -1562,6 +1761,31 @@
             </div>
         </div>
 
+        <!-- Duplicates Tab -->
+        <div id="content-duplicates" class="tab-panel">
+            <div class="card">
+                <div class="flex justify-between items-center mb-4">
+                    <h2 class="page-title">Duplicate Finder</h2>
+                    <div class="flex gap-2">
+                        <button id="dupeQuickBtn" class="btn btn-primary" onclick="startDupeScan('quick')">⚡ Quick Scan</button>
+                        <button id="dupeScanBtn" class="btn btn-secondary" onclick="startDupeScan('full')">🔍 Full Scan</button>
+                        <button id="dupeCancelBtn" class="btn btn-secondary" onclick="cancelDupeScan()" style="display:none">Stop</button>
+                    </div>
+                </div>
+                <p style="font-size:12px;color:var(--text-muted);margin-bottom:12px">
+                    <strong>Quick scan</strong> compares file hashes to find byte-identical copies — a few minutes for a large library.<br>
+                    <strong>Full scan</strong> also fingerprints video content, finding re-encodes (different resolution, codec, or watermark)
+                    and clips that are segments of longer videos you already have. It decodes every file at roughly 25× realtime,
+                    so a large library takes days — but progress is saved continuously, you can stop and resume any time,
+                    and later scans only process new or changed files.
+                </p>
+                <div id="dupeScanStatus" style="display:none;font-size:12px;color:var(--text-secondary);margin-bottom:12px"></div>
+                <div id="dupeResults">
+                    <p style="color:var(--text-muted)">No scan results yet — run a scan to find duplicates.</p>
+                </div>
+            </div>
+        </div>
+
         <!-- Logs Tab -->
         <div id="content-logs" class="tab-panel">
             <div class="card">
@@ -1613,6 +1837,23 @@
         </main><!-- /.main-content -->
     </div><!-- /.app-layout -->
 
-    <script src="/static/js/app.js"></script>
+    <!-- Load order matters: these share one global scope, in this order -->
+    <script src="/static/js/app/core.js"></script>
+    <script src="/static/js/app/queue.js"></script>
+    <script src="/static/js/app/notifications.js"></script>
+    <script src="/static/js/app/profiles.js"></script>
+    <script src="/static/js/app/scan-roots.js"></script>
+    <script src="/static/js/app/profile-ui.js"></script>
+    <script src="/static/js/app/folder-account.js"></script>
+    <script src="/static/js/app/queue-tools.js"></script>
+    <script src="/static/js/app/duplicates.js"></script>
+    <script src="/static/js/app/library-logs.js"></script>
+    <script src="/static/js/app/stats.js"></script>
+    <script src="/static/js/app/presets.js"></script>
+    <script src="/static/js/app/upscalers.js"></script>
+    <script src="/static/js/app/schedule.js"></script>
+    <script src="/static/js/app/connections.js"></script>
+    <script src="/static/js/app/upscale-stereo.js"></script>
+    <script src="/static/js/app/content-detection.js"></script>
 </body>
 </html>

@@ -14,13 +14,6 @@ from app.database import db
 from app.logger import optimizarr_logger
 
 
-# Common video extensions
-VIDEO_EXTENSIONS = {
-    '.mkv', '.mp4', '.avi', '.mov', '.wmv', '.flv', '.webm',
-    '.m4v', '.ts', '.mpg', '.mpeg', '.m2ts', '.vob'
-}
-
-
 class FolderWatcher:
     """Watches directories for new media files and auto-queues them."""
 
@@ -29,6 +22,11 @@ class FolderWatcher:
         self.running = False
         self.thread: Optional[threading.Thread] = None
         self._known_files: Dict[int, Set[str]] = {}  # watch_id -> set of known file paths
+        # watch_id -> {path: size} for files seen once but not yet size-stable.
+        # A file mid-copy/mid-download grows between polls; queueing it would
+        # encode a truncated source. It's queued on the first poll where its
+        # size matches the previous poll's reading.
+        self._pending_sizes: Dict[int, Dict[str, int]] = {}
         self._lock = threading.Lock()
 
     def start(self):
@@ -100,9 +98,28 @@ class FolderWatcher:
                 else:
                     known = self._known_files[watch['id']]
                     new_files = current_files - known
-                    if new_files:
-                        self._queue_new_files(new_files, watch)
-                    self._known_files[watch['id']] = current_files
+
+                    # Size-stability gate: queue only files whose size is
+                    # unchanged since the previous poll (finished copying).
+                    prev_sizes = self._pending_sizes.get(watch['id'], {})
+                    next_sizes: Dict[str, int] = {}
+                    stable: Set[str] = set()
+                    for f in new_files:
+                        try:
+                            size = os.path.getsize(f)
+                        except OSError:
+                            continue  # vanished/locked — re-check next poll
+                        if prev_sizes.get(f) == size:
+                            stable.add(f)
+                        else:
+                            next_sizes[f] = size
+                    self._pending_sizes[watch['id']] = next_sizes
+
+                    if stable:
+                        self._queue_new_files(stable, watch)
+                    # Files still growing stay out of known_files so they are
+                    # re-evaluated (and eventually queued) on later polls.
+                    self._known_files[watch['id']] = current_files - set(next_sizes)
 
             # Update last check timestamp
             db.update_folder_watch(watch['id'], last_check=datetime.now().isoformat())
@@ -137,7 +154,7 @@ class FolderWatcher:
         """Queue newly detected files with codec probing and upscale evaluation."""
         from app.scanner import scanner as media_scanner
 
-        queued_paths = {item['file_path'] for item in db.get_queue_items()}
+        queued_paths = db.get_queue_file_paths()
 
         profile = db.get_profile(watch['profile_id'])
         if not profile:
@@ -146,11 +163,8 @@ class FolderWatcher:
             )
             return
 
-        target_specs = {
-            'codec':       profile['codec'],
-            'resolution':  profile.get('resolution', ''),
-            'audio_codec': profile['audio_codec'],
-        }
+        from app.scanner import profile_targets
+        target_specs = profile_targets(profile)
 
         queued_count = 0
         for file_path in sorted(new_files):
@@ -223,7 +237,8 @@ class FolderWatcher:
                     stereo_plan=stereo_plan,
                 )
 
-                db.add_to_queue(
+                queued_id = db.add_to_queue(
+                    skip_if_queued=True,
                     file_path=file_path,
                     root_id=watch.get('scan_root_id'),
                     profile_id=watch['profile_id'],
@@ -236,7 +251,8 @@ class FolderWatcher:
                     upscale_plan=upscale_plan,
                     stereo_plan=stereo_plan,
                 )
-                queued_count += 1
+                if queued_id is not None:
+                    queued_count += 1
 
             except Exception as e:
                 optimizarr_logger.app_logger.error("Failed to queue %s: %s", file_path, str(e))
@@ -252,6 +268,7 @@ class FolderWatcher:
         """Drop a watch's known-file cache (called when a watch is removed)."""
         with self._lock:
             self._known_files.pop(watch_id, None)
+            self._pending_sizes.pop(watch_id, None)
 
     def get_status(self) -> Dict:
         """Get watcher status for API."""
