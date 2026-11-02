@@ -88,7 +88,7 @@ python3 -m app.main
 
 ### First Login
 
-Open **http://localhost:5000** and log in with `admin` / `admin`. **Change the default password immediately** in Settings → Account.
+Open **http://localhost:5757** and log in with `admin` / `admin`. **Change the default password immediately** in Settings → Account.
 
 ---
 
@@ -135,7 +135,7 @@ Settings → Resource Management lets you configure temperature-based pause trig
 
 ## API
 
-Optimizarr exposes a full REST API. Interactive docs are available at `http://localhost:5000/docs` (Swagger UI) when the server is running.
+Optimizarr exposes a full REST API. Interactive docs are available at `http://localhost:5757/docs` (Swagger UI) when the server is running.
 
 ---
 

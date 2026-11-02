@@ -22,7 +22,8 @@ import json
 import time
 import concurrent.futures
 from typing import Dict, Optional, List, Tuple
-from datetime import datetime
+from app.timeutil import utc_now
+from app.logger import optimizarr_logger
 
 
 class ResourceMonitor:
@@ -45,6 +46,12 @@ class ResourceMonitor:
         self._last_sample = None
         self._last_cpu_percent = 0.0     # cached non-blocking CPU reading
         self._last_cpu_per_core = []     # cached non-blocking per-core reading
+        # CPU temp cache — on Windows each reading spawns a PowerShell/WMI
+        # process (~1s); the dashboard, per-job monitors, and the concurrency
+        # gate all poll every few seconds, so share one reading for 5s.
+        self._cpu_temp_cache_ts = 0.0
+        self._cpu_temp_cache_val: Optional[float] = None
+        self._CPU_TEMP_CACHE_SEC = 5.0
         self._cpu_temp_method = self._detect_cpu_temp_method()
 
     # ------------------------------------------------------------------
@@ -73,11 +80,11 @@ class ResourceMonitor:
                     name = pynvml.nvmlDeviceGetName(pynvml.nvmlDeviceGetHandleByIndex(0))
                     if isinstance(name, bytes):
                         name = name.decode('utf-8')
-                    print(f"GPU monitoring enabled: {device_count} NVIDIA GPU(s) detected - {name}")
+                    optimizarr_logger.app_logger.info(f"GPU monitoring enabled: {device_count} NVIDIA GPU(s) detected - {name}")
                     self._gpu_method = 'pynvml'
                     return True
             except Exception as e:
-                print(f"nvml init failed ({e}), trying nvidia-smi fallback...")
+                optimizarr_logger.app_logger.warning(f"nvml init failed ({e}), trying nvidia-smi fallback...")
 
         # Fallback: try nvidia-smi
         try:
@@ -88,15 +95,15 @@ class ResourceMonitor:
             )
             if result.returncode == 0 and result.stdout.strip():
                 gpu_names = result.stdout.strip().split('\n')
-                print(f"GPU monitoring enabled (nvidia-smi): {len(gpu_names)} NVIDIA GPU(s) detected - {gpu_names[0].strip()}")
+                optimizarr_logger.app_logger.info(f"GPU monitoring enabled (nvidia-smi): {len(gpu_names)} NVIDIA GPU(s) detected - {gpu_names[0].strip()}")
                 self._gpu_method = 'nvidia-smi'
                 return True
         except FileNotFoundError:
-            print("nvidia-smi not found in PATH")
+            optimizarr_logger.app_logger.info("nvidia-smi not found in PATH")
         except Exception as e:
-            print(f"nvidia-smi fallback failed: {e}")
+            optimizarr_logger.app_logger.warning(f"nvidia-smi fallback failed: {e}")
 
-        print("GPU monitoring not available: no NVIDIA GPU detected or drivers not installed")
+        optimizarr_logger.app_logger.info("GPU monitoring not available: no NVIDIA GPU detected or drivers not installed")
         return False
 
     def reinit_gpu(self) -> bool:
@@ -106,7 +113,7 @@ class ResourceMonitor:
         one may have a hung thread), and retries pynvml / nvidia-smi
         detection.
         """
-        print("🔄 Re-initializing GPU monitoring...")
+        optimizarr_logger.app_logger.info("🔄 Re-initializing GPU monitoring...")
         self._gpu_fail_count = 0
         self._gpu_method = None
         # Replace the pool — old one may have a stuck pynvml thread
@@ -128,7 +135,7 @@ class ResourceMonitor:
             try:
                 temps = psutil.sensors_temperatures()
                 if temps:
-                    print(f"CPU temperature monitoring enabled (psutil sensors: {list(temps.keys())})")
+                    optimizarr_logger.app_logger.info(f"CPU temperature monitoring enabled (psutil sensors: {list(temps.keys())})")
                     return 'psutil'
             except Exception:
                 pass
@@ -152,12 +159,12 @@ class ResourceMonitor:
                     raw = float(result.stdout.strip().split('\n')[0])
                     celsius = (raw / 10.0) - 273.15
                     if 0 < celsius < 150:
-                        print(f"CPU temperature monitoring enabled (WMI) - initial reading: {celsius:.1f} C")
+                        optimizarr_logger.app_logger.info(f"CPU temperature monitoring enabled (WMI) - initial reading: {celsius:.1f} C")
                         return 'wmi'
             except Exception as e:
-                print(f"WMI temperature probe failed: {e}")
+                optimizarr_logger.app_logger.warning(f"WMI temperature probe failed: {e}")
 
-        print("CPU temperature monitoring not available - "
+        optimizarr_logger.app_logger.info("CPU temperature monitoring not available - "
               "GPU temperature and memory % can still be used as pause triggers")
         return None
 
@@ -170,11 +177,18 @@ class ResourceMonitor:
         "N/A" and the CPU-temp pause trigger will be automatically
         disabled).
         """
+        if self._cpu_temp_method is None:
+            return None
+        now = time.monotonic()
+        if now - self._cpu_temp_cache_ts < self._CPU_TEMP_CACHE_SEC:
+            return self._cpu_temp_cache_val
         if self._cpu_temp_method == 'psutil':
-            return self._cpu_temp_psutil()
-        elif self._cpu_temp_method == 'wmi':
-            return self._cpu_temp_wmi()
-        return None
+            val = self._cpu_temp_psutil()
+        else:  # 'wmi'
+            val = self._cpu_temp_wmi()
+        self._cpu_temp_cache_ts = now
+        self._cpu_temp_cache_val = val
+        return val
 
     def _cpu_temp_psutil(self) -> Optional[float]:
         """Read CPU temp via psutil (Linux / macOS)."""
@@ -293,7 +307,7 @@ class ResourceMonitor:
             # pynvml failed — try nvidia-smi this time
             self._gpu_fail_count += 1
             if self._gpu_fail_count >= self._GPU_MAX_FAILURES:
-                print(f"⚠️ pynvml failed {self._gpu_fail_count}× consecutively "
+                optimizarr_logger.app_logger.warning(f"⚠️ pynvml failed {self._gpu_fail_count}× consecutively "
                       f"— switching to nvidia-smi permanently")
                 self._gpu_method = 'nvidia-smi'
             return self._get_gpu_usage_smi()
@@ -318,11 +332,11 @@ class ResourceMonitor:
             future = self._gpu_pool.submit(self._get_gpu_usage_pynvml_inner)
             return future.result(timeout=self._gpu_timeout_sec)
         except concurrent.futures.TimeoutError:
-            print(f"⚠️ pynvml timed out after {self._gpu_timeout_sec}s "
+            optimizarr_logger.app_logger.warning(f"⚠️ pynvml timed out after {self._gpu_timeout_sec}s "
                   f"(fail #{self._gpu_fail_count + 1}/{self._GPU_MAX_FAILURES})")
             return None
         except Exception as e:
-            print(f"⚠️ pynvml wrapper error: {e}")
+            optimizarr_logger.app_logger.error(f"⚠️ pynvml wrapper error: {e}")
             return None
 
     def _get_gpu_usage_pynvml_inner(self) -> Optional[List[Dict]]:
@@ -369,7 +383,7 @@ class ResourceMonitor:
             return gpu_stats
 
         except Exception as e:
-            print(f"Error getting GPU stats via pynvml: {e}")
+            optimizarr_logger.app_logger.error(f"Error getting GPU stats via pynvml: {e}")
             return None
 
     def _get_gpu_usage_smi(self) -> Optional[List[Dict]]:
@@ -416,7 +430,7 @@ class ResourceMonitor:
             return gpu_stats if gpu_stats else None
 
         except Exception as e:
-            print(f"Error getting GPU stats via nvidia-smi: {e}")
+            optimizarr_logger.app_logger.error(f"Error getting GPU stats via nvidia-smi: {e}")
             return None
 
     # ------------------------------------------------------------------
@@ -452,7 +466,7 @@ class ResourceMonitor:
         gpu_data = self.get_gpu_usage()
 
         return {
-            'timestamp': datetime.utcnow().isoformat(),
+            'timestamp': utc_now().isoformat(),
             'cpu': {
                 'percent': self.get_cpu_usage(interval=0),
                 'per_core': self.get_cpu_per_core(interval=0),
@@ -545,6 +559,7 @@ class ResourceThrottler:
         self.monitor = monitor
         self.check_interval = 5.0  # seconds between checks
         self.last_check = 0
+        self._last_verdict: Tuple[bool, str] = (False, "")
 
     def should_pause_encoding(self, **kwargs) -> Tuple[bool, str]:
         """
@@ -553,23 +568,29 @@ class ResourceThrottler:
         Accepts the same keyword arguments as
         ResourceMonitor.check_thresholds().
 
+        Rate-limited calls return the LAST verdict, not False — this
+        throttler is shared by every job's monitor thread, and returning
+        False on a rate-limited call made callers resume paused encodes
+        while temps were still over threshold.
+
         Returns:
             Tuple of (should_pause: bool, reason_string: str)
         """
         current_time = time.time()
 
-        # Rate-limit checks
+        # Rate-limit checks — repeat the last verdict instead of re-probing
         if current_time - self.last_check < self.check_interval:
-            return False, ""
+            return self._last_verdict
 
         self.last_check = current_time
 
         result = self.monitor.check_thresholds(**kwargs)
 
         if not result['should_pause']:
-            return False, ""
-
-        return True, "; ".join(result.get('reasons', []))
+            self._last_verdict = (False, "")
+        else:
+            self._last_verdict = (True, "; ".join(result.get('reasons', [])))
+        return self._last_verdict
 
     def set_process_priority(self, pid: int, nice_level: int = 10):
         """Set process priority (nice level / Windows priority class)."""
@@ -583,21 +604,21 @@ class ResourceThrottler:
                     process.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
                 else:
                     process.nice(psutil.NORMAL_PRIORITY_CLASS)
-                print(f"Set process {pid} to Windows priority class (nice={nice_level})")
+                optimizarr_logger.app_logger.info(f"Set process {pid} to Windows priority class (nice={nice_level})")
             else:
                 process.nice(nice_level)
-                print(f"Set process {pid} nice level to {nice_level}")
+                optimizarr_logger.app_logger.info(f"Set process {pid} nice level to {nice_level}")
         except Exception as e:
-            print(f"Error setting process priority: {e}")
+            optimizarr_logger.app_logger.error(f"Error setting process priority: {e}")
 
     def set_cpu_affinity(self, pid: int, cpu_list: List[int]):
         """Set CPU affinity for a process."""
         try:
             process = psutil.Process(pid)
             process.cpu_affinity(cpu_list)
-            print(f"Set process {pid} CPU affinity to cores: {cpu_list}")
+            optimizarr_logger.app_logger.info(f"Set process {pid} CPU affinity to cores: {cpu_list}")
         except Exception as e:
-            print(f"Error setting CPU affinity: {e}")
+            optimizarr_logger.app_logger.error(f"Error setting CPU affinity: {e}")
 
 
 # Global instances

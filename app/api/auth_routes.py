@@ -1,50 +1,58 @@
 """
 Authentication API routes for Optimizarr.
 """
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from typing import Dict
 
 from app.api.models import LoginRequest, LoginResponse, UserResponse, MessageResponse, ChangePasswordRequest
-from app.api.dependencies import get_current_user, get_current_admin_user
-from app.auth import auth
+from app.api.dependencies import get_current_user
+from app.auth import auth, login_limiter
 from app.database import db
 
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
 
 
+def _client_key(request: Request) -> str:
+    return request.client.host if request.client else "unknown"
+
+
 @router.post("/login", response_model=LoginResponse)
-async def login(credentials: LoginRequest):
+def login(credentials: LoginRequest, request: Request):
     """
     Authenticate user and return JWT token.
-    
-    Args:
-        credentials: Username and password
-        
-    Returns:
-        Access token and user info
-        
-    Raises:
-        HTTPException: If authentication fails
+
+    Failed attempts are throttled per client address (5 per 15 minutes) so
+    the password can't be brute-forced. Sync handler: bcrypt is deliberately
+    slow and must not block the event loop.
     """
-    # Authenticate user
+    client = _client_key(request)
+    retry = login_limiter.retry_after(client)
+    if retry:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Too many failed logins. Try again in {retry // 60 + 1} minute(s).",
+            headers={"Retry-After": str(retry)},
+        )
+
     user = auth.authenticate_user(credentials.username, credentials.password)
-    
+
     if not user:
+        login_limiter.record_failure(client)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
-    # Generate access token
+    login_limiter.reset(client)
+
     access_token = auth.create_access_token(
         user_id=user['id'],
         username=user['username'],
-        is_admin=user['is_admin']
+        is_admin=user['is_admin'],
+        token_version=user.get('token_version') or 0,
     )
-    
-    # Return token and user info
+
     return LoginResponse(
         access_token=access_token,
         token_type="bearer",
@@ -59,16 +67,8 @@ async def login(credentials: LoginRequest):
 
 
 @router.get("/me", response_model=UserResponse)
-async def get_current_user_info(current_user: Dict = Depends(get_current_user)):
-    """
-    Get current authenticated user's information.
-    
-    Args:
-        current_user: Injected current user from token
-        
-    Returns:
-        User information
-    """
+def get_current_user_info(current_user: Dict = Depends(get_current_user)):
+    """Get current authenticated user's information."""
     return UserResponse(
         id=current_user['id'],
         username=current_user['username'],
@@ -79,68 +79,58 @@ async def get_current_user_info(current_user: Dict = Depends(get_current_user)):
     )
 
 
+@router.post("/stream-token")
+def stream_token(current_user: Dict = Depends(get_current_user)):
+    """Short-lived token for the progress EventSource URL.
+
+    EventSource can't send an Authorization header, so the token travels in
+    the query string — where proxies and logs keep it. Handing out a
+    one-minute, stream-only token means a leaked URL is worthless.
+    """
+    return {"token": auth.create_stream_token(current_user)}
+
+
 @router.post("/logout", response_model=MessageResponse)
-async def logout(current_user: Dict = Depends(get_current_user)):
-    """
-    Logout current user (client should discard token).
-    
-    Args:
-        current_user: Injected current user from token
-        
-    Returns:
-        Success message
-    """
-    # In a JWT-based system, logout is primarily client-side
-    # The client should discard the token
-    # We could optionally add the token to a blacklist here
-    
+def logout(current_user: Dict = Depends(get_current_user)):
+    """Logout current user (client should discard token)."""
+    # JWT logout is client-side; changing the password revokes all tokens.
     return MessageResponse(
         message="Logged out successfully. Please discard your token."
     )
 
 
-@router.post("/change-password", response_model=MessageResponse)
-async def change_password(
+@router.post("/change-password")
+def change_password(
     request: ChangePasswordRequest,
     current_user: Dict = Depends(get_current_user)
 ):
     """
     Change current user's password.
-    
-    Args:
-        request: Current and new passwords
-        current_user: Injected current user from token
-        
-    Returns:
-        Success message
-        
-    Raises:
-        HTTPException: If current password is incorrect
+
+    Revokes every token issued before the change (other browsers/devices
+    are signed out) and returns a fresh token for this session.
     """
-    # Get user with password hash from database
     user = db.get_user(current_user['id'])
     if not user:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found"
         )
-    
-    # Verify current password
+
     if not auth.verify_password(request.current_password, user['password_hash']):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Current password is incorrect"
         )
-    
-    # Hash new password
-    new_password_hash = auth.hash_password(request.new_password)
-    
-    # Update password in database and clear must_change_password flag
-    with db.get_connection() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE users SET password_hash = ?, must_change_password = 0 WHERE id = ?",
-            (new_password_hash, current_user['id'])
-        )
-    
-    return MessageResponse(message="Password changed successfully")
+
+    db.set_user_password(user['id'], auth.hash_password(request.new_password))
+    user = db.get_user(user['id'])
+
+    return {
+        "message": "Password changed successfully",
+        "success": True,
+        "access_token": auth.create_access_token(
+            user_id=user['id'], username=user['username'],
+            is_admin=user['is_admin'], token_version=user.get('token_version') or 0,
+        ),
+    }

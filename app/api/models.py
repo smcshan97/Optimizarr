@@ -16,7 +16,7 @@ LIBRARY_TYPES = {
         "description": "Feature films, documentaries",
         "icon": "🎬",
         "recommended": {
-            "codec": "av1", "encoder": "svt_av1", "quality": 28,
+            "codec": "av1", "encoder": "svt_av1_10bit", "quality": 28,
             "preset": "6", "container": "mkv", "audio_codec": "opus"
         }
     },
@@ -25,7 +25,7 @@ LIBRARY_TYPES = {
         "description": "Series, sitcoms, episodic content",
         "icon": "📺",
         "recommended": {
-            "codec": "av1", "encoder": "svt_av1", "quality": 32,
+            "codec": "av1", "encoder": "svt_av1_10bit", "quality": 32,
             "preset": "10", "container": "mkv", "audio_codec": "aac"
         }
     },
@@ -34,7 +34,7 @@ LIBRARY_TYPES = {
         "description": "Japanese animation",
         "icon": "🎌",
         "recommended": {
-            "codec": "av1", "encoder": "svt_av1", "quality": 26,
+            "codec": "av1", "encoder": "svt_av1_10bit", "quality": 26,
             "preset": "6", "container": "mkv", "audio_codec": "opus"
         }
     },
@@ -43,7 +43,7 @@ LIBRARY_TYPES = {
         "description": "Personal recordings, family videos",
         "icon": "🎥",
         "recommended": {
-            "codec": "h265", "encoder": "x265", "quality": 20,
+            "codec": "h265", "encoder": "x265_10bit", "quality": 20,
             "preset": "medium", "container": "mp4", "audio_codec": "aac"
         }
     },
@@ -52,7 +52,7 @@ LIBRARY_TYPES = {
         "description": "Ultra HD, 4K movies/shows",
         "icon": "🖥️",
         "recommended": {
-            "codec": "av1", "encoder": "svt_av1", "quality": 32,
+            "codec": "av1", "encoder": "svt_av1_10bit", "quality": 32,
             "preset": "8", "container": "mkv", "audio_codec": "opus"
         }
     },
@@ -61,7 +61,7 @@ LIBRARY_TYPES = {
         "description": "Downloaded web videos, streams",
         "icon": "🌐",
         "recommended": {
-            "codec": "av1", "encoder": "svt_av1", "quality": 35,
+            "codec": "av1", "encoder": "svt_av1_10bit", "quality": 35,
             "preset": "12", "container": "mp4", "audio_codec": "aac"
         }
     },
@@ -70,7 +70,7 @@ LIBRARY_TYPES = {
         "description": "Long-term storage, near-lossless",
         "icon": "📦",
         "recommended": {
-            "codec": "h265", "encoder": "x265", "quality": 18,
+            "codec": "h265", "encoder": "x265_10bit", "quality": 18,
             "preset": "slow", "container": "mkv", "audio_codec": "passthrough"
         }
     },
@@ -79,7 +79,7 @@ LIBRARY_TYPES = {
         "description": "Music content, concerts",
         "icon": "🎵",
         "recommended": {
-            "codec": "av1", "encoder": "svt_av1", "quality": 26,
+            "codec": "av1", "encoder": "svt_av1_10bit", "quality": 26,
             "preset": "6", "container": "mkv", "audio_codec": "opus"
         }
     },
@@ -107,13 +107,23 @@ class ProfileCreate(BaseModel):
     container: str = Field(default="mkv", pattern="^(mkv|mp4|webm)$")
     audio_handling: str = Field(default="preserve_all", pattern="^(preserve_all|keep_primary|stereo_mixdown|hd_plus_aac|high_quality)$")
     subtitle_handling: str = Field(default="none", pattern="^(preserve_all|keep_english|burn_in|foreign_scan|none)$")
-    enable_filters: bool = False
+    enable_filters: bool = False   # deinterlace + auto-crop
+    denoise: bool = False          # NLMeans light; ~2.7x slower encodes
     chapter_markers: bool = True
     hw_accel_enabled: bool = False
     preset: Optional[str] = None
-    two_pass: bool = False
+    two_pass: bool = False  # no effect: HandBrake multi-pass needs a bitrate target
     custom_args: Optional[str] = None
     is_default: bool = False
+    # Film-grain mode: 0 = off. SVT-AV1 synthesises grain at this strength
+    # (1-50) instead of spending bits on it; x265 switches to --tune grain.
+    film_grain: int = Field(default=0, ge=0, le=50)
+    # Target quality: 0 = off (fixed `quality`); otherwise the VMAF score to
+    # aim for — the quality value is searched per file (see target_quality).
+    target_vmaf: float = Field(default=0, ge=0, le=99.5)
+    # Video bitrate ceiling in kbps: 0 = none. Sources above it don't meet
+    # the profile, and the encoder caps its output to it.
+    max_bitrate_kbps: int = Field(default=0, ge=0, le=500000)
     # AI upscale settings
     upscale_enabled: bool = False
     upscale_trigger_below: int = 720
@@ -143,12 +153,16 @@ class ProfileResponse(BaseModel):
     audio_handling: Optional[str] = "preserve_all"
     subtitle_handling: Optional[str] = "none"
     enable_filters: Optional[bool] = False
+    denoise: Optional[bool] = False
     chapter_markers: Optional[bool] = True
     hw_accel_enabled: Optional[bool] = False
     preset: Optional[str]
     two_pass: bool
     custom_args: Optional[str]
     is_default: bool
+    film_grain: Optional[int] = 0
+    target_vmaf: Optional[float] = 0
+    max_bitrate_kbps: Optional[int] = 0
     created_at: Optional[str]
     # AI upscale settings
     upscale_enabled: Optional[bool] = False
@@ -191,6 +205,9 @@ class ScanRootCreate(BaseModel):
     stereo_divergence: float = Field(default=2.0, ge=0.0, le=5.0)
     stereo_convergence: float = Field(default=0.5, ge=0.0, le=1.0)
     stereo_depth_model: str = "Any_V2_S"
+    # Move loose videos and their companion files (funscripts, subtitles,
+    # art) into a folder named after the video — see app/organizer.py.
+    organize_companions: bool = False
 
 
 class ScanRootResponse(BaseModel):
@@ -215,6 +232,9 @@ class ScanRootResponse(BaseModel):
     stereo_divergence: Optional[float] = 2.0
     stereo_convergence: Optional[float] = 0.5
     stereo_depth_model: Optional[str] = "Any_V2_S"
+    organize_companions: Optional[bool] = False
+    # Set when Sonarr/Radarr manage this library (organizer stays off)
+    external_connection_id: Optional[int] = None
     # Folder-watch state (eye toggle)
     watch_enabled: Optional[bool] = False
     watch_id: Optional[int] = None
@@ -249,6 +269,7 @@ class QueueItemResponse(BaseModel):
     created_at: Optional[str]
     upscale_plan: Optional[str] = None
     stereo_plan: Optional[str] = None
+    notice: Optional[str] = None
 
 
 class QueueUpdateRequest(BaseModel):
@@ -285,7 +306,7 @@ class UserResponse(BaseModel):
 
 class ChangePasswordRequest(BaseModel):
     current_password: str = Field(..., min_length=1)
-    new_password: str = Field(..., min_length=6)
+    new_password: str = Field(..., min_length=8)
 
 
 # ============================================================

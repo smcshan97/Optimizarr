@@ -41,18 +41,18 @@ git remote -v
 ./test_api.sh
 
 # Manual health check
-curl http://localhost:5000/api/health
+curl http://localhost:5757/api/health
 
 # Login and get token
-curl -X POST http://localhost:5000/api/auth/login \
+curl -X POST http://localhost:5757/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"admin","password":"admin"}'
 
 # Use token (replace YOUR_TOKEN)
 TOKEN="YOUR_TOKEN_HERE"
-curl -H "Authorization: Bearer $TOKEN" http://localhost:5000/api/profiles
-curl -H "Authorization: Bearer $TOKEN" http://localhost:5000/api/stats
-curl -H "Authorization: Bearer $TOKEN" http://localhost:5000/api/queue
+curl -H "Authorization: Bearer $TOKEN" http://localhost:5757/api/profiles
+curl -H "Authorization: Bearer $TOKEN" http://localhost:5757/api/stats
+curl -H "Authorization: Bearer $TOKEN" http://localhost:5757/api/queue
 ```
 
 ## 📦 Dependencies
@@ -96,7 +96,7 @@ nano .env
 # Set OPTIMIZARR_SECRET_KEY=<generated-key>
 
 # Change admin password via API
-curl -X POST http://localhost:5000/api/auth/change-password \
+curl -X POST http://localhost:5757/api/auth/change-password \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -107,23 +107,24 @@ curl -X POST http://localhost:5000/api/auth/change-password \
 
 ## 🐛 Troubleshooting
 
-```bash
+```powershell
 # Check if server is running
-ps aux | grep "python.*app.main"
+Get-Process python -ErrorAction SilentlyContinue |
+  Where-Object { $_.CommandLine -like "*app.main*" }
 
-# Find process on port 5000
-lsof -i :5000
-netstat -tlnp | grep 5000
+# Find what owns port 5757 (port collisions with containers are the usual cause)
+Get-NetTCPConnection -LocalPort 5757 -State Listen |
+  ForEach-Object { Get-Process -Id $_.OwningProcess }
 
 # Kill server
-pkill -f "python.*app.main"
+Get-Process python | Where-Object { $_.CommandLine -like "*app.main*" } | Stop-Process
 
 # View logs
-tail -f optimizarr_server.log
+Get-Content optimizarr_server.log -Wait -Tail 50
 
 # Clear Python cache
-find . -type d -name __pycache__ -exec rm -rf {} +
-find . -type f -name "*.pyc" -delete
+Get-ChildItem -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force
+Get-ChildItem -Recurse -Filter *.pyc | Remove-Item -Force
 ```
 
 ## 📊 API Endpoints Quick Reference
@@ -166,16 +167,16 @@ GET    /docs                        # API documentation
 
 ```bash
 # Web Interface
-http://localhost:5000
+http://localhost:5757
 
 # Login Page
-http://localhost:5000/login
+http://localhost:5757/login
 
 # API Documentation
-http://localhost:5000/docs
+http://localhost:5757/docs
 
 # API Base
-http://localhost:5000/api
+http://localhost:5757/api
 ```
 
 ## 🔍 Examples
@@ -183,7 +184,7 @@ http://localhost:5000/api
 ### Create Profile via API
 
 ```bash
-curl -X POST http://localhost:5000/api/profiles \
+curl -X POST http://localhost:5757/api/profiles \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -200,7 +201,7 @@ curl -X POST http://localhost:5000/api/profiles \
 ### Add Scan Root via API
 
 ```bash
-curl -X POST http://localhost:5000/api/scan-roots \
+curl -X POST http://localhost:5757/api/scan-roots \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -214,14 +215,14 @@ curl -X POST http://localhost:5000/api/scan-roots \
 ### Trigger Media Scan
 
 ```bash
-curl -X POST http://localhost:5000/api/queue/scan \
+curl -X POST http://localhost:5757/api/queue/scan \
   -H "Authorization: Bearer $TOKEN"
 ```
 
 ### Start Encoding
 
 ```bash
-curl -X POST http://localhost:5000/api/control/start \
+curl -X POST http://localhost:5757/api/control/start \
   -H "Authorization: Bearer $TOKEN"
 ```
 

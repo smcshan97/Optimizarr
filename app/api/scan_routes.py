@@ -33,7 +33,7 @@ async def list_scan_roots(current_user: dict = Depends(get_current_user)):
 
 
 @router.post("/scan-roots", response_model=ScanRootResponse, status_code=status.HTTP_201_CREATED)
-async def create_scan_root(
+def create_scan_root(
     scan_root: ScanRootCreate,
     current_user: dict = Depends(get_current_admin_user)
 ):
@@ -52,6 +52,13 @@ async def create_scan_root(
             upscale_model=scan_root.upscale_model,
             upscale_factor=scan_root.upscale_factor,
             upscale_key=scan_root.upscale_key,
+            stereo_enabled=scan_root.stereo_enabled,
+            stereo_mode=scan_root.stereo_mode,
+            stereo_format=scan_root.stereo_format,
+            stereo_divergence=scan_root.stereo_divergence,
+            stereo_convergence=scan_root.stereo_convergence,
+            stereo_depth_model=scan_root.stereo_depth_model,
+            organize_companions=scan_root.organize_companions,
         )
         roots = db.get_scan_roots()
         created_root = next((r for r in roots if r['id'] == root_id), None)
@@ -64,7 +71,7 @@ async def create_scan_root(
 
 
 @router.delete("/scan-roots/{root_id}", response_model=MessageResponse)
-async def delete_scan_root(
+def delete_scan_root(
     root_id: int,
     current_user: dict = Depends(get_current_admin_user)
 ):
@@ -81,7 +88,7 @@ async def delete_scan_root(
 
 
 @router.get("/scan-roots/{root_id}")
-async def get_scan_root(
+def get_scan_root(
     root_id: int,
     current_user: dict = Depends(get_current_user)
 ):
@@ -98,7 +105,7 @@ async def get_scan_root(
 
 
 @router.put("/scan-roots/{root_id}", response_model=MessageResponse)
-async def update_scan_root(
+def update_scan_root(
     root_id: int,
     root_data: ScanRootCreate,
     current_user: dict = Depends(get_current_admin_user)
@@ -133,6 +140,7 @@ async def update_scan_root(
         stereo_divergence=root_data.stereo_divergence,
         stereo_convergence=root_data.stereo_convergence,
         stereo_depth_model=root_data.stereo_depth_model,
+        organize_companions=root_data.organize_companions,
     )
     
     if success:
@@ -145,7 +153,7 @@ async def update_scan_root(
 
 
 @router.post("/scan-roots/{root_id}/watch", response_model=MessageResponse)
-async def toggle_scan_root_watch(
+def toggle_scan_root_watch(
     root_id: int,
     data: dict,
     current_user: dict = Depends(get_current_admin_user)
@@ -193,7 +201,7 @@ async def toggle_scan_root_watch(
 
 
 @router.post("/scan-roots/{root_id}/scan", response_model=MessageResponse)
-async def scan_single_root(
+def scan_single_root(
     root_id: int,
     current_user: dict = Depends(get_current_user)
 ):

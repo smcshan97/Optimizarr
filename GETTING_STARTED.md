@@ -32,11 +32,11 @@ Edit `.env` and set:
 python -m app.main
 ```
 
-The server will start on `http://localhost:5000`
+The server will start on `http://localhost:5757`
 
 ### 5. Access the Web Interface
 
-Open your browser to: `http://localhost:5000`
+Open your browser to: `http://localhost:5757`
 
 **Default credentials:**
 - Username: `admin`
@@ -46,7 +46,7 @@ Open your browser to: `http://localhost:5000`
 
 ## API Documentation
 
-Once running, visit `http://localhost:5000/docs` for interactive API documentation (Swagger UI).
+Once running, visit `http://localhost:5757/docs` for interactive API documentation (Swagger UI).
 
 ## Basic Workflow
 
@@ -57,7 +57,7 @@ Once running, visit `http://localhost:5000/docs` for interactive API documentati
 
 **Via API:**
 ```bash
-curl -X POST http://localhost:5000/api/profiles \
+curl -X POST http://localhost:5757/api/profiles \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -78,7 +78,7 @@ curl -X POST http://localhost:5000/api/profiles \
 
 **Via API:**
 ```bash
-curl -X POST http://localhost:5000/api/scan-roots \
+curl -X POST http://localhost:5757/api/scan-roots \
   -H "Authorization: Bearer YOUR_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -96,7 +96,7 @@ curl -X POST http://localhost:5000/api/scan-roots \
 
 **Via API:**
 ```bash
-curl -X POST http://localhost:5000/api/queue/scan \
+curl -X POST http://localhost:5757/api/queue/scan \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
@@ -107,7 +107,7 @@ curl -X POST http://localhost:5000/api/queue/scan \
 
 **Via API:**
 ```bash
-curl -X POST http://localhost:5000/api/control/start \
+curl -X POST http://localhost:5757/api/control/start \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 

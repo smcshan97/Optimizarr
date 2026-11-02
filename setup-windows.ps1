@@ -70,7 +70,7 @@ Write-Host ""
 Write-Host "To start Optimizarr:" -ForegroundColor White
 Write-Host "  python -m app.main" -ForegroundColor Yellow
 Write-Host ""
-Write-Host "Then open: http://localhost:5000" -ForegroundColor Cyan
+Write-Host "Then open: http://localhost:5757" -ForegroundColor Cyan
 Write-Host "Login: admin / admin" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "⚠️  IMPORTANT: Change admin password after first login!" -ForegroundColor Red

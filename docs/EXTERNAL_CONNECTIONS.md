@@ -84,19 +84,35 @@ GET /api/v3/episodefile?seriesId={id}
 ```
 
 **Register webhook (Sonarr/Radarr):**
+
+Sonarr/Radarr run in containers; Optimizarr runs natively on the Windows host.
+The callback URL must therefore resolve the *host* from inside the container —
+`host.docker.internal` — not an `optimizarr` service name on a shared Docker
+network. Use the host LAN IP instead if `host.docker.internal` is unavailable.
+
 ```
 POST /api/v3/notification
 {
   "name": "Optimizarr",
   "implementation": "Webhook",
   "fields": [
-    { "name": "url", "value": "http://optimizarr:5000/api/webhooks/sonarr" },
+    { "name": "url", "value": "http://host.docker.internal:5757/api/webhooks/sonarr?key=<webhook key>" },
     { "name": "method", "value": 1 }   // POST
   ],
   "onDownload": true,
   "onUpgrade": true
 }
 ```
+
+The receiver requires the webhook key (`?key=` or an `X-Optimizarr-Key`
+header) and rejects anything else with 401. `POST /api/connections/{id}/register-webhook`
+adds it for you (updating an existing Optimizarr notification in place); to
+copy the URLs manually, call `GET /api/webhooks/info` as an admin. Webhooks
+registered before the key existed are updated automatically at startup.
+
+The file path in the payload must also lie inside an **enabled scan root** —
+an encode replaces the original, so files outside your configured libraries
+are refused.
 
 ### `mediaInfo.videoCodec` mapping to Optimizarr codecs
 
